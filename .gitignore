@@ -117,6 +117,21 @@ ipython_config.py
 .pdm-python
 .pdm-build/
 
+# The monitor release artifact is part of the repository contract.
+!monitor/dist/
+!monitor/dist/**
+
+# Local test runtime state and secrets
+.runtime/
+testenv/
+
+# Local compiler metadata
+*.tsbuildinfo
+
+# Frontend dependencies/build output
+frontend/node_modules/
+frontend/.next/
+
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 # pixi.lock

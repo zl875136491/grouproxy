@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grouproxy-backend"
+version = "0.1.0"
+description = "Grouproxy control plane"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "beanie==1.29.0",
+  "fastapi==0.115.6",
+  "httpx==0.28.1",
+  "pydantic-settings==2.7.1",
+  "python-multipart==0.0.20",
+  "PyYAML==6.0.2",
+  "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.4",
+  "pytest-asyncio==0.25.2",
+  "ruff==0.9.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

@@ -1,0 +1,20 @@
+[Unit]
+Description=Grouproxy sing-box data plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grouproxy
+Group=grouproxy
+ExecStart=/opt/grouproxy/bin/sing-box run -c /opt/grouproxy/etc/sing-box.json
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/grouproxy/etc /opt/grouproxy/var
+
+[Install]
+WantedBy=multi-user.target
