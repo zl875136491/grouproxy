@@ -4,6 +4,7 @@ import { LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { hasManagementSession } from "../lib/api";
+import { usePreferences } from "../lib/preferences";
 import { Button } from "./ui";
 
 export function useManagementSession(): boolean | null {
@@ -17,14 +18,15 @@ export function useManagementSession(): boolean | null {
 }
 
 export function SessionGate() {
+  const { t } = usePreferences();
   return (
     <div className="session-gate">
       <LockKeyhole size={22} aria-hidden="true" />
       <div>
-        <h1>Sign in required</h1>
-        <p>Use a control-plane administrator account to load operational data.</p>
+        <h1>{t("Sign in required")}</h1>
+        <p>{t("Use a control-plane administrator account to load operational data.")}</p>
       </div>
-      <Link href="/login"><Button variant="primary">Sign in</Button></Link>
+      <Link href="/login"><Button variant="primary">{t("Sign in")}</Button></Link>
     </div>
   );
 }

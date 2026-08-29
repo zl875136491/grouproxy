@@ -1,4 +1,7 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { usePreferences } from "../lib/preferences";
 
 export function PageHeader({
   eyebrow,
@@ -11,12 +14,13 @@ export function PageHeader({
   description?: string;
   actions?: ReactNode;
 }) {
+  const { t } = usePreferences();
   return (
     <header className="page-header">
       <div>
-        {eyebrow ? <span className="page-eyebrow">{eyebrow}</span> : null}
-        <h1>{title}</h1>
-        {description ? <p>{description}</p> : null}
+        {eyebrow ? <span className="page-eyebrow">{t(eyebrow)}</span> : null}
+        <h1>{t(title)}</h1>
+        {description ? <p>{t(description)}</p> : null}
       </div>
       {actions ? <div className="page-actions">{actions}</div> : null}
     </header>

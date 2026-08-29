@@ -12,11 +12,87 @@ def utcnow() -> datetime:
 
 
 class AdminUser(Document):
+    """Management account keyed by the employee's immutable IT code.
+
+    ``username`` remains as a compatibility mirror for the original control
+    plane collection. New code must use ``itcode`` as the account identity.
+    """
+
     username: Indexed(str, unique=True)
+    itcode: str = ""
     password_hash: str
     is_active: bool = True
     auth_source: str = "local"
+    password_changed_at: datetime | None = None
+    last_login_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("itcode", ASCENDING)],
+                name="unique_admin_itcode",
+                unique=True,
+                sparse=True,
+            )
+        ]
+
+
+class AuthVerificationChallenge(Document):
+    """Short-lived, single-use GQuan verification challenge.
+
+    The code is deliberately stored only as a salted digest. The associated
+    app-token delivery result does not include raw One Login payloads.
+    """
+
+    challenge_id: Indexed(str, unique=True)
+    itcode: str
+    purpose: str
+    code_hash: str
+    status: str = "pending"
+    failed_attempts: int = 0
+    source_ip: str = ""
+    delivery_error: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+    resend_available_at: datetime
+    delivered_at: datetime | None = None
+    consumed_at: datetime | None = None
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("itcode", ASCENDING), ("purpose", ASCENDING), ("created_at", -1)],
+                name="verification_challenge_lookup",
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="verification_challenge_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
+
+
+class ManagementSession(Document):
+    """Opaque browser session; only a SHA-256 token digest is persisted."""
+
+    session_id: Indexed(str, unique=True)
+    token_hash: Indexed(str, unique=True)
+    user_id: str
+    itcode: str
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    last_seen_at: datetime | None = None
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="management_session_ttl",
+                expireAfterSeconds=0,
+            )
+        ]
 
 
 class Site(Document):
@@ -321,6 +397,8 @@ class BackupRecord(Document):
 
 DOCUMENT_MODELS: list[type[Document]] = [
     AdminUser,
+    AuthVerificationChallenge,
+    ManagementSession,
     Site,
     Node,
     SiteCIDR,

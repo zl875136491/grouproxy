@@ -6,27 +6,53 @@ proxy-port firewall policy. User traffic never traverses the control plane.
 
 ## Phase 0/1/2 Quickstart
 
-Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, MongoDB binaries, and
-the checked-in Linux amd64 sing-box binary.
+Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, access to the codedev
+MongoDB test database, and the checked-in Linux amd64 sing-box binary.
 
 ```bash
-./scripts/testenv-up.sh
+export GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<codedev-host>:<port>/?authSource=admin'
+export GROUPROXY_TEST_MONGODB_DATABASE='grouproxy_test'
+export GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>'
+GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-phase1.sh
 ./scripts/verify-phase2.sh
 ```
 
-The script starts an isolated MongoDB on `127.0.0.1:27018`, the backend on
+The script validates connectivity and authentication against the explicitly
+configured codedev MongoDB URI before it starts any local process. It does not
+start, reset, or shut down a local MongoDB process. It starts the backend on
 `127.0.0.1:8000`, the operations console on `http://127.0.0.1:3000`, and two
 local agent simulations:
 
 - `codedev` monitor + sing-box on `127.0.0.1:18080`, Clash API on `127.0.0.1:19090`
 - `nuc` monitor + sing-box on `127.0.0.1:18081`, Clash API on `127.0.0.1:19091`
 
-The test database, generated node tokens, state, and logs remain below the
-ignored `testenv/` directory. Stop the environment without removing evidence:
+Generated test credentials, state, and logs remain below the ignored
+`testenv/` directory. Stop the local processes without removing evidence:
 
 ```bash
 ./scripts/testenv-down.sh
+```
+
+The default test profile delivers verification codes through the real One
+Login GQuan APP API. Its APP Token is required at process start and is not
+written to `testenv/backend.env`, logs, or Git. Use the login page to complete
+a real verification flow. The deterministic authentication regression remains
+available only in an explicitly isolated stub profile:
+
+```bash
+GROUPROXY_TEST_GQUAN_DELIVERY_MODE=stub GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
+./scripts/verify-auth.sh
+```
+
+When changing GQuan mode for an existing shared-database test runtime, stop
+the local processes and reconfigure only the non-sensitive mode value. This
+preserves the one-time node tokens that the shared database cannot reveal:
+
+```bash
+./scripts/testenv-down.sh
+GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>' \
+  GROUPROXY_TESTENV_RECONFIGURE_GQUAN=1 ./scripts/testenv-up.sh
 ```
 
 Build the committed monitor artifact and checksum with:
@@ -57,6 +83,23 @@ visible for diagnosis but cannot be published.
   direct, and other traffic uses the selected subscription. Nodes never fetch
   routing data or subscription-provider URLs themselves.
 
+## Account Authentication
+
+The `/login` screen uses an `itcode` as the account identity. Password login,
+registration, password changes, and GQuan code login are backed by opaque,
+time-limited server sessions. New passwords use Argon2; pre-existing seeded
+password hashes are upgraded after a successful password login.
+
+- Registration, password changes, and GQuan login require a six-digit,
+  single-use verification code delivered with the documented One Login GQuan
+  APP Bearer token.
+- Verification codes are HMAC-digested, expire after a short interval, are
+  rate-limited per itcode and purpose, and lock after repeated failures. Raw
+  codes, APP tokens, and GQuan response bodies are not logged or audited.
+- Set `GROUPROXY_GQUAN_APP_TOKEN` in the backend environment. The default
+  test profile also uses a runtime-only APP Token and sends real GQuan
+  messages only after an operator requests a code from the login page.
+
 ## Deployment Boundary
 
 `codedev` is the only control plane. Both `codedev` and `nuc` are agent nodes
@@ -78,9 +121,9 @@ CI/CD automation.
 
 | Directory | Responsibility |
 | --- | --- |
-| `backend/` | FastAPI control plane, MongoDB documents, refresh worker |
+| `backend/` | FastAPI control plane, MongoDB documents, auth and refresh workers |
 | `frontend/` | Next.js operations dashboard |
 | `monitor/` | Go monitor, local routing data, runtime, and nftables |
 | `singbox/` | Pinned Linux amd64 sing-box executable |
 | `deploy/` | systemd units, employee setup, node installer |
-| `scripts/` | local development and Phase 0/1/2 validation |
+| `scripts/` | local development and Phase 0/1/2/auth validation |

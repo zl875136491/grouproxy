@@ -15,14 +15,20 @@ the CONNECT tunnel.
 From the repository root:
 
 ```bash
-./scripts/testenv-up.sh
+GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<host>:<port>/?authSource=admin' \
+  GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>' \
+  GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-phase1.sh
 ./scripts/verify-phase2.sh
 ./scripts/testenv-down.sh
 ```
 
-Runtime state, tokens, logs, and temporary MongoDB data are created under
-`testenv/` and ignored by Git.
+Runtime state, tokens, and logs are created under `testenv/` and ignored by
+Git. The test script uses the configured codedev MongoDB URI and never starts
+or shuts down MongoDB itself. It sends real GQuan verification codes only
+after an operator requests one from the login UI. For deterministic auth
+regression, use a separate runtime created with
+`GROUPROXY_TEST_GQUAN_DELIVERY_MODE=stub`, then run `scripts/verify-auth.sh`.
 
 ## Remote Node Installation
 

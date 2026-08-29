@@ -2,6 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type PropsWithChildren } from "react";
+import { PreferencesProvider } from "../lib/preferences";
 
 export function Providers({ children }: PropsWithChildren) {
   const [queryClient] = useState(
@@ -17,5 +18,5 @@ export function Providers({ children }: PropsWithChildren) {
       }),
   );
 
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  return <QueryClientProvider client={queryClient}><PreferencesProvider>{children}</PreferencesProvider></QueryClientProvider>;
 }

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Grouproxy control plane"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "argon2-cffi==23.1.0",
   "beanie==1.29.0",
   "fastapi==0.115.6",
   "httpx==0.28.1",

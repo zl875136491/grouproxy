@@ -12,6 +12,7 @@ import {
   type Node,
   type Site,
 } from "../lib/api";
+import { usePreferences } from "../lib/preferences";
 import { formatDate, label } from "../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../components/data-state";
 import { PageHeader } from "../components/page-header";
@@ -33,6 +34,7 @@ function siteState(site: Site, nodes: Node[]) {
 }
 
 export default function OverviewPage() {
+  const { t } = usePreferences();
   const session = useManagementSession();
   const overview = useQuery({ queryKey: ["overview"], queryFn: getOverview, enabled: session === true, refetchInterval: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, refetchInterval: 10_000 });
@@ -66,37 +68,37 @@ export default function OverviewPage() {
         eyebrow="OPERATIONS"
         title="Overview"
         description="Regional proxy state and deployment activity."
-        actions={<Link className="button button-primary button-md" href="/sites"><Network size={16} /> Manage policy</Link>}
+        actions={<Link className="button button-primary button-md" href="/sites"><Network size={16} /> {t("Manage policy")}</Link>}
       />
 
       {overviewData.drifted_nodes > 0 ? (
         <div className="alert-strip alert-danger" role="alert">
           <ShieldCheck size={18} />
-          <div><strong>{overviewData.drifted_nodes} node{overviewData.drifted_nodes === 1 ? "" : "s"} need attention</strong><span>Configuration or service state differs from the desired release.</span></div>
-          <Link href="/nodes">Review nodes <ArrowRight size={15} /></Link>
+          <div><strong>{t("{count} nodes need attention", { count: overviewData.drifted_nodes })}</strong><span>{t("Configuration or service state differs from the desired release.")}</span></div>
+          <Link href="/nodes">{t("Review nodes")} <ArrowRight size={15} /></Link>
         </div>
       ) : null}
 
-      <section className="metric-grid" aria-label="Control-plane summary">
-        <Panel className="metric-panel"><span>Nodes online</span><strong>{overviewData.online_nodes}<small> / {overviewData.nodes}</small></strong><em>Heartbeat state</em></Panel>
-        <Panel className="metric-panel"><span>Configuration in sync</span><strong>{overviewData.in_sync_nodes}<small> / {overviewData.nodes}</small></strong><em>Applied bundle matches</em></Panel>
-        <Panel className="metric-panel"><span>Drift or failure</span><strong>{overviewData.drifted_nodes}</strong><em>Requires operator review</em></Panel>
-        <Panel className="metric-panel"><span>Active deployments</span><strong>{activeReleases.length}</strong><em>{activeTasks.length} queued or running tasks</em></Panel>
+      <section className="metric-grid" aria-label={t("Control-plane summary")}>
+        <Panel className="metric-panel"><span>{t("Nodes online")}</span><strong>{overviewData.online_nodes}<small> / {overviewData.nodes}</small></strong><em>{t("Heartbeat state")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Configuration in sync")}</span><strong>{overviewData.in_sync_nodes}<small> / {overviewData.nodes}</small></strong><em>{t("Applied bundle matches")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Drift or failure")}</span><strong>{overviewData.drifted_nodes}</strong><em>{t("Requires operator review")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Active deployments")}</span><strong>{activeReleases.length}</strong><em>{t("{count} queued or running tasks", { count: activeTasks.length })}</em></Panel>
       </section>
 
       <section className="dashboard-grid dashboard-grid-primary">
         <Panel className="topology-panel">
-          <div className="panel-heading"><div><span className="panel-kicker">REGIONAL TOPOLOGY</span><h2>Control plane to edge sites</h2></div><Link href="/nodes">Node inventory <ArrowRight size={15} /></Link></div>
+          <div className="panel-heading"><div><span className="panel-kicker">{t("REGIONAL TOPOLOGY")}</span><h2>{t("Control plane to edge sites")}</h2></div><Link href="/nodes">{t("Node inventory")} <ArrowRight size={15} /></Link></div>
           <div className="topology-canvas">
-            <div className="topology-control"><span className="topology-control-icon"><ServerCog size={19} /></span><div><strong>codedev</strong><span>Control plane</span></div></div>
-            <div className="topology-branches" aria-label="Site topology">
+            <div className="topology-control"><span className="topology-control-icon"><ServerCog size={19} /></span><div><strong>codedev</strong><span>{t("Control plane")}</span></div></div>
+            <div className="topology-branches" aria-label={t("Site topology")}>
               {siteItems.map((site) => {
                 const siteNodes = nodesBySite.get(site.id) || [];
                 const state = siteState(site, siteNodes);
                 return (
                   <Link className="topology-site" href={`/sites/${site.slug}/cidrs`} key={site.id}>
                     <span className={`topology-dot topology-${state.replaceAll(" ", "-")}`} />
-                    <div><strong>{site.name}</strong><span>{siteNodes.length ? `${siteNodes.length} node${siteNodes.length === 1 ? "" : "s"}` : "No node enrolled"}</span></div>
+                    <div><strong>{t(site.name)}</strong><span>{siteNodes.length ? `${siteNodes.length} ${t(siteNodes.length === 1 ? "node" : "nodes")}` : t("No node enrolled")}</span></div>
                     <StatusBadge status={state} />
                   </Link>
                 );
@@ -106,10 +108,10 @@ export default function OverviewPage() {
         </Panel>
 
         <Panel className="activity-panel">
-          <div className="panel-heading"><div><span className="panel-kicker">DEPLOYMENT</span><h2>Recent releases</h2></div><Link href="/releases">View all <ArrowRight size={15} /></Link></div>
+          <div className="panel-heading"><div><span className="panel-kicker">{t("DEPLOYMENT")}</span><h2>{t("Recent releases")}</h2></div><Link href="/releases">{t("View all")} <ArrowRight size={15} /></Link></div>
           {releases.isLoading ? <LoadingState rows={3} /> : releases.isError ? <ErrorState error="Release history is unavailable." onRetry={() => void releases.refetch()} /> : releaseItems.length ? (
             <div className="activity-list">
-              {releaseItems.slice(0, 4).map((release) => <Link className="activity-row" href={`/releases?release=${release.release_id}`} key={release.release_id}><span className="activity-icon"><FileClock size={16} /></span><div><strong>{siteNames.get(release.site_id) || "Unknown site"}</strong><span>{release.stage.replaceAll("_", " ")} · {formatDate(release.created_at)}</span></div><StatusBadge status={release.status} /></Link>)}
+              {releaseItems.slice(0, 4).map((release) => <Link className="activity-row" href={`/releases?release=${release.release_id}`} key={release.release_id}><span className="activity-icon"><FileClock size={16} /></span><div><strong>{t(siteNames.get(release.site_id) || "Unknown site")}</strong><span>{t(release.stage.replaceAll("_", " "))} · {formatDate(release.created_at)}</span></div><StatusBadge status={release.status} /></Link>)}
             </div>
           ) : <EmptyState title="No releases yet" detail="Create a draft from a site policy workspace." />}
         </Panel>
@@ -117,12 +119,12 @@ export default function OverviewPage() {
 
       <section className="dashboard-grid dashboard-grid-secondary">
         <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">EDGE INVENTORY</span><h2>Node state</h2></div><Link href="/nodes">Open nodes <ArrowRight size={15} /></Link></div>
-          <div className="table-wrap"><table><thead><tr><th>Node</th><th>Liveness</th><th>Config</th><th>Service</th><th>Applied / desired</th></tr></thead><tbody>{nodeItems.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary">{siteNames.get(node.site_id) || node.site_id}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td>{node.applied_version} / {node.desired_version}</td></tr>)}</tbody></table></div>
+          <div className="panel-heading"><div><span className="panel-kicker">{t("EDGE INVENTORY")}</span><h2>{t("Node state")}</h2></div><Link href="/nodes">{t("Open nodes")} <ArrowRight size={15} /></Link></div>
+          <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Liveness")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Applied / desired")}</th></tr></thead><tbody>{nodeItems.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary">{t(siteNames.get(node.site_id) || node.site_id)}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td>{node.applied_version} / {node.desired_version}</td></tr>)}</tbody></table></div>
         </Panel>
         <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">TASK QUEUE</span><h2>Active work</h2></div><Link href="/tasks">Open queue <ArrowRight size={15} /></Link></div>
-          {tasks.isLoading ? <LoadingState rows={3} /> : tasks.isError ? <ErrorState error="Task queue is unavailable." onRetry={() => void tasks.refetch()} /> : activeTasks.length ? <div className="activity-list">{activeTasks.slice(0, 5).map((task) => <Link className="activity-row" href="/tasks" key={task.task_id}><span className="activity-icon"><Activity size={16} /></span><div><strong>{label(task.task_type)}</strong><span>{task.stage.replaceAll("_", " ")} · {task.progress}%</span></div><StatusBadge status={task.status} /></Link>)}</div> : <EmptyState title="No active tasks" detail="Queued and running jobs appear here." />}
+          <div className="panel-heading"><div><span className="panel-kicker">{t("TASK QUEUE")}</span><h2>{t("Active work")}</h2></div><Link href="/tasks">{t("Open queue")} <ArrowRight size={15} /></Link></div>
+          {tasks.isLoading ? <LoadingState rows={3} /> : tasks.isError ? <ErrorState error="Task queue is unavailable." onRetry={() => void tasks.refetch()} /> : activeTasks.length ? <div className="activity-list">{activeTasks.slice(0, 5).map((task) => <Link className="activity-row" href="/tasks" key={task.task_id}><span className="activity-icon"><Activity size={16} /></span><div><strong>{t(label(task.task_type))}</strong><span>{t(task.stage.replaceAll("_", " "))} · {task.progress}%</span></div><StatusBadge status={task.status} /></Link>)}</div> : <EmptyState title="No active tasks" detail="Queued and running jobs appear here." />}
         </Panel>
       </section>
     </div>

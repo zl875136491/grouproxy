@@ -13,6 +13,7 @@ import {
   previewCIDR,
   type CIDREntry,
 } from "../../../../lib/api";
+import { usePreferences } from "../../../../lib/preferences";
 import { ErrorState, LoadingState } from "../../../../components/data-state";
 import { PageHeader } from "../../../../components/page-header";
 import { SessionGate, useManagementSession } from "../../../../components/session-gate";
@@ -21,6 +22,7 @@ import { Button, ConfirmDialog, Panel, StatusBadge } from "../../../../component
 type Change = { action: "added" | "removed"; cidr: string };
 
 export default function SiteCIDRPage() {
+  const { t } = usePreferences();
   const params = useParams<{ slug: string }>();
   const router = useRouter();
   const session = useManagementSession();
@@ -96,23 +98,23 @@ export default function SiteCIDRPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="SITE POLICY" title={`${site.name} CIDRs`} description={`Policy revision v${site.config_revision} · HTTP :${site.http_port}`} actions={<Button variant="primary" onClick={() => draft.mutate()} disabled={draft.isPending}><FileDiff size={16} /> Create draft</Button>} />
+      <PageHeader eyebrow="SITE POLICY" title={t("{name} CIDRs", { name: t(site.name) })} description={t("Policy revision v{revision} · HTTP :{port}", { revision: site.config_revision, port: site.http_port })} actions={<Button variant="primary" onClick={() => draft.mutate()} disabled={draft.isPending}><FileDiff size={16} /> {t("Create draft")}</Button>} />
       {mutationError ? <div className="inline-error" role="alert">{mutationError instanceof Error ? mutationError.message : "The policy change was not accepted."}</div> : null}
       <section className="policy-grid">
         <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">SOURCE ACCESS</span><h2>Site CIDRs</h2></div><Button size="sm" variant="secondary" onClick={() => setShowAdd((value) => !value)}><CirclePlus size={15} /> Add CIDR</Button></div>
-          {showAdd ? <form className="inline-form" onSubmit={submit}><label><span>CIDR</span><input autoFocus value={cidr} onChange={(event) => setCIDR(event.target.value)} placeholder="10.32.12.0/24" /></label><label><span>Comment</span><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Office network" /></label><Button variant="primary" type="submit" disabled={add.isPending}>{add.isPending ? "Adding..." : "Add"}</Button></form> : null}
-          <div className="table-wrap"><table><thead><tr><th>CIDR</th><th>Comment</th><th>State</th><th aria-label="Actions" /></tr></thead><tbody>{cidrItems.length ? cidrItems.map((entry) => <tr key={entry.id}><td className="mono">{entry.cidr}</td><td>{entry.comment || "-"}</td><td><StatusBadge status={entry.enabled ? "enabled" : "disabled"} /></td><td><button className="row-icon-button row-icon-danger" aria-label={`Remove ${entry.cidr}`} title="Remove CIDR" onClick={() => setRemoveTarget(entry)}><Trash2 size={16} /></button></td></tr>) : <tr><td colSpan={4}><div className="table-empty">No site CIDRs configured.</div></td></tr>}</tbody></table></div>
-          {changes.length ? <div className="change-summary"><FileDiff size={16} /><span>{changes.length} local policy change{changes.length === 1 ? "" : "s"} included in the next draft.</span></div> : null}
+          <div className="panel-heading"><div><span className="panel-kicker">{t("SOURCE ACCESS")}</span><h2>{t("Site CIDRs")}</h2></div><Button size="sm" variant="secondary" onClick={() => setShowAdd((value) => !value)}><CirclePlus size={15} /> {t("Add CIDR")}</Button></div>
+          {showAdd ? <form className="inline-form" onSubmit={submit}><label><span>CIDR</span><input autoFocus value={cidr} onChange={(event) => setCIDR(event.target.value)} placeholder="10.32.12.0/24" /></label><label><span>{t("Comment")}</span><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder={t("Office network")} /></label><Button variant="primary" type="submit" disabled={add.isPending}>{add.isPending ? t("Adding...") : t("Add")}</Button></form> : null}
+          <div className="table-wrap"><table><thead><tr><th>CIDR</th><th>{t("Comment")}</th><th>{t("State")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{cidrItems.length ? cidrItems.map((entry) => <tr key={entry.id}><td className="mono">{entry.cidr}</td><td>{entry.comment || "-"}</td><td><StatusBadge status={entry.enabled ? "enabled" : "disabled"} /></td><td><button className="row-icon-button row-icon-danger" aria-label={t("Remove {value}", { value: entry.cidr })} title={t("Remove CIDR")} onClick={() => setRemoveTarget(entry)}><Trash2 size={16} /></button></td></tr>) : <tr><td colSpan={4}><div className="table-empty">{t("No site CIDRs configured.")}</div></td></tr>}</tbody></table></div>
+          {changes.length ? <div className="change-summary"><FileDiff size={16} /><span>{t("{count} local policy changes included in the next draft.", { count: changes.length })}</span></div> : null}
         </Panel>
         <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">POLICY TEST</span><h2>Source IP preview</h2></div><Network size={18} /></div>
-          <form className="preview-form" onSubmit={(event) => { event.preventDefault(); if (sourceIP.trim()) accessPreview.mutate(); }}><label><span>Source IP</span><input value={sourceIP} onChange={(event) => setSourceIP(event.target.value)} placeholder="10.32.12.111" /></label><Button type="submit" variant="secondary" disabled={accessPreview.isPending}><Search size={15} /> {accessPreview.isPending ? "Checking..." : "Check access"}</Button></form>
-          {accessPreview.error ? <div className="inline-error">{accessPreview.error instanceof Error ? accessPreview.error.message : "Invalid source IP."}</div> : null}
-          {preview ? <div className={`preview-result ${preview.allowed ? "preview-allow" : "preview-deny"}`}><div><StatusBadge status={preview.allowed ? "allowed" : "denied"} /><strong>{preview.allowed ? preview.matched_cidr : preview.reason.replaceAll("_", " ")}</strong></div><span>{preview.requires_auth ? "Site authentication is also required." : "CIDR is the current access boundary."}</span><code>{preview.effective_cidrs.join("\n") || "No effective CIDRs"}</code></div> : <div className="quiet-placeholder"><CheckCircle2 size={18} /> Enter an address to calculate the effective access policy.</div>}
+          <div className="panel-heading"><div><span className="panel-kicker">{t("POLICY TEST")}</span><h2>{t("Source IP preview")}</h2></div><Network size={18} /></div>
+          <form className="preview-form" onSubmit={(event) => { event.preventDefault(); if (sourceIP.trim()) accessPreview.mutate(); }}><label><span>{t("Source IP")}</span><input value={sourceIP} onChange={(event) => setSourceIP(event.target.value)} placeholder="10.32.12.111" /></label><Button type="submit" variant="secondary" disabled={accessPreview.isPending}><Search size={15} /> {accessPreview.isPending ? t("Checking...") : t("Check access")}</Button></form>
+          {accessPreview.error ? <div className="inline-error">{accessPreview.error instanceof Error ? t(accessPreview.error.message) : t("Invalid source IP.")}</div> : null}
+          {preview ? <div className={`preview-result ${preview.allowed ? "preview-allow" : "preview-deny"}`}><div><StatusBadge status={preview.allowed ? "allowed" : "denied"} /><strong>{preview.allowed ? preview.matched_cidr : t(preview.reason.replaceAll("_", " "))}</strong></div><span>{preview.requires_auth ? t("Site authentication is also required.") : t("CIDR is the current access boundary.")}</span><code>{preview.effective_cidrs.join("\n") || t("No effective CIDRs")}</code></div> : <div className="quiet-placeholder"><CheckCircle2 size={18} /> {t("Enter an address to calculate the effective access policy.")}</div>}
         </Panel>
       </section>
-      <ConfirmDialog open={Boolean(removeTarget)} onOpenChange={(open) => !open && setRemoveTarget(null)} title="Remove site CIDR" description={`Remove ${removeTarget?.cidr || "this CIDR"} from ${site.name}. The change remains local to the control plane until a release succeeds.`} confirmLabel="Remove CIDR" danger busy={remove.isPending} onConfirm={() => remove.mutate()} />
+      <ConfirmDialog open={Boolean(removeTarget)} onOpenChange={(open) => !open && setRemoveTarget(null)} title="Remove site CIDR" description={t("Remove {cidr} from {site}. The change remains local to the control plane until a release succeeds.", { cidr: removeTarget?.cidr || t("this CIDR"), site: t(site.name) })} confirmLabel="Remove CIDR" danger busy={remove.isPending} onConfirm={() => remove.mutate()} />
     </div>
   );
 }

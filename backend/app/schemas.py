@@ -5,13 +5,50 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    itcode: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=12, max_length=128)
 
 
 class LoginResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
+    itcode: str
+    expires_at: datetime
+
+
+class VerificationCodeRequest(BaseModel):
+    itcode: str = Field(min_length=2, max_length=64)
+    purpose: Literal["register", "password_change", "gquan_login"]
+
+
+class VerificationCodeResponse(BaseModel):
+    challenge_id: str
+    expires_at: datetime
+    resend_available_at: datetime
+
+
+class RegistrationRequest(BaseModel):
+    itcode: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=12, max_length=128)
+    challenge_id: str = Field(min_length=16, max_length=128)
+    verification_code: str = Field(pattern=r"^\d{6}$")
+
+
+class PasswordChangeRequest(BaseModel):
+    itcode: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=12, max_length=128)
+    challenge_id: str = Field(min_length=16, max_length=128)
+    verification_code: str = Field(pattern=r"^\d{6}$")
+
+
+class GQuanLoginRequest(BaseModel):
+    itcode: str = Field(min_length=2, max_length=64)
+    challenge_id: str = Field(min_length=16, max_length=128)
+    verification_code: str = Field(pattern=r"^\d{6}$")
+
+
+class AuthActionResponse(BaseModel):
+    status: Literal["ok"] = "ok"
 
 
 class SiteOut(BaseModel):

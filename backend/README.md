@@ -2,22 +2,33 @@
 
 The FastAPI application exposes separate management and agent surfaces:
 
-- `/api/v1/*` is used by the operations dashboard and requires the management
-  Bearer token.
+- `/api/v1/*` is used by the operations dashboard and accepts an opaque
+  browser session created by `/api/v1/auth/*`. The static management Bearer
+  token remains available for the existing local node-validation scripts.
 - `/agent/v1/*` is used by monitors and requires a node Bearer token. Desired
   Bundles are additionally protected by an HMAC.
 
-For the supported local environment, run the repository-level script. It
-creates isolated credentials and starts MongoDB before the API:
+For the supported test environment, configure the codedev MongoDB URI and run
+the repository-level script. It creates local runtime credentials but does not
+start MongoDB:
 
 ```bash
-./scripts/testenv-up.sh
+GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<host>:<port>/?authSource=admin' \
+  GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ```
 
 Outside that script, `GROUPROXY_BUNDLE_HMAC_SECRET`,
 `GROUPROXY_ADMIN_PASSWORD`, and `GROUPROXY_MANAGEMENT_TOKEN` are mandatory.
 The HTTP agent channel also requires an explicit
 `GROUPROXY_ALLOW_INSECURE_AGENT_HTTP=true` opt-in.
+
+For One Login verification delivery, configure
+`GROUPROXY_GQUAN_APP_TOKEN` with an approved APP Bearer token. The default API
+base is `https://one.1oa.com.cn/springboard/api/v1`; this is an outbound call
+to One Login, not a TLS listener in Grouproxy. The default test profile also
+uses the real APP API, accepting its token only as the runtime
+`GROUPROXY_TEST_GQUAN_APP_TOKEN` input. Do not place either token in the
+repository, audit records, browser configuration, or test fixture.
 
 Phase 0/1 covers sites, nodes, source CIDRs, travel and cross-site policy,
 drafts, releases, ACKs, tasks, and the audit hash chain. Phase 2 adds
@@ -37,3 +48,9 @@ scheduled for refresh. Refresh work uses an active-task partial unique index,
 lease recovery, backoff, cancellation, and dead-letter state. Publish and
 rollback derive stable per-site task keys from `Idempotency-Key`, so retries
 return the existing releases without overwriting rollback history.
+
+Authentication uses `itcode` as the primary account identity. Registration,
+password changes, and passwordless GQuan login all consume a single-use
+verification challenge. Challenges are rate-limited, HMAC-digested, and
+short-lived; browser access tokens are opaque server-side sessions and become
+invalid when the password changes.

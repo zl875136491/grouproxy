@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import secrets
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
@@ -30,6 +31,7 @@ from app.models import (
     DestinationBlacklist,
     HeartbeatLatest,
     HeartbeatSample,
+    ManagementSession,
     Node,
     Site,
     SiteCIDR,
@@ -48,6 +50,7 @@ from app.schemas import (
     AgentAckOut,
     AgentHeartbeat,
     AuditEventOut,
+    AuthActionResponse,
     CIDRCreate,
     CIDROut,
     CIDRPreviewRequest,
@@ -59,11 +62,14 @@ from app.schemas import (
     DestinationBlacklistOut,
     DraftCreate,
     DraftOut,
+    GQuanLoginRequest,
     LoginRequest,
     LoginResponse,
     NodeCreate,
     NodeCreateResponse,
     NodeOut,
+    PasswordChangeRequest,
+    RegistrationRequest,
     ReleaseCreate,
     ReleaseOut,
     SiteOut,
@@ -79,8 +85,25 @@ from app.schemas import (
     TaskOut,
     TravelExceptionCreate,
     TravelExceptionOut,
+    VerificationCodeRequest,
+    VerificationCodeResponse,
 )
 from app.services.audit import append_audit, verify_audit_chain
+from app.services.auth import (
+    AuthError,
+    consume_verification_code,
+    create_registered_user,
+    create_session,
+    find_user_by_itcode,
+    hash_password,
+    normalize_itcode,
+    request_verification_code,
+    resolve_session,
+    revoke_session_token,
+    revoke_user_sessions,
+    validate_password,
+    verify_password,
+)
 from app.services.bundles import create_desired_release, latest_release
 from app.services.cidr import effective_cidrs, match_source_ip, normalize_cidr, normalize_source_ip
 from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
@@ -100,9 +123,17 @@ DEFAULT_SITES = [
     ("central", "Central Region"),
 ]
 
+_management_actor: ContextVar[str] = ContextVar("management_actor", default="")
+
 
 def _settings() -> Settings:
     return get_settings()
+
+
+def _actor() -> str:
+    """Identity established by ``require_management`` for audit ownership."""
+
+    return _management_actor.get() or _settings().admin_username
 
 
 def _model_id(value: Any) -> str:
@@ -351,12 +382,19 @@ async def seed_defaults(settings: Settings) -> None:
                 await Site(
                     slug=slug, name=name, dns_note="Configure local DNS to this site node"
                 ).insert()
-    if not await AdminUser.find_one(AdminUser.username == settings.admin_username):
+    admin_itcode = normalize_itcode(settings.admin_username)
+    admin = await AdminUser.find_one(AdminUser.username == settings.admin_username)
+    if admin is None:
         await AdminUser(
             username=settings.admin_username,
-            password_hash=_hash_secret(settings.admin_password),
+            itcode=admin_itcode,
+            password_hash=hash_password(settings.admin_password),
             auth_source="local",
+            password_changed_at=utcnow(),
         ).insert()
+    elif not admin.itcode:
+        admin.itcode = admin_itcode
+        await admin.save()
 
 
 @asynccontextmanager
@@ -381,10 +419,11 @@ async def lifespan(app: FastAPI):
         await database.close()
 
 
-app = FastAPI(title="Grouproxy Control Plane", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Grouproxy Control Plane", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -412,11 +451,21 @@ async def require_management(request: Request) -> str:
     settings = _settings()
     authorization = request.headers.get("authorization", "")
     token = authorization.removeprefix("Bearer ").strip()
-    if not token or not hmac.compare_digest(token, settings.management_token):
+    if token and hmac.compare_digest(token, settings.management_token):
+        actor = normalize_itcode(settings.admin_username)
+        _management_actor.set(actor)
+        return actor
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
         )
-    return settings.admin_username
+    session = await resolve_session(token)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
+        )
+    _management_actor.set(session.itcode)
+    return session.itcode
 
 
 async def require_agent(request: Request) -> Node:
@@ -432,16 +481,258 @@ async def require_agent(request: Request) -> Node:
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_agent_token")
 
 
+def _request_id(request: Request) -> str:
+    return request.headers.get("x-request-id", "") or secrets.token_hex(16)
+
+
+def _request_source_ip(request: Request) -> str:
+    return request.client.host if request.client is not None else ""
+
+
+def _auth_http_error(error: AuthError) -> HTTPException:
+    status_code = {
+        "invalid_itcode": 422,
+        "invalid_password": 422,
+        "itcode_already_registered": 409,
+        "verification_code_rate_limited": 429,
+        "verification_code_attempts_exceeded": 429,
+        "gquan_quota_exceeded": 429,
+        "gquan_delivery_unavailable": 503,
+        "gquan_delivery_rejected": 503,
+        "gquan_stub_not_allowed": 503,
+        "gquan_test_code_not_configured": 503,
+    }.get(error.code, 401)
+    return HTTPException(status_code=status_code, detail=error.code)
+
+
+async def _audit_auth_failure(
+    *, request: Request, action: str, itcode: str, error: str
+) -> None:
+    await append_audit(
+        action=action,
+        target_type="admin_user",
+        target_id=itcode[:64],
+        actor=itcode[:64] or "anonymous",
+        actor_role="anonymous",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        result="failed",
+        error=error,
+    )
+
+
+def _session_response(token: str, session: ManagementSession) -> LoginResponse:
+    return LoginResponse(access_token=token, itcode=session.itcode, expires_at=session.expires_at)
+
+
+@app.post(
+    "/api/v1/auth/verification-codes",
+    response_model=VerificationCodeResponse,
+    status_code=202,
+)
+async def request_auth_verification_code(
+    payload: VerificationCodeRequest, request: Request
+) -> VerificationCodeResponse:
+    try:
+        itcode = normalize_itcode(payload.itcode)
+        existing = await find_user_by_itcode(itcode)
+        if payload.purpose == "register" and existing is not None:
+            raise AuthError("itcode_already_registered")
+        if payload.purpose != "register" and (existing is None or not existing.is_active):
+            raise AuthError("account_not_registered")
+        challenge = await request_verification_code(
+            itcode=itcode,
+            purpose=payload.purpose,
+            source_ip=_request_source_ip(request),
+            settings=_settings(),
+        )
+    except AuthError as exc:
+        await _audit_auth_failure(
+            request=request,
+            action="auth.verification.request",
+            itcode=payload.itcode.strip().casefold(),
+            error=exc.code,
+        )
+        raise _auth_http_error(exc) from exc
+    await append_audit(
+        action="auth.verification.request",
+        target_type="admin_user",
+        target_id=itcode,
+        actor=itcode,
+        actor_role="anonymous",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        after={"purpose": payload.purpose, "challenge_id": challenge.challenge_id},
+    )
+    return VerificationCodeResponse(
+        challenge_id=challenge.challenge_id,
+        expires_at=challenge.expires_at,
+        resend_available_at=challenge.resend_available_at,
+    )
+
+
+@app.post("/api/v1/auth/register", response_model=AuthActionResponse, status_code=201)
+async def register(payload: RegistrationRequest, request: Request) -> AuthActionResponse:
+    try:
+        itcode = normalize_itcode(payload.itcode)
+        validate_password(payload.password)
+        if await find_user_by_itcode(itcode):
+            raise AuthError("itcode_already_registered")
+        await consume_verification_code(
+            challenge_id=payload.challenge_id,
+            itcode=itcode,
+            purpose="register",
+            code=payload.verification_code,
+            settings=_settings(),
+        )
+        await create_registered_user(itcode=itcode, password=payload.password)
+    except AuthError as exc:
+        await _audit_auth_failure(
+            request=request,
+            action="auth.register",
+            itcode=payload.itcode.strip().casefold(),
+            error=exc.code,
+        )
+        raise _auth_http_error(exc) from exc
+    await append_audit(
+        action="auth.register",
+        target_type="admin_user",
+        target_id=itcode,
+        actor=itcode,
+        actor_role="anonymous",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        after={"itcode": itcode, "auth_source": "local"},
+    )
+    return AuthActionResponse()
+
+
+@app.post("/api/v1/auth/password/change", response_model=AuthActionResponse)
+async def change_password(payload: PasswordChangeRequest, request: Request) -> AuthActionResponse:
+    try:
+        itcode = normalize_itcode(payload.itcode)
+        validate_password(payload.password)
+        user = await find_user_by_itcode(itcode)
+        if user is None or not user.is_active:
+            raise AuthError("account_not_registered")
+        await consume_verification_code(
+            challenge_id=payload.challenge_id,
+            itcode=itcode,
+            purpose="password_change",
+            code=payload.verification_code,
+            settings=_settings(),
+        )
+        user.password_hash = hash_password(payload.password)
+        user.password_changed_at = utcnow()
+        await user.save()
+        await revoke_user_sessions(user)
+    except AuthError as exc:
+        await _audit_auth_failure(
+            request=request,
+            action="auth.password.change",
+            itcode=payload.itcode.strip().casefold(),
+            error=exc.code,
+        )
+        raise _auth_http_error(exc) from exc
+    await append_audit(
+        action="auth.password.change",
+        target_type="admin_user",
+        target_id=itcode,
+        actor=itcode,
+        actor_role="anonymous",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+    )
+    return AuthActionResponse()
+
+
 @app.post("/api/v1/auth/login", response_model=LoginResponse)
-async def login(payload: LoginRequest) -> LoginResponse:
-    settings = _settings()
-    if not hmac.compare_digest(
-        payload.username, settings.admin_username
-    ) or not hmac.compare_digest(
-        _hash_secret(payload.password), _hash_secret(settings.admin_password)
-    ):
-        raise HTTPException(status_code=401, detail="invalid_credentials")
-    return LoginResponse(access_token=settings.management_token)
+async def login(payload: LoginRequest, request: Request) -> LoginResponse:
+    try:
+        itcode = normalize_itcode(payload.itcode)
+        user = await find_user_by_itcode(itcode)
+        valid, needs_upgrade = (
+            verify_password(payload.password, user.password_hash) if user else (False, False)
+        )
+        if user is None or not user.is_active or not valid:
+            raise AuthError("invalid_credentials")
+        if needs_upgrade:
+            user.password_hash = hash_password(payload.password)
+            user.password_changed_at = utcnow()
+        user.last_login_at = utcnow()
+        await user.save()
+        token, session = await create_session(user, _settings())
+    except AuthError as exc:
+        await _audit_auth_failure(
+            request=request,
+            action="auth.login.password",
+            itcode=payload.itcode.strip().casefold(),
+            error=exc.code,
+        )
+        raise _auth_http_error(exc) from exc
+    await append_audit(
+        action="auth.login.password",
+        target_type="admin_user",
+        target_id=itcode,
+        actor=itcode,
+        actor_role="admin",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+    )
+    return _session_response(token, session)
+
+
+@app.post("/api/v1/auth/gquan/login", response_model=LoginResponse)
+async def gquan_login(payload: GQuanLoginRequest, request: Request) -> LoginResponse:
+    try:
+        itcode = normalize_itcode(payload.itcode)
+        user = await find_user_by_itcode(itcode)
+        if user is None or not user.is_active:
+            raise AuthError("account_not_registered")
+        await consume_verification_code(
+            challenge_id=payload.challenge_id,
+            itcode=itcode,
+            purpose="gquan_login",
+            code=payload.verification_code,
+            settings=_settings(),
+        )
+        user.last_login_at = utcnow()
+        await user.save()
+        token, session = await create_session(user, _settings())
+    except AuthError as exc:
+        await _audit_auth_failure(
+            request=request,
+            action="auth.login.gquan",
+            itcode=payload.itcode.strip().casefold(),
+            error=exc.code,
+        )
+        raise _auth_http_error(exc) from exc
+    await append_audit(
+        action="auth.login.gquan",
+        target_type="admin_user",
+        target_id=itcode,
+        actor=itcode,
+        actor_role="admin",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+    )
+    return _session_response(token, session)
+
+
+@app.post("/api/v1/auth/logout", response_model=AuthActionResponse)
+async def logout(request: Request, actor: str = Depends(require_management)) -> AuthActionResponse:
+    token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    await revoke_session_token(token)
+    await append_audit(
+        action="auth.logout",
+        target_type="admin_user",
+        target_id=actor,
+        actor=actor,
+        actor_role="admin",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+    )
+    return AuthActionResponse()
 
 
 @app.get("/api/v1/sites", response_model=list[SiteOut])
@@ -465,7 +756,7 @@ async def set_shutdown(
         action="site.shutdown" if site.shutdown else "site.restore",
         target_type="site",
         target_id=site_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         before=before,
         after={"shutdown": site.shutdown},
     )
@@ -498,7 +789,7 @@ async def create_node(
         action="node.create",
         target_type="node",
         target_id=node.agent_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={
             "site_id": node.site_id,
             "name": node.name,
@@ -542,7 +833,7 @@ async def add_cidr(
         cidr=cidr,
         comment=payload.comment,
         enabled=payload.enabled,
-        created_by=_settings().admin_username,
+        created_by=_actor(),
     )
     await entry.insert()
     site.config_revision += 1
@@ -551,7 +842,7 @@ async def add_cidr(
         action="cidr.create",
         target_type="site_cidr",
         target_id=_model_id(entry),
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={"site_id": site_id, "cidr": cidr, "comment": payload.comment},
     )
     return CIDROut(
@@ -577,7 +868,7 @@ async def delete_cidr(site_id: str, cidr_id: str, _: str = Depends(require_manag
         action="cidr.delete",
         target_type="site_cidr",
         target_id=cidr_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         before={"site_id": site_id, "cidr": entry.cidr},
     )
 
@@ -634,7 +925,7 @@ async def create_exception(
         owner=payload.owner,
         expires_at=payload.expires_at,
         enabled=payload.enabled,
-        created_by=_settings().admin_username,
+        created_by=_actor(),
     )
     await item.insert()
     await _increment_all_site_revisions()
@@ -642,7 +933,7 @@ async def create_exception(
         action="exception.create",
         target_type="travel_exception",
         target_id=_model_id(item),
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={"cidr": cidr, "expires_at": item.expires_at.isoformat(), "enabled": item.enabled},
     )
     return _exception_out(item)
@@ -661,7 +952,7 @@ async def delete_exception(
         action="exception.delete",
         target_type="travel_exception",
         target_id=exception_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         before={"cidr": item.cidr, "expires_at": item.expires_at.isoformat()},
     )
 
@@ -706,7 +997,7 @@ async def set_cross_site(
         action="cross_site.update",
         target_type="cross_site_allow",
         target_id=_model_id(relation),
-        actor=_settings().admin_username,
+        actor=_actor(),
         before=before,
         after={"from_site_id": from_site_id, "to_site_id": to_site_id, "enabled": relation.enabled},
     )
@@ -755,7 +1046,7 @@ async def add_blacklist(
         action="blacklist.create",
         target_type="destination_blacklist",
         target_id=_model_id(item),
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={"pattern": item.pattern, "kind": item.kind, "enabled": item.enabled},
     )
     return _blacklist_out(item)
@@ -772,7 +1063,7 @@ async def delete_blacklist(entry_id: str, _: str = Depends(require_management)) 
         action="blacklist.delete",
         target_type="destination_blacklist",
         target_id=entry_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         before={"pattern": item.pattern, "kind": item.kind},
     )
 
@@ -826,13 +1117,13 @@ async def create_subscription_source(
         fetch_interval_sec=payload.fetch_interval_sec,
         max_body_bytes=min(payload.max_body_bytes, settings.subscription_max_body_bytes),
         redirect_limit=payload.redirect_limit,
-        created_by=settings.admin_username,
+        created_by=_actor(),
     )
     await source.insert()
     request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
     task, merged = await enqueue_refresh_task(
         source=source,
-        created_by=settings.admin_username,
+        created_by=_actor(),
         idempotency_key=idempotency_key_header,
         request_id=request_id,
     )
@@ -840,7 +1131,7 @@ async def create_subscription_source(
         action="subscription_source.create",
         target_type="subscription_source",
         target_id=_model_id(source),
-        actor=settings.admin_username,
+        actor=_actor(),
         request_id=request_id,
         after={
             "name": source.name,
@@ -873,7 +1164,7 @@ async def upload_subscription(
         name=clean_name,
         url="",
         max_body_bytes=settings.subscription_max_body_bytes,
-        created_by=settings.admin_username,
+        created_by=_actor(),
     )
     await source.insert()
     content = await _read_subscription_upload(file, source.max_body_bytes)
@@ -887,7 +1178,7 @@ async def upload_subscription(
         action="subscription.upload",
         target_type="subscription_version",
         target_id=_model_id(version),
-        actor=settings.admin_username,
+        actor=_actor(),
         after={
             "source_id": _model_id(source),
             "content_hash": version.content_hash,
@@ -919,7 +1210,7 @@ async def refresh_subscription(
     request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
     task, merged = await enqueue_refresh_task(
         source=source,
-        created_by=_settings().admin_username,
+        created_by=_actor(),
         idempotency_key=idempotency_key_header,
         request_id=request_id,
     )
@@ -947,7 +1238,7 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
         diff=payload.diff,
         validation=validation,
         risk_level=risk,
-        created_by=_settings().admin_username,
+        created_by=_actor(),
         expires_at=utcnow() + timedelta(hours=24),
     )
     await draft.insert()
@@ -955,7 +1246,7 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
         action="config_draft.create",
         target_type="config_draft",
         target_id=_model_id(draft),
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={"site_id": payload.site_id, "risk_level": risk, "diff": payload.diff},
     )
     return _draft_out(draft)
@@ -1098,7 +1389,7 @@ async def create_release(
         expected_current_version=payload.expected_current_version,
         idempotency_key=idem,
         request_id=request_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
     )
     return _release_out(release)
 
@@ -1306,7 +1597,7 @@ async def publish_subscription_version(
         version=version,
         sites=target_sites,
         request_id=request_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         note=payload.note,
         idempotency_key=idempotency_key_header,
     )
@@ -1339,7 +1630,7 @@ async def rollback_site_subscription(
         version=version,
         sites=[site],
         request_id=request_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         note="Subscription rollback",
         idempotency_key=idempotency_key_header,
         operation="rollback",
@@ -1421,7 +1712,7 @@ async def cancel_task(task_id: str, _: str = Depends(require_management)) -> Tas
         action="task.cancel",
         target_type="task",
         target_id=task_id,
-        actor=_settings().admin_username,
+        actor=_actor(),
         after={"status": task.status},
     )
     return _task_out(task)

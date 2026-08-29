@@ -4,6 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { X } from "lucide-react";
 import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
+import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
@@ -25,19 +26,23 @@ export function IconButton({
   label,
   className,
   children,
+  tooltip = true,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; children: ReactNode }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; children: ReactNode; tooltip?: boolean }) {
+  const { t } = usePreferences();
+  const button = (
+    <button className={cn("icon-button", className)} aria-label={t(label)} type="button" {...props}>
+      {children}
+    </button>
+  );
+  if (!tooltip) return button;
   return (
     <Tooltip.Provider delayDuration={250}>
       <Tooltip.Root>
-        <Tooltip.Trigger asChild>
-          <button className={cn("icon-button", className)} aria-label={label} type="button" {...props}>
-            {children}
-          </button>
-        </Tooltip.Trigger>
+        <Tooltip.Trigger asChild>{button}</Tooltip.Trigger>
         <Tooltip.Portal>
           <Tooltip.Content className="tooltip" sideOffset={8}>
-            {label}
+            {t(label)}
             <Tooltip.Arrow className="tooltip-arrow" />
           </Tooltip.Content>
         </Tooltip.Portal>
@@ -47,6 +52,7 @@ export function IconButton({
 }
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
+  const { t } = usePreferences();
   const normalized = status.toLowerCase().replaceAll("_", "-");
   const tone = ["online", "in-sync", "healthy", "succeeded", "allowed", "enabled", "valid", "active", "current", "published", "ready"].includes(
     normalized,
@@ -61,7 +67,7 @@ export function StatusBadge({ status, className }: { status: string; className?:
           )
         ? "warning"
         : "neutral";
-  return <span className={cn("status-badge", `status-${tone}`, className)}>{status.replaceAll("_", " ")}</span>;
+  return <span className={cn("status-badge", `status-${tone}`, className)}>{t(status.replaceAll("_", " "))}</span>;
 }
 
 export function Panel({ children, className }: PropsWithChildren<{ className?: string }>) {
@@ -88,6 +94,7 @@ export function ConfirmDialog({
   busy?: boolean;
   danger?: boolean;
 }>) {
+  const { t } = usePreferences();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       {children}
@@ -96,21 +103,21 @@ export function ConfirmDialog({
         <Dialog.Content className="dialog-content">
           <div className="dialog-heading">
             <div>
-              <Dialog.Title>{title}</Dialog.Title>
-              <Dialog.Description>{description}</Dialog.Description>
+              <Dialog.Title>{t(title)}</Dialog.Title>
+              <Dialog.Description>{t(description)}</Dialog.Description>
             </div>
             <Dialog.Close asChild>
-              <IconButton label="Close dialog">
+              <IconButton label="Close dialog" tooltip={false}>
                 <X size={17} />
               </IconButton>
             </Dialog.Close>
           </div>
           <div className="dialog-actions">
             <Dialog.Close asChild>
-              <Button disabled={busy}>Cancel</Button>
+              <Button disabled={busy}>{t("Cancel")}</Button>
             </Dialog.Close>
             <Button variant={danger ? "danger" : "primary"} disabled={busy} onClick={onConfirm}>
-              {busy ? "Working..." : confirmLabel}
+              {busy ? t("Working...") : t(confirmLabel)}
             </Button>
           </div>
         </Dialog.Content>
@@ -124,25 +131,28 @@ export function DetailDialog({
   onOpenChange,
   title,
   description,
+  contentClassName,
   children,
 }: PropsWithChildren<{
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
   description?: string;
+  contentClassName?: string;
 }>) {
+  const { t } = usePreferences();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content detail-dialog-content">
+        <Dialog.Content className={cn("dialog-content detail-dialog-content", contentClassName)}>
           <div className="dialog-heading">
             <div>
-              <Dialog.Title>{title}</Dialog.Title>
-              {description ? <Dialog.Description>{description}</Dialog.Description> : null}
+              <Dialog.Title>{t(title)}</Dialog.Title>
+              {description ? <Dialog.Description>{t(description)}</Dialog.Description> : null}
             </div>
             <Dialog.Close asChild>
-              <IconButton label="Close details">
+              <IconButton label="Close details" tooltip={false}>
                 <X size={17} />
               </IconButton>
             </Dialog.Close>

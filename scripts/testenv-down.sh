@@ -35,7 +35,4 @@ for path in "$TESTENV_DIR"/monitor-*/monitor.pid; do
   stop_pid_file "$path"
 done
 
-if [[ -x /opt/mongodb/bin/mongod && -d "$TESTENV_DIR/mongodb" ]]; then
-  /opt/mongodb/bin/mongod --dbpath "$TESTENV_DIR/mongodb" --shutdown >/dev/null 2>&1 || true
-fi
 printf 'Stopped Grouproxy test processes. Runtime data remains in %s for inspection.\n' "$TESTENV_DIR"

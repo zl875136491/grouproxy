@@ -24,8 +24,10 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ComponentType, type PropsWithChildren } from "react";
-import { clearManagementSession } from "../lib/api";
+import { clearManagementSession, logoutManagementSession } from "../lib/api";
+import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
+import { PreferencesControls } from "./preferences-controls";
 import { IconButton, StatusBadge } from "./ui";
 
 type NavigationItem = {
@@ -85,25 +87,30 @@ export function AppShell({ children }: PropsWithChildren) {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { t } = usePreferences();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  if (pathname === "/login") return <>{children}</>;
+  if (pathname === "/login") return <><PreferencesControls className="login-preferences" />{children}</>;
 
   function closeMobile() {
     setMobileOpen(false);
   }
 
-  function signOut() {
-    clearManagementSession();
-    queryClient.clear();
-    router.replace("/login");
+  async function signOut() {
+    try {
+      await logoutManagementSession();
+    } finally {
+      clearManagementSession();
+      queryClient.clear();
+      router.replace("/login");
+    }
   }
 
   return (
     <div className="app-shell">
       <button
         className={cn("mobile-backdrop", mobileOpen && "mobile-backdrop-visible")}
-        aria-label="Close navigation"
+        aria-label={t("Close navigation")}
         onClick={closeMobile}
       />
       <aside className={cn("sidebar", mobileOpen && "sidebar-open")}>
@@ -112,14 +119,14 @@ export function AppShell({ children }: PropsWithChildren) {
             <span className="brand-mark" aria-hidden="true" />
             <span>grouproxy</span>
           </Link>
-          <IconButton label="Close navigation" className="mobile-only" onClick={closeMobile}>
+          <IconButton label={t("Close navigation")} className="mobile-only" onClick={closeMobile}>
             <X size={18} />
           </IconButton>
         </div>
-        <nav className="sidebar-nav" aria-label="Primary navigation">
+        <nav className="sidebar-nav" aria-label={t("Primary navigation")}>
           {navigation.map((group) => (
             <div className="nav-group" key={group.label}>
-              <span className="nav-group-label">{group.label}</span>
+              <span className="nav-group-label">{t(group.label)}</span>
               {group.items.map((item) => {
                 const active = isCurrent(pathname, item);
                 const Icon = item.icon;
@@ -132,7 +139,7 @@ export function AppShell({ children }: PropsWithChildren) {
                     onClick={closeMobile}
                   >
                     <Icon size={17} />
-                    <span>{item.label}</span>
+                    <span>{t(item.label)}</span>
                   </Link>
                 );
               })}
@@ -142,26 +149,27 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="sidebar-bottom">
           <div className="transport-note">
             <ShieldCheck size={15} />
-            <div><span>Employee path</span><strong>HTTP CONNECT :80</strong></div>
+            <div><span>{t("Employee path")}</span><strong>HTTP CONNECT :80</strong></div>
           </div>
         </div>
       </aside>
       <div className="workspace">
         <header className="topbar">
           <div className="topbar-context">
-            <IconButton label="Open navigation" className="mobile-menu" onClick={() => setMobileOpen(true)}>
+            <IconButton label={t("Open navigation")} className="mobile-menu" onClick={() => setMobileOpen(true)}>
               <Menu size={19} />
             </IconButton>
-            <span className="topbar-product">Control plane</span>
+            <span className="topbar-product">{t("Control plane")}</span>
             <span className="topbar-separator">/</span>
-            <strong>{pageLabel(pathname)}</strong>
+            <strong>{t(pageLabel(pathname))}</strong>
           </div>
           <div className="topbar-actions">
             <StatusBadge status="HTTP only" />
-            <IconButton label="Refresh workspace" onClick={() => queryClient.invalidateQueries()}>
+            <PreferencesControls />
+            <IconButton label={t("Refresh workspace")} onClick={() => queryClient.invalidateQueries()}>
               <RefreshCw size={16} />
             </IconButton>
-            <IconButton label="Sign out" onClick={signOut}>
+            <IconButton label={t("Sign out")} onClick={() => void signOut()}>
               <LogOut size={16} />
             </IconButton>
           </div>

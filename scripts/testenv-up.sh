@@ -3,18 +3,41 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TESTENV_DIR="${GROUPROXY_TESTENV_DIR:-$ROOT_DIR/testenv}"
-MONGOD_BIN="${MONGOD_BIN:-/opt/mongodb/bin/mongod}"
-MONGO_PORT="${GROUPROXY_TEST_MONGO_PORT:-27018}"
 BACKEND_PORT="${GROUPROXY_TEST_BACKEND_PORT:-8000}"
 FRONTEND_PORT="${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
+MONGODB_URL_OVERRIDE="${GROUPROXY_TEST_MONGODB_URL:-}"
+MONGODB_DATABASE_OVERRIDE="${GROUPROXY_TEST_MONGODB_DATABASE:-grouproxy_test}"
+GQUAN_DELIVERY_MODE="${GROUPROXY_TEST_GQUAN_DELIVERY_MODE:-app}"
+GQUAN_APP_TOKEN="${GROUPROXY_TEST_GQUAN_APP_TOKEN:-}"
+GQUAN_TEST_CODE="${GROUPROXY_TEST_GQUAN_CODE:-123456}"
+
+case "$GQUAN_DELIVERY_MODE" in
+  app)
+    [[ -n "$GQUAN_APP_TOKEN" ]] || {
+      printf 'Set GROUPROXY_TEST_GQUAN_APP_TOKEN to enable real GQuan verification delivery.\n' >&2
+      exit 1
+    }
+    ;;
+  stub)
+    ;;
+  *)
+    printf 'GROUPROXY_TEST_GQUAN_DELIVERY_MODE must be app or stub.\n' >&2
+    exit 1
+    ;;
+esac
+
+# Do not pass the test-specific name on to the backend process. In app mode,
+# the standard setting is exported only in the uvicorn process environment.
+unset GROUPROXY_TEST_GQUAN_APP_TOKEN
+
 if [[ "${GROUPROXY_TESTENV_RESET:-0}" == "1" ]]; then
   # Stop every service before removing its state directory. This avoids
   # orphaned monitor/sing-box processes continuing to use deleted files.
   if [[ -x "$ROOT_DIR/scripts/testenv-down.sh" && -d "$TESTENV_DIR" ]]; then
     GROUPROXY_TESTENV_DIR="$TESTENV_DIR" "$ROOT_DIR/scripts/testenv-down.sh" >/dev/null 2>&1 || true
   fi
-  for port in "$MONGO_PORT" "$BACKEND_PORT" "$FRONTEND_PORT" 18080 18081 19090 19091; do
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT" 18080 18081 19090 19091; do
     if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
       printf 'Test port %s is still in use after cleanup; choose another port or stop its owner.\n' "$port" >&2
       exit 1
@@ -25,21 +48,23 @@ if [[ "${GROUPROXY_TESTENV_RESET:-0}" == "1" ]]; then
   fi
 fi
 
-[[ -x "$MONGOD_BIN" ]] || { printf 'mongod not found at %s\n' "$MONGOD_BIN" >&2; exit 1; }
-
-mkdir -p "$TESTENV_DIR"/{state,logs,mongodb,monitor-codedev,monitor-nuc}
-chmod 700 "$TESTENV_DIR" "$TESTENV_DIR"/{state,logs,mongodb,monitor-codedev,monitor-nuc}
+mkdir -p "$TESTENV_DIR"/{state,logs,monitor-codedev,monitor-nuc}
+chmod 700 "$TESTENV_DIR" "$TESTENV_DIR"/{state,logs,monitor-codedev,monitor-nuc}
 ENV_FILE="$TESTENV_DIR/backend.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
+  [[ -n "$MONGODB_URL_OVERRIDE" ]] || {
+    printf 'Set GROUPROXY_TEST_MONGODB_URL to the codedev MongoDB URI before starting tests.\n' >&2
+    exit 1
+  }
   umask 077
   management_token="${GROUPROXY_TEST_MANAGEMENT_TOKEN:-$(openssl rand -hex 24)}"
   bundle_secret="${GROUPROXY_TEST_BUNDLE_HMAC_SECRET:-$(openssl rand -hex 32)}"
   admin_password="${GROUPROXY_TEST_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
   {
     printf 'GROUPROXY_ENVIRONMENT=test\n'
-    printf 'GROUPROXY_MONGODB_URL=mongodb://127.0.0.1:%s\n' "$MONGO_PORT"
-    printf 'GROUPROXY_MONGODB_DATABASE=grouproxy_test\n'
+    printf 'GROUPROXY_MONGODB_URL=%q\n' "$MONGODB_URL_OVERRIDE"
+    printf 'GROUPROXY_MONGODB_DATABASE=%q\n' "$MONGODB_DATABASE_OVERRIDE"
     printf 'GROUPROXY_HOST=127.0.0.1\n'
     printf 'GROUPROXY_PORT=%s\n' "$BACKEND_PORT"
     printf 'GROUPROXY_BACKEND_PUBLIC_URL=%s\n' "$BACKEND_URL"
@@ -49,6 +74,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_MANAGEMENT_TOKEN=%s\n' "$management_token"
     printf 'GROUPROXY_ALLOW_INSECURE_AGENT_HTTP=true\n'
     printf 'GROUPROXY_SUBSCRIPTION_INLINE_MAX_BYTES=64\n'
+    printf 'GROUPROXY_GQUAN_DELIVERY_MODE=%q\n' "$GQUAN_DELIVERY_MODE"
+    if [[ "$GQUAN_DELIVERY_MODE" == "stub" ]]; then
+      printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE"
+    fi
     printf 'GROUPROXY_SEED_DEFAULT_SITES=true\n'
   } > "$ENV_FILE"
 fi
@@ -57,20 +86,70 @@ set -a
 source "$ENV_FILE"
 set +a
 
-if ! nc -z 127.0.0.1 "$MONGO_PORT" >/dev/null 2>&1; then
-  "$MONGOD_BIN" \
-    --dbpath "$TESTENV_DIR/mongodb" \
-    --bind_ip 127.0.0.1 \
-    --port "$MONGO_PORT" \
-    --logpath "$TESTENV_DIR/logs/mongod.log" \
-    --pidfilepath "$TESTENV_DIR/mongodb.pid" \
-    --fork \
-    >/dev/null
+if [[ -n "$MONGODB_URL_OVERRIDE" && "$GROUPROXY_MONGODB_URL" != "$MONGODB_URL_OVERRIDE" ]]; then
+  printf 'Test environment already points at another MongoDB URI. Reset it before changing targets.\n' >&2
+  exit 1
+fi
+if [[ "$GROUPROXY_GQUAN_DELIVERY_MODE" != "$GQUAN_DELIVERY_MODE" ]]; then
+  [[ "${GROUPROXY_TESTENV_RECONFIGURE_GQUAN:-0}" == "1" ]] || {
+    printf 'Test environment uses another GQuan delivery mode. Stop it, then rerun with GROUPROXY_TESTENV_RECONFIGURE_GQUAN=1.\n' >&2
+    exit 1
+  }
+  if nc -z 127.0.0.1 "$BACKEND_PORT" >/dev/null 2>&1; then
+    printf 'Stop the current test environment before changing its GQuan delivery mode.\n' >&2
+    exit 1
+  fi
+  sed -i -E "s/^GROUPROXY_GQUAN_DELIVERY_MODE=.*/GROUPROXY_GQUAN_DELIVERY_MODE=${GQUAN_DELIVERY_MODE}/" "$ENV_FILE"
+  if [[ "$GQUAN_DELIVERY_MODE" == "app" ]]; then
+    sed -i -E '/^GROUPROXY_GQUAN_TEST_CODE=/d' "$ENV_FILE"
+  elif rg -q '^GROUPROXY_GQUAN_TEST_CODE=' "$ENV_FILE"; then
+    sed -i -E "s/^GROUPROXY_GQUAN_TEST_CODE=.*/GROUPROXY_GQUAN_TEST_CODE=${GQUAN_TEST_CODE}/" "$ENV_FILE"
+  else
+    printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE" >> "$ENV_FILE"
+  fi
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+if [[ "$GROUPROXY_MONGODB_URL" == mongodb://127.0.0.1:27018* ]]; then
+  printf 'The retired isolated MongoDB target is not allowed. Reset the test environment with the codedev URI.\n' >&2
+  exit 1
+fi
+
+# Do not start partial local services when the configured shared database is
+# unreachable or its credentials are invalid. The URI stays in the protected
+# runtime environment and is intentionally not included in diagnostics.
+if ! "$ROOT_DIR/.venv/bin/python" - <<'PY'
+import os
+import sys
+
+from pymongo import MongoClient
+
+client = None
+try:
+    client = MongoClient(
+        os.environ["GROUPROXY_MONGODB_URL"],
+        connectTimeoutMS=5_000,
+        serverSelectionTimeoutMS=5_000,
+    )
+    client.get_database(os.environ["GROUPROXY_MONGODB_DATABASE"]).command("ping")
+except Exception:
+    sys.exit(1)
+finally:
+    if client is not None:
+        client.close()
+PY
+then
+  printf 'Cannot reach or authenticate to the configured codedev MongoDB target. Check the URI or SSH tunnel, then retry.\n' >&2
+  exit 1
 fi
 
 if ! nc -z 127.0.0.1 "$BACKEND_PORT" >/dev/null 2>&1; then
   (
     cd "$ROOT_DIR/backend"
+    if [[ "$GROUPROXY_GQUAN_DELIVERY_MODE" == "app" ]]; then
+      export GROUPROXY_GQUAN_APP_TOKEN="$GQUAN_APP_TOKEN"
+    fi
     nohup setsid "$ROOT_DIR/.venv/bin/uvicorn" main:app --host 127.0.0.1 --port "$BACKEND_PORT" \
       </dev/null >"$TESTENV_DIR/logs/backend.log" 2>&1 &
     printf '%s\n' "$!" > "$TESTENV_DIR/backend.pid"
@@ -156,7 +235,7 @@ if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND
   (
     cd "$ROOT_DIR/frontend"
     if [[ ! -d node_modules ]]; then npm install --no-audit --no-fund; fi
-    nohup setsid env NEXT_PUBLIC_API_BASE_URL="$BACKEND_URL" npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
+    nohup setsid env NEXT_PUBLIC_API_BASE_URL=/backend-api GROUPROXY_BACKEND_API_URL="$BACKEND_URL" npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
       </dev/null >"$TESTENV_DIR/logs/frontend.log" 2>&1 &
     printf '%s\n' "$!" > "$TESTENV_DIR/frontend.pid"
   )
@@ -171,4 +250,5 @@ if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]]; then
 fi
 
 printf 'Test environment is starting. Backend: %s  Frontend: http://127.0.0.1:%s\n' "$BACKEND_URL" "$FRONTEND_PORT"
+printf 'Shared MongoDB database: %s\n' "$GROUPROXY_MONGODB_DATABASE"
 printf 'Run scripts/verify-phase1.sh after monitor ACKs arrive.\n'

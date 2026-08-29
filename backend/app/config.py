@@ -1,6 +1,7 @@
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +27,15 @@ class Settings(BaseSettings):
     subscription_inline_max_bytes: int = 128_000
     subscription_worker_poll_seconds: float = 1.0
     subscription_task_lease_seconds: int = 60
+    auth_session_ttl_minutes: int = Field(default=720, ge=15, le=43_200)
+    auth_verification_ttl_seconds: int = Field(default=600, ge=60, le=3_600)
+    auth_verification_resend_seconds: int = Field(default=60, ge=15, le=600)
+    auth_verification_max_attempts: int = Field(default=5, ge=3, le=10)
+    gquan_api_base_url: str = "https://one.1oa.com.cn/springboard/api/v1"
+    gquan_app_token: SecretStr | None = None
+    gquan_delivery_mode: Literal["app", "stub"] = "app"
+    gquan_test_code: SecretStr | None = None
+    gquan_request_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
     seed_default_sites: bool = True
 
 

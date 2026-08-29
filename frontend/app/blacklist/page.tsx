@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, CirclePlus, Trash2 } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { createBlacklist, deleteBlacklist, getBlacklist, type DestinationBlacklist } from "../../lib/api";
+import { usePreferences } from "../../lib/preferences";
 import { formatDate } from "../../lib/utils";
 import { ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
@@ -11,6 +12,7 @@ import { SessionGate, useManagementSession } from "../../components/session-gate
 import { Button, ConfirmDialog, Panel, StatusBadge } from "../../components/ui";
 
 export default function BlacklistPage() {
+  const { t } = usePreferences();
   const session = useManagementSession();
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
@@ -48,13 +50,13 @@ export default function BlacklistPage() {
   const error = create.error || remove.error;
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="POLICY" title="Destination deny" description="Blocked destination patterns are included in every generated bundle." actions={<Button variant="primary" onClick={() => setShowForm((value) => !value)}><CirclePlus size={16} /> Add destination</Button>} />
+      <PageHeader eyebrow="POLICY" title="Destination deny" description="Blocked destination patterns are included in every generated bundle." actions={<Button variant="primary" onClick={() => setShowForm((value) => !value)}><CirclePlus size={16} /> {t("Add destination")}</Button>} />
       {error ? <div className="inline-error" role="alert">{error instanceof Error ? error.message : "The destination policy was not accepted."}</div> : null}
       <Panel>
-        {showForm ? <form className="form-grid form-grid-blacklist" onSubmit={submit}><label><span>Type</span><select value={kind} onChange={(event) => setKind(event.target.value as DestinationBlacklist["kind"])}><option value="domain">Domain</option><option value="ip">IP address</option><option value="cidr">CIDR</option></select></label><label><span>Pattern</span><input autoFocus value={pattern} onChange={(event) => setPattern(event.target.value)} placeholder={kind === "domain" ? "example.com" : kind === "ip" ? "203.0.113.10" : "203.0.113.0/24"} /></label><label><span>Comment</span><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Reason for block" /></label><div className="form-actions"><Button type="button" onClick={() => setShowForm(false)}>Cancel</Button><Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? "Adding..." : "Add destination"}</Button></div></form> : null}
-        <div className="table-wrap"><table><thead><tr><th>Pattern</th><th>Type</th><th>Comment</th><th>Created</th><th>State</th><th aria-label="Actions" /></tr></thead><tbody>{entries.length ? entries.map((entry) => <tr key={entry.id}><td className="mono">{entry.pattern}</td><td><span className="type-tag">{entry.kind}</span></td><td>{entry.comment || "-"}</td><td>{formatDate(entry.created_at)}</td><td><StatusBadge status={entry.enabled ? "enabled" : "disabled"} /></td><td><button className="row-icon-button row-icon-danger" aria-label={`Delete ${entry.pattern}`} title="Delete destination" onClick={() => setRemoveTarget(entry)}><Trash2 size={16} /></button></td></tr>) : <tr><td colSpan={6}><div className="table-empty"><Ban size={18} /> No destinations are blocked.</div></td></tr>}</tbody></table></div>
+        {showForm ? <form className="form-grid form-grid-blacklist" onSubmit={submit}><label><span>{t("Type")}</span><select value={kind} onChange={(event) => setKind(event.target.value as DestinationBlacklist["kind"])}><option value="domain">{t("Domain")}</option><option value="ip">{t("IP address")}</option><option value="cidr">CIDR</option></select></label><label><span>{t("Pattern")}</span><input autoFocus value={pattern} onChange={(event) => setPattern(event.target.value)} placeholder={kind === "domain" ? "example.com" : kind === "ip" ? "203.0.113.10" : "203.0.113.0/24"} /></label><label><span>{t("Comment")}</span><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder={t("Reason for block")} /></label><div className="form-actions"><Button type="button" onClick={() => setShowForm(false)}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? t("Adding...") : t("Add destination")}</Button></div></form> : null}
+        <div className="table-wrap"><table><thead><tr><th>{t("Pattern")}</th><th>{t("Type")}</th><th>{t("Comment")}</th><th>{t("Created")}</th><th>{t("State")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{entries.length ? entries.map((entry) => <tr key={entry.id}><td className="mono">{entry.pattern}</td><td><span className="type-tag">{t(entry.kind)}</span></td><td>{entry.comment || "-"}</td><td>{formatDate(entry.created_at)}</td><td><StatusBadge status={entry.enabled ? "enabled" : "disabled"} /></td><td><button className="row-icon-button row-icon-danger" aria-label={t("Delete {value}", { value: entry.pattern })} title={t("Delete destination")} onClick={() => setRemoveTarget(entry)}><Trash2 size={16} /></button></td></tr>) : <tr><td colSpan={6}><div className="table-empty"><Ban size={18} /> {t("No destinations are blocked.")}</div></td></tr>}</tbody></table></div>
       </Panel>
-      <ConfirmDialog open={Boolean(removeTarget)} onOpenChange={(open) => !open && setRemoveTarget(null)} title="Remove destination deny" description={`Remove ${removeTarget?.pattern || "this pattern"} from the global deny policy. New releases will no longer include it.`} confirmLabel="Remove destination" danger busy={remove.isPending} onConfirm={() => remove.mutate()} />
+      <ConfirmDialog open={Boolean(removeTarget)} onOpenChange={(open) => !open && setRemoveTarget(null)} title="Remove destination deny" description={t("Remove {value} from the global deny policy. New releases will no longer include it.", { value: removeTarget?.pattern || t("this pattern") })} confirmLabel="Remove destination" danger busy={remove.isPending} onConfirm={() => remove.mutate()} />
     </div>
   );
 }
