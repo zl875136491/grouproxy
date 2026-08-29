@@ -114,6 +114,7 @@ class AgentAck(Document):
     health_ok: bool = False
     rollback_attempted: bool = False
     rollback_ok: bool = False
+    last_good_version: int = 0
     stage: str = "unknown"
     error_code: str = ""
     error_message: str = ""

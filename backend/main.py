@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
@@ -21,10 +21,12 @@ from app.config import Settings, get_settings
 from app.db import Database
 from app.models import (
     AdminUser,
+    AuditEvent,
     ConfigDraft,
     ConfigRelease,
     CrossSiteAllow,
     DesiredRelease,
+    DestinationBlacklist,
     HeartbeatLatest,
     HeartbeatSample,
     Node,
@@ -39,12 +41,18 @@ from app.models import (
 )
 from app.schemas import (
     AgentAck,
+    AgentAckOut,
     AgentHeartbeat,
+    AuditEventOut,
     CIDRCreate,
     CIDROut,
     CIDRPreviewRequest,
     CIDRPreviewResponse,
+    CrossSiteAllowOut,
+    CrossSiteAllowUpdate,
     DesiredResponse,
+    DestinationBlacklistCreate,
+    DestinationBlacklistOut,
     DraftCreate,
     DraftOut,
     LoginRequest,
@@ -56,6 +64,8 @@ from app.schemas import (
     ReleaseOut,
     SiteOut,
     TaskOut,
+    TravelExceptionCreate,
+    TravelExceptionOut,
 )
 from app.services.audit import append_audit, verify_audit_chain
 from app.services.bundles import create_desired_release, latest_release
@@ -132,6 +142,8 @@ def _draft_out(draft: ConfigDraft) -> DraftOut:
         risk_level=draft.risk_level,
         status=draft.status,
         expires_at=draft.expires_at,
+        created_at=draft.created_at,
+        updated_at=draft.updated_at,
     )
 
 
@@ -150,6 +162,7 @@ def _release_out(release: ConfigRelease) -> ReleaseOut:
         rollback_reason=release.rollback_reason,
         started_at=release.started_at,
         finished_at=release.finished_at,
+        created_at=release.created_at,
     )
 
 
@@ -169,7 +182,100 @@ def _task_out(task: Task) -> TaskOut:
         result=task.result,
         created_at=task.created_at,
         finished_at=task.finished_at,
+        next_run_at=task.next_run_at,
+        locked_by=task.locked_by,
+        lease_expires_at=task.lease_expires_at,
     )
+
+
+def _exception_out(item: TravelException) -> TravelExceptionOut:
+    return TravelExceptionOut(
+        id=_model_id(item),
+        cidr=item.cidr,
+        comment=item.comment,
+        owner=item.owner,
+        expires_at=item.expires_at,
+        enabled=item.enabled,
+        created_at=item.created_at,
+    )
+
+
+def _cross_site_out(item: CrossSiteAllow) -> CrossSiteAllowOut:
+    return CrossSiteAllowOut(
+        id=_model_id(item),
+        from_site_id=item.from_site_id,
+        to_site_id=item.to_site_id,
+        enabled=item.enabled,
+        comment=item.comment,
+        updated_at=item.updated_at,
+    )
+
+
+def _blacklist_out(item: DestinationBlacklist) -> DestinationBlacklistOut:
+    return DestinationBlacklistOut(
+        id=_model_id(item),
+        pattern=item.pattern,
+        kind=item.kind,
+        comment=item.comment,
+        enabled=item.enabled,
+        created_at=item.created_at,
+    )
+
+
+def _ack_out(item: AgentAckDocument) -> AgentAckOut:
+    return AgentAckOut(
+        node_id=item.node_id,
+        release_id=item.release_id,
+        desired_version=item.desired_version,
+        applied_version=item.applied_version,
+        bundle_hash=item.bundle_hash,
+        applied_hash=item.applied_hash,
+        ok=item.ok,
+        singbox_ok=item.singbox_ok,
+        nft_ok=item.nft_ok,
+        health_ok=item.health_ok,
+        rollback_attempted=item.rollback_attempted,
+        rollback_ok=item.rollback_ok,
+        last_good_version=item.last_good_version,
+        stage=item.stage,
+        error_code=item.error_code,
+        error_message=item.error_message,
+        sequence=item.sequence,
+        received_at=item.received_at,
+    )
+
+
+def _audit_out(item: AuditEvent) -> AuditEventOut:
+    return AuditEventOut(
+        event_id=item.event_id,
+        actor=item.actor,
+        actor_role=item.actor_role,
+        request_id=item.request_id,
+        source_ip=item.source_ip,
+        action=item.action,
+        target_type=item.target_type,
+        target_id=item.target_id,
+        before=item.before,
+        after=item.after,
+        result=item.result,
+        error=item.error,
+        immutable_hash=item.immutable_hash,
+        previous_hash=item.previous_hash,
+        at=item.at,
+    )
+
+
+async def _increment_site_revisions(site_ids: list[str]) -> None:
+    for site_id in dict.fromkeys(site_ids):
+        site = await Site.get(site_id)
+        if site is not None:
+            site.config_revision += 1
+            await site.save()
+
+
+async def _increment_all_site_revisions() -> None:
+    sites = await Site.find_all().to_list()
+    await _increment_site_revisions([_model_id(site) for site in sites])
 
 
 async def seed_defaults(settings: Settings) -> None:
@@ -352,6 +458,8 @@ async def add_cidr(
         cidr = normalize_cidr(payload.cidr)
     except ValueError as exc:
         raise HTTPException(422, "invalid_cidr") from exc
+    if await SiteCIDR.find_one(SiteCIDR.site_id == site_id, SiteCIDR.cidr == cidr):
+        raise HTTPException(409, "cidr_exists")
     entry = SiteCIDR(
         site_id=site_id,
         cidr=cidr,
@@ -425,48 +533,80 @@ async def preview_cidr(
     )
 
 
-@app.post("/api/v1/exceptions", status_code=201)
+@app.get("/api/v1/exceptions", response_model=list[TravelExceptionOut])
+async def list_exceptions(_: str = Depends(require_management)) -> list[TravelExceptionOut]:
+    return [
+        _exception_out(item)
+        for item in await TravelException.find_all().sort(+TravelException.expires_at).to_list()
+    ]
+
+
+@app.post("/api/v1/exceptions", response_model=TravelExceptionOut, status_code=201)
 async def create_exception(
-    request: Request, _: str = Depends(require_management)
-) -> dict[str, Any]:
-    body = await request.json()
+    payload: TravelExceptionCreate, _: str = Depends(require_management)
+) -> TravelExceptionOut:
     try:
-        cidr = normalize_cidr(str(body["cidr"]))
-        expires_at = datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00"))
-    except (KeyError, TypeError, ValueError) as exc:
+        cidr = normalize_cidr(payload.cidr)
+    except ValueError as exc:
         raise HTTPException(422, "invalid_exception") from exc
-    if expires_at <= utcnow():
+    if payload.expires_at <= utcnow():
         raise HTTPException(422, "exception_must_expire_in_future")
     item = TravelException(
         cidr=cidr,
-        comment=str(body.get("comment", "")),
-        owner=str(body.get("owner", "")),
-        expires_at=expires_at,
+        comment=payload.comment,
+        owner=payload.owner,
+        expires_at=payload.expires_at,
+        enabled=payload.enabled,
         created_by=_settings().admin_username,
     )
     await item.insert()
+    await _increment_all_site_revisions()
     await append_audit(
         action="exception.create",
         target_type="travel_exception",
         target_id=_model_id(item),
         actor=_settings().admin_username,
-        after={"cidr": cidr, "expires_at": expires_at.isoformat()},
+        after={"cidr": cidr, "expires_at": item.expires_at.isoformat(), "enabled": item.enabled},
     )
-    return {
-        "id": _model_id(item),
-        "cidr": item.cidr,
-        "expires_at": item.expires_at,
-        "enabled": item.enabled,
-    }
+    return _exception_out(item)
 
 
-@app.post("/api/v1/cross-site-allows", status_code=201)
-async def set_cross_site(request: Request, _: str = Depends(require_management)) -> dict[str, Any]:
-    body = await request.json()
-    from_site_id, to_site_id = str(body.get("from_site_id", "")), str(body.get("to_site_id", ""))
+@app.delete("/api/v1/exceptions/{exception_id}", status_code=204)
+async def delete_exception(
+    exception_id: str, _: str = Depends(require_management)
+) -> None:
+    item = await TravelException.get(exception_id)
+    if item is None:
+        raise HTTPException(404, "exception_not_found")
+    await item.delete()
+    await _increment_all_site_revisions()
+    await append_audit(
+        action="exception.delete",
+        target_type="travel_exception",
+        target_id=exception_id,
+        actor=_settings().admin_username,
+        before={"cidr": item.cidr, "expires_at": item.expires_at.isoformat()},
+    )
+
+
+@app.get("/api/v1/cross-site-allows", response_model=list[CrossSiteAllowOut])
+async def list_cross_site_allows(_: str = Depends(require_management)) -> list[CrossSiteAllowOut]:
+    return [
+        _cross_site_out(item)
+        for item in await CrossSiteAllow.find_all().sort(+CrossSiteAllow.updated_at).to_list()
+    ]
+
+
+@app.put("/api/v1/cross-site-allows", response_model=CrossSiteAllowOut)
+@app.post("/api/v1/cross-site-allows", response_model=CrossSiteAllowOut, status_code=201)
+async def set_cross_site(
+    payload: CrossSiteAllowUpdate, _: str = Depends(require_management)
+) -> CrossSiteAllowOut:
+    from_site_id, to_site_id = payload.from_site_id, payload.to_site_id
     if (
         not from_site_id
         or not to_site_id
+        or from_site_id == to_site_id
         or await Site.get(from_site_id) is None
         or await Site.get(to_site_id) is None
     ):
@@ -476,26 +616,88 @@ async def set_cross_site(request: Request, _: str = Depends(require_management))
     )
     if relation is None:
         relation = CrossSiteAllow(from_site_id=from_site_id, to_site_id=to_site_id)
-    relation.enabled = bool(body.get("enabled", False))
-    relation.comment = str(body.get("comment", ""))
+    before = {"enabled": relation.enabled, "comment": relation.comment}
+    relation.enabled = payload.enabled
+    relation.comment = payload.comment
     relation.updated_at = utcnow()
     if relation.id:
         await relation.save()
     else:
         await relation.insert()
+    await _increment_site_revisions([to_site_id])
     await append_audit(
         action="cross_site.update",
         target_type="cross_site_allow",
         target_id=_model_id(relation),
         actor=_settings().admin_username,
+        before=before,
         after={"from_site_id": from_site_id, "to_site_id": to_site_id, "enabled": relation.enabled},
     )
-    return {
-        "id": _model_id(relation),
-        "from_site_id": from_site_id,
-        "to_site_id": to_site_id,
-        "enabled": relation.enabled,
-    }
+    return _cross_site_out(relation)
+
+
+@app.get("/api/v1/blacklist", response_model=list[DestinationBlacklistOut])
+async def list_blacklist(_: str = Depends(require_management)) -> list[DestinationBlacklistOut]:
+    entries = await DestinationBlacklist.find_all().sort(+DestinationBlacklist.pattern).to_list()
+    return [
+        _blacklist_out(item)
+        for item in entries
+    ]
+
+
+@app.post("/api/v1/blacklist", response_model=DestinationBlacklistOut, status_code=201)
+async def add_blacklist(
+    payload: DestinationBlacklistCreate, _: str = Depends(require_management)
+) -> DestinationBlacklistOut:
+    pattern = payload.pattern.strip()
+    try:
+        if payload.kind == "cidr":
+            pattern = normalize_cidr(pattern)
+        elif payload.kind == "ip":
+            pattern = normalize_source_ip(pattern)
+        else:
+            pattern = pattern.lower().rstrip(".")
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_blacklist_pattern") from exc
+    if not pattern:
+        raise HTTPException(422, "invalid_blacklist_pattern")
+    if await DestinationBlacklist.find_one(
+        DestinationBlacklist.pattern == pattern,
+        DestinationBlacklist.kind == payload.kind,
+    ):
+        raise HTTPException(409, "blacklist_entry_exists")
+    item = DestinationBlacklist(
+        pattern=pattern,
+        kind=payload.kind,
+        comment=payload.comment,
+        enabled=payload.enabled,
+    )
+    await item.insert()
+    await _increment_all_site_revisions()
+    await append_audit(
+        action="blacklist.create",
+        target_type="destination_blacklist",
+        target_id=_model_id(item),
+        actor=_settings().admin_username,
+        after={"pattern": item.pattern, "kind": item.kind, "enabled": item.enabled},
+    )
+    return _blacklist_out(item)
+
+
+@app.delete("/api/v1/blacklist/{entry_id}", status_code=204)
+async def delete_blacklist(entry_id: str, _: str = Depends(require_management)) -> None:
+    item = await DestinationBlacklist.get(entry_id)
+    if item is None:
+        raise HTTPException(404, "blacklist_entry_not_found")
+    await item.delete()
+    await _increment_all_site_revisions()
+    await append_audit(
+        action="blacklist.delete",
+        target_type="destination_blacklist",
+        target_id=entry_id,
+        actor=_settings().admin_username,
+        before={"pattern": item.pattern, "kind": item.kind},
+    )
 
 
 @app.post("/api/v1/config/drafts", response_model=DraftOut, status_code=201)
@@ -654,6 +856,40 @@ async def get_release(release_id: str, _: str = Depends(require_management)) -> 
     if release is None:
         raise HTTPException(404, "release_not_found")
     return _release_out(release)
+
+
+@app.get("/api/v1/config/releases", response_model=list[ReleaseOut])
+async def list_releases(
+    site_id: str | None = None, limit: int = 100, _: str = Depends(require_management)
+) -> list[ReleaseOut]:
+    safe_limit = min(max(limit, 1), 250)
+    query: dict[str, Any] = {"site_id": site_id} if site_id else {}
+    releases = await (
+        ConfigRelease.find(query).sort(-ConfigRelease.created_at).limit(safe_limit).to_list()
+    )
+    return [_release_out(item) for item in releases]
+
+
+@app.get("/api/v1/config/releases/{release_id}/acks", response_model=list[AgentAckOut])
+async def list_release_acks(
+    release_id: str, _: str = Depends(require_management)
+) -> list[AgentAckOut]:
+    release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
+    if release is None:
+        raise HTTPException(404, "release_not_found")
+    acks = await AgentAckDocument.find(
+        AgentAckDocument.release_id == release_id
+    ).sort(+AgentAckDocument.node_id).to_list()
+    return [_ack_out(item) for item in acks]
+
+
+@app.get("/api/v1/tasks", response_model=list[TaskOut])
+async def list_tasks(
+    limit: int = 100, _: str = Depends(require_management)
+) -> list[TaskOut]:
+    safe_limit = min(max(limit, 1), 250)
+    tasks = await Task.find_all().sort(-Task.created_at).limit(safe_limit).to_list()
+    return [_task_out(item) for item in tasks]
 
 
 @app.get("/api/v1/tasks/{task_id}", response_model=TaskOut)
@@ -855,6 +1091,15 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
 async def audit_verify(_: str = Depends(require_management)) -> dict[str, Any]:
     valid, error, count = await verify_audit_chain()
     return {"valid": valid, "error": error, "event_count": count}
+
+
+@app.get("/api/v1/audit", response_model=list[AuditEventOut])
+async def list_audit(
+    limit: int = 200, _: str = Depends(require_management)
+) -> list[AuditEventOut]:
+    safe_limit = min(max(limit, 1), 500)
+    events = await AuditEvent.find_all().sort(-AuditEvent.at).limit(safe_limit).to_list()
+    return [_audit_out(item) for item in events]
 
 
 @app.get("/api/v1/overview")

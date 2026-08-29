@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from app.models import AgentAck
 from app.services.audit import redact
 from app.services.cidr import match_source_ip, normalize_cidr, normalize_source_ip
 from app.services.crypto import calculate_bundle_hash, sign_bundle, verify_bundle
@@ -40,3 +41,10 @@ def test_audit_redaction_covers_nested_node_secrets() -> None:
         "token": "[REDACTED]",
         "nested": {"agent_token": "[REDACTED]", "username": "operator"},
     }
+
+
+def test_agent_ack_retains_last_good_version() -> None:
+    field = AgentAck.model_fields["last_good_version"]
+
+    assert field.annotation is int
+    assert field.default == 0

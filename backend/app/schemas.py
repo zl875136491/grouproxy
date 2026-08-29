@@ -84,6 +84,56 @@ class CIDRPreviewResponse(BaseModel):
     effective_cidrs: list[str]
 
 
+class TravelExceptionCreate(BaseModel):
+    cidr: str
+    comment: str = ""
+    owner: str = ""
+    expires_at: datetime
+    enabled: bool = True
+
+
+class TravelExceptionOut(BaseModel):
+    id: str
+    cidr: str
+    comment: str
+    owner: str
+    expires_at: datetime
+    enabled: bool
+    created_at: datetime
+
+
+class CrossSiteAllowUpdate(BaseModel):
+    from_site_id: str
+    to_site_id: str
+    enabled: bool = False
+    comment: str = ""
+
+
+class CrossSiteAllowOut(BaseModel):
+    id: str
+    from_site_id: str
+    to_site_id: str
+    enabled: bool
+    comment: str
+    updated_at: datetime
+
+
+class DestinationBlacklistCreate(BaseModel):
+    pattern: str = Field(min_length=1, max_length=255)
+    kind: Literal["domain", "ip", "cidr"] = "domain"
+    comment: str = ""
+    enabled: bool = True
+
+
+class DestinationBlacklistOut(BaseModel):
+    id: str
+    pattern: str
+    kind: Literal["domain", "ip", "cidr"]
+    comment: str
+    enabled: bool
+    created_at: datetime
+
+
 class DraftCreate(BaseModel):
     site_id: str
     node_ids: list[str] = Field(default_factory=list)
@@ -101,6 +151,8 @@ class DraftOut(BaseModel):
     risk_level: str
     status: str
     expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 class ReleaseCreate(BaseModel):
@@ -126,6 +178,7 @@ class ReleaseOut(BaseModel):
     rollback_reason: str
     started_at: datetime | None
     finished_at: datetime | None
+    created_at: datetime
 
 
 class TaskOut(BaseModel):
@@ -143,6 +196,48 @@ class TaskOut(BaseModel):
     result: dict[str, Any]
     created_at: datetime
     finished_at: datetime | None
+    next_run_at: datetime
+    locked_by: str
+    lease_expires_at: datetime | None
+
+
+class AgentAckOut(BaseModel):
+    node_id: str
+    release_id: str
+    desired_version: int
+    applied_version: int
+    bundle_hash: str
+    applied_hash: str
+    ok: bool
+    singbox_ok: bool
+    nft_ok: bool
+    health_ok: bool
+    rollback_attempted: bool
+    rollback_ok: bool
+    last_good_version: int
+    stage: str
+    error_code: str
+    error_message: str
+    sequence: int
+    received_at: datetime
+
+
+class AuditEventOut(BaseModel):
+    event_id: str
+    actor: str
+    actor_role: str
+    request_id: str
+    source_ip: str
+    action: str
+    target_type: str
+    target_id: str
+    before: dict[str, Any]
+    after: dict[str, Any]
+    result: str
+    error: str
+    immutable_hash: str
+    previous_hash: str
+    at: datetime
 
 
 class AgentHeartbeat(BaseModel):
