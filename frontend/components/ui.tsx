@@ -48,7 +48,7 @@ export function IconButton({
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
   const normalized = status.toLowerCase().replaceAll("_", "-");
-  const tone = ["online", "in-sync", "healthy", "succeeded", "allowed", "enabled", "valid", "active"].includes(
+  const tone = ["online", "in-sync", "healthy", "succeeded", "allowed", "enabled", "valid", "active", "current", "published", "ready"].includes(
     normalized,
   )
     ? "success"

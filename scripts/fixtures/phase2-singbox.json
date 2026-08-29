@@ -1,0 +1,12 @@
+{
+  "outbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "phase2-edge-a",
+      "server": "198.51.100.20",
+      "server_port": 8388,
+      "method": "aes-256-gcm",
+      "password": "phase2-test-password"
+    }
+  ]
+}

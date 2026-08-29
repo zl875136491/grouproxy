@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,10 +152,48 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 	default:
 		return "", errors.New("invalid_allow_cidr_list")
 	}
+	if err := validateSubscription(value); err != nil {
+		return "", err
+	}
 	if _, err := Verify(value, secret); err != nil {
 		return "", err
 	}
 	return stringValue(value["bundle_hash"]), nil
+}
+
+func validateSubscription(value Bundle) error {
+	raw, exists := value["subscription"]
+	if !exists || raw == nil {
+		return nil
+	}
+	subscription, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("invalid_subscription")
+	}
+	hash := stringValue(subscription["hash"])
+	if len(hash) != sha256.Size*2 {
+		return errors.New("invalid_subscription_hash")
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return errors.New("invalid_subscription_hash")
+	}
+	format := stringValue(subscription["format"])
+	if format != "clash" && format != "sip008" && format != "sing-box" {
+		return errors.New("invalid_subscription_format")
+	}
+	version, validVersion := intValue(subscription["version"])
+	if !validVersion || version < 1 {
+		return errors.New("invalid_subscription_version")
+	}
+	content, hasContent := subscription["content"].(string)
+	blobURL, hasBlobURL := subscription["blob_url"].(string)
+	if hasContent && len(content) > 10<<20 {
+		return errors.New("subscription_content_too_large")
+	}
+	if (hasContent && hasBlobURL) || (!hasContent && !hasBlobURL) || (hasBlobURL && blobURL == "") {
+		return errors.New("invalid_subscription_content")
+	}
+	return nil
 }
 
 // ValidateMinimumMonitorVersion prevents an old monitor from silently

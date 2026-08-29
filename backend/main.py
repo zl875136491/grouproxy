@@ -6,6 +6,7 @@ and node endpoints live under ``/agent/v1``.  The monitor owns all host-side
 changes; this service only computes and records desired state.
 """
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -13,9 +14,9 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 from app.config import Settings, get_settings
 from app.db import Database
@@ -32,6 +33,9 @@ from app.models import (
     Node,
     Site,
     SiteCIDR,
+    SiteSubscription,
+    SubscriptionSource,
+    SubscriptionVersion,
     Task,
     TravelException,
     utcnow,
@@ -63,6 +67,15 @@ from app.schemas import (
     ReleaseCreate,
     ReleaseOut,
     SiteOut,
+    SiteSubscriptionOut,
+    SubscriptionCatalogOut,
+    SubscriptionPublishOut,
+    SubscriptionPublishRequest,
+    SubscriptionRefreshResponse,
+    SubscriptionSourceCreate,
+    SubscriptionSourceOut,
+    SubscriptionUploadResponse,
+    SubscriptionVersionOut,
     TaskOut,
     TravelExceptionCreate,
     TravelExceptionOut,
@@ -70,6 +83,13 @@ from app.schemas import (
 from app.services.audit import append_audit, verify_audit_chain
 from app.services.bundles import create_desired_release, latest_release
 from app.services.cidr import effective_cidrs, match_source_ip, normalize_cidr, normalize_source_ip
+from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
+from app.services.subscriptions import (
+    SubscriptionError,
+    normalize_source_url,
+    record_uploaded_subscription,
+    source_url_hint,
+)
 from app.services.tasks import create_task
 
 DEFAULT_SITES = [
@@ -222,6 +242,52 @@ def _blacklist_out(item: DestinationBlacklist) -> DestinationBlacklistOut:
     )
 
 
+def _subscription_source_out(item: SubscriptionSource) -> SubscriptionSourceOut:
+    return SubscriptionSourceOut(
+        id=_model_id(item),
+        name=item.name,
+        url_hint=source_url_hint(item.url),
+        fetch_interval_sec=item.fetch_interval_sec,
+        max_body_bytes=item.max_body_bytes,
+        redirect_limit=item.redirect_limit,
+        enabled=item.enabled,
+        refreshable=bool(item.url) and item.enabled,
+        last_refresh_at=item.last_refresh_at,
+        last_refresh_attempt_at=item.last_refresh_attempt_at,
+        last_refresh_error=item.last_refresh_error,
+        consecutive_failures=item.consecutive_failures,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _subscription_version_out(item: SubscriptionVersion) -> SubscriptionVersionOut:
+    return SubscriptionVersionOut(
+        id=_model_id(item),
+        source_id=item.source_id,
+        version=item.version,
+        content_hash=item.content_hash,
+        size_bytes=item.size_bytes,
+        format=item.format,
+        fetched_at=item.fetched_at,
+        parse_ok=item.parse_ok,
+        parse_error=item.parse_error,
+        node_count=item.node_count,
+        published=item.published,
+        created_at=item.created_at,
+    )
+
+
+def _site_subscription_out(item: SiteSubscription) -> SiteSubscriptionOut:
+    return SiteSubscriptionOut(
+        site_id=item.site_id,
+        source_id=item.source_id,
+        subscription_version_id=item.subscription_version_id,
+        previous_subscription_version_id=item.previous_subscription_version_id,
+        updated_at=item.updated_at,
+    )
+
+
 def _ack_out(item: AgentAckDocument) -> AgentAckOut:
     return AgentAckOut(
         node_id=item.node_id,
@@ -300,11 +366,22 @@ async def lifespan(app: FastAPI):
     await database.connect()
     await seed_defaults(settings)
     app.state.database = database
-    yield
-    await database.close()
+    worker = SubscriptionWorker(settings)
+    worker_task = asyncio.create_task(worker.run())
+    app.state.subscription_worker = worker
+    try:
+        yield
+    finally:
+        await worker.stop()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+        await database.close()
 
 
-app = FastAPI(title="Grouproxy Control Plane", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Grouproxy Control Plane", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -700,6 +777,157 @@ async def delete_blacklist(entry_id: str, _: str = Depends(require_management)) 
     )
 
 
+async def _read_subscription_upload(upload: UploadFile, max_body_bytes: int) -> bytes:
+    data = bytearray()
+    while chunk := await upload.read(64 * 1024):
+        if len(data) + len(chunk) > max_body_bytes:
+            raise HTTPException(422, "subscription_response_too_large")
+        data.extend(chunk)
+    if not data:
+        raise HTTPException(422, "subscription_response_empty")
+    return bytes(data)
+
+
+@app.get("/api/v1/subscriptions", response_model=SubscriptionCatalogOut)
+async def list_subscriptions(_: str = Depends(require_management)) -> SubscriptionCatalogOut:
+    sources = await SubscriptionSource.find_all().sort(+SubscriptionSource.name).to_list()
+    versions = await SubscriptionVersion.find_all().sort(
+        -SubscriptionVersion.created_at
+    ).limit(500).to_list()
+    bindings = await SiteSubscription.find_all().sort(+SiteSubscription.site_id).to_list()
+    return SubscriptionCatalogOut(
+        sources=[_subscription_source_out(item) for item in sources],
+        versions=[_subscription_version_out(item) for item in versions],
+        site_subscriptions=[_site_subscription_out(item) for item in bindings],
+    )
+
+
+@app.post(
+    "/api/v1/subscriptions",
+    response_model=SubscriptionRefreshResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_subscription_source(
+    payload: SubscriptionSourceCreate,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> SubscriptionRefreshResponse:
+    try:
+        source_url = normalize_source_url(payload.url)
+    except SubscriptionError as exc:
+        raise HTTPException(422, exc.code) from exc
+    if await SubscriptionSource.find_one(SubscriptionSource.name == payload.name.strip()):
+        raise HTTPException(409, "subscription_source_name_exists")
+    settings = _settings()
+    source = SubscriptionSource(
+        name=payload.name.strip(),
+        url=source_url,
+        fetch_interval_sec=payload.fetch_interval_sec,
+        max_body_bytes=min(payload.max_body_bytes, settings.subscription_max_body_bytes),
+        redirect_limit=payload.redirect_limit,
+        created_by=settings.admin_username,
+    )
+    await source.insert()
+    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
+    task, merged = await enqueue_refresh_task(
+        source=source,
+        created_by=settings.admin_username,
+        idempotency_key=idempotency_key_header,
+        request_id=request_id,
+    )
+    await append_audit(
+        action="subscription_source.create",
+        target_type="subscription_source",
+        target_id=_model_id(source),
+        actor=settings.admin_username,
+        request_id=request_id,
+        after={
+            "name": source.name,
+            "url_hint": source_url_hint(source.url),
+            "fetch_interval_sec": source.fetch_interval_sec,
+        },
+    )
+    return SubscriptionRefreshResponse(
+        source=_subscription_source_out(source), task=_task_out(task), merged=merged
+    )
+
+
+@app.post(
+    "/api/v1/subscriptions/upload",
+    response_model=SubscriptionUploadResponse,
+    status_code=201,
+)
+async def upload_subscription(
+    name: str = Form(..., min_length=1, max_length=120),
+    file: UploadFile = File(...),  # noqa: B008 - FastAPI declaration
+    _: str = Depends(require_management),
+) -> SubscriptionUploadResponse:
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(422, "subscription_source_name_required")
+    if await SubscriptionSource.find_one(SubscriptionSource.name == clean_name):
+        raise HTTPException(409, "subscription_source_name_exists")
+    settings = _settings()
+    source = SubscriptionSource(
+        name=clean_name,
+        url="",
+        max_body_bytes=settings.subscription_max_body_bytes,
+        created_by=settings.admin_username,
+    )
+    await source.insert()
+    content = await _read_subscription_upload(file, source.max_body_bytes)
+    try:
+        version, _ = await record_uploaded_subscription(source, content, settings)
+    except SubscriptionError as exc:
+        # The source has no usable version yet, but it remains visible for
+        # operators to diagnose or replace. Its raw body is never returned.
+        raise HTTPException(422, exc.code) from exc
+    await append_audit(
+        action="subscription.upload",
+        target_type="subscription_version",
+        target_id=_model_id(version),
+        actor=settings.admin_username,
+        after={
+            "source_id": _model_id(source),
+            "content_hash": version.content_hash,
+            "parse_ok": version.parse_ok,
+            "format": version.format,
+        },
+    )
+    return SubscriptionUploadResponse(
+        source=_subscription_source_out(source), version=_subscription_version_out(version)
+    )
+
+
+@app.post(
+    "/api/v1/subscriptions/{source_id}/refresh",
+    response_model=SubscriptionRefreshResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_subscription(
+    source_id: str,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> SubscriptionRefreshResponse:
+    source = await SubscriptionSource.get(source_id)
+    if source is None:
+        raise HTTPException(404, "subscription_source_not_found")
+    if not source.url:
+        raise HTTPException(409, "subscription_source_not_refreshable")
+    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
+    task, merged = await enqueue_refresh_task(
+        source=source,
+        created_by=_settings().admin_username,
+        idempotency_key=idempotency_key_header,
+        request_id=request_id,
+    )
+    return SubscriptionRefreshResponse(
+        source=_subscription_source_out(source), task=_task_out(task), merged=merged
+    )
+
+
 @app.post("/api/v1/config/drafts", response_model=DraftOut, status_code=201)
 async def create_draft(payload: DraftCreate, _: str = Depends(require_management)) -> DraftOut:
     site = await Site.get(payload.site_id)
@@ -749,38 +977,31 @@ async def get_draft(draft_id: str, _: str = Depends(require_management)) -> Draf
     return _draft_out(draft)
 
 
-@app.post("/api/v1/config/releases", response_model=ReleaseOut, status_code=202)
-async def create_release(
-    payload: ReleaseCreate,
-    request: Request,
-    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
-    _: str = Depends(require_management),
-) -> ReleaseOut:
-    draft = await ConfigDraft.get(payload.draft_id)
-    if draft is None:
-        raise HTTPException(404, "draft_not_found")
-    selected_key = ",".join(sorted(payload.node_ids or draft.node_ids))
-    idem = (
-        payload.idempotency_key
-        or idempotency_key_header
-        or f"config.publish:{draft.id}:{selected_key}:{draft.source_revision}"
-    )
-    existing_task = await Task.find_one(Task.idempotency_key == idem)
+async def _create_release_from_draft(
+    *,
+    draft: ConfigDraft,
+    site: Site,
+    requested_node_ids: list[str],
+    expected_current_version: int | None,
+    idempotency_key: str,
+    request_id: str,
+    actor: str,
+) -> tuple[ConfigRelease, bool]:
+    existing_task = await Task.find_one(Task.idempotency_key == idempotency_key)
     if existing_task:
         existing_release = await ConfigRelease.find_one(
             ConfigRelease.task_id == existing_task.task_id
         )
         if existing_release:
-            return _release_out(existing_release)
+            return existing_release, True
     if draft.expires_at <= utcnow() or draft.status in {"expired", "released"}:
         raise HTTPException(409, "draft_expired_or_used")
-    site = await Site.get(payload.site_id or draft.site_id)
-    if site is None or str(site.id) != draft.site_id:
+    if str(site.id) != draft.site_id:
         raise HTTPException(409, "site_mismatch")
     nodes = await Node.find(Node.site_id == draft.site_id).to_list()
-    selected_document_ids = (
-        payload.node_ids or draft.node_ids or [_model_id(node) for node in nodes]
-    )
+    selected_document_ids = requested_node_ids or draft.node_ids or [
+        _model_id(node) for node in nodes
+    ]
     selected = [node for node in nodes if _model_id(node) in set(selected_document_ids)]
     if len(selected) != len(selected_document_ids) or not selected:
         raise HTTPException(409, "invalid_release_nodes")
@@ -798,25 +1019,25 @@ async def create_release(
         raise HTTPException(409, "release_in_progress")
     current = await latest_release(draft.site_id)
     current_version = current.desired_version if current else 0
-    if (
-        payload.expected_current_version is not None
-        and payload.expected_current_version != current_version
-    ):
+    if expected_current_version is not None and expected_current_version != current_version:
         raise HTTPException(
-            status_code=409, detail={"code": "version_conflict", "current_version": current_version}
+            status_code=409,
+            detail={"code": "version_conflict", "current_version": current_version},
         )
-    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
-    release_id, desired_items = await create_desired_release(
-        site=site, nodes=selected, settings=_settings(), created_by=_settings().admin_username
-    )
+    try:
+        release_id, desired_items = await create_desired_release(
+            site=site, nodes=selected, settings=_settings(), created_by=actor
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     desired_first = desired_items[0]
     task, _ = await create_task(
         task_type="config.publish",
         target_type="site",
         target_id=draft.site_id,
         payload={"release_id": release_id, "node_ids": selected_ids},
-        idempotency_key=idem,
-        created_by=_settings().admin_username,
+        idempotency_key=idempotency_key,
+        created_by=actor,
         request_id=request_id,
     )
     release = ConfigRelease(
@@ -829,7 +1050,7 @@ async def create_release(
         status="applying",
         stage="applying",
         progress=10,
-        created_by=_settings().admin_username,
+        created_by=actor,
         started_at=utcnow(),
     )
     await release.insert()
@@ -839,7 +1060,7 @@ async def create_release(
         action="config_release.create",
         target_type="config_release",
         target_id=release_id,
-        actor=_settings().admin_username,
+        actor=actor,
         request_id=request_id,
         after={
             "site_id": draft.site_id,
@@ -847,7 +1068,286 @@ async def create_release(
             "desired_version": desired_first.desired_version,
         },
     )
+    return release, False
+
+
+@app.post("/api/v1/config/releases", response_model=ReleaseOut, status_code=202)
+async def create_release(
+    payload: ReleaseCreate,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> ReleaseOut:
+    draft = await ConfigDraft.get(payload.draft_id)
+    if draft is None:
+        raise HTTPException(404, "draft_not_found")
+    selected_key = ",".join(sorted(payload.node_ids or draft.node_ids))
+    idem = (
+        payload.idempotency_key
+        or idempotency_key_header
+        or f"config.publish:{draft.id}:{selected_key}:{draft.source_revision}"
+    )
+    site = await Site.get(payload.site_id or draft.site_id)
+    if site is None:
+        raise HTTPException(409, "site_mismatch")
+    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
+    release, _ = await _create_release_from_draft(
+        draft=draft,
+        site=site,
+        requested_node_ids=payload.node_ids,
+        expected_current_version=payload.expected_current_version,
+        idempotency_key=idem,
+        request_id=request_id,
+        actor=_settings().admin_username,
+    )
     return _release_out(release)
+
+
+async def _publish_subscription_version(
+    *,
+    version: SubscriptionVersion,
+    sites: list[Site],
+    request_id: str,
+    actor: str,
+    note: str,
+    idempotency_key: str | None = None,
+    operation: str = "publish",
+) -> list[ConfigRelease]:
+    if not version.parse_ok:
+        raise HTTPException(409, "subscription_version_not_publishable")
+    # Check all deployment targets first. This avoids changing site bindings
+    # for a later target after an earlier target has already been rejected for
+    # a concurrent release.
+    nodes_by_site: dict[str, list[Node]] = {}
+    task_keys: dict[str, str] = {}
+    existing_releases: dict[str, ConfigRelease] = {}
+    for site in sites:
+        site_id = _model_id(site)
+        key_suffix = (
+            hashlib.sha256(idempotency_key.strip().encode("utf-8")).hexdigest()
+            if idempotency_key and idempotency_key.strip()
+            else secrets.token_hex(16)
+        )
+        task_key = f"subscription.{operation}:{version.id}:{site_id}:{key_suffix}"
+        task_keys[site_id] = task_key
+        if idempotency_key and idempotency_key.strip():
+            existing_task = await Task.find_one(Task.idempotency_key == task_key)
+            if existing_task is not None:
+                existing_release = await ConfigRelease.find_one(
+                    ConfigRelease.task_id == existing_task.task_id
+                )
+                if existing_release is None:
+                    raise HTTPException(409, "subscription_publish_idempotency_incomplete")
+                existing_releases[site_id] = existing_release
+                continue
+        nodes = await Node.find(Node.site_id == site_id).to_list()
+        nodes_by_site[site_id] = nodes
+        agent_ids = [node.agent_id for node in nodes]
+        if not agent_ids:
+            continue
+        active = await ConfigRelease.find_one(
+            {
+                "node_ids": {"$in": agent_ids},
+                "status": {"$in": ["queued", "applying", "health_check", "rolling_back"]},
+            }
+        )
+        if active:
+            raise HTTPException(409, "release_in_progress")
+
+    releases: list[ConfigRelease] = []
+    created_releases: list[ConfigRelease] = []
+    changed_site_ids: list[str] = []
+    for site in sites:
+        site_id = _model_id(site)
+        if existing_release := existing_releases.get(site_id):
+            releases.append(existing_release)
+            continue
+        binding = await SiteSubscription.find_one(SiteSubscription.site_id == site_id)
+        previous_version_id = binding.subscription_version_id if binding else None
+        previous_rollback_version_id = binding.previous_subscription_version_id if binding else None
+        previous_source_id = binding.source_id if binding else None
+        binding_created = binding is None
+        binding_changed = False
+        if binding is None:
+            binding = SiteSubscription(
+                site_id=site_id,
+                source_id=version.source_id,
+                subscription_version_id=_model_id(version),
+                previous_subscription_version_id=None,
+                updated_by=actor,
+            )
+            await binding.insert()
+            binding_changed = True
+        elif (
+            previous_version_id != _model_id(version)
+            or binding.source_id != version.source_id
+        ):
+            if previous_version_id != _model_id(version):
+                binding.previous_subscription_version_id = previous_version_id
+            binding.subscription_version_id = _model_id(version)
+            binding.source_id = version.source_id
+            binding.updated_by = actor
+            binding.updated_at = utcnow()
+            await binding.save()
+            binding_changed = True
+        if binding_changed:
+            changed_site_ids.append(site_id)
+
+        nodes = nodes_by_site[site_id]
+        if not nodes:
+            continue
+        cidrs, sources = await effective_cidrs(site_id)
+        draft = ConfigDraft(
+            site_id=site_id,
+            node_ids=[_model_id(node) for node in nodes],
+            source_revision=site.config_revision,
+            diff={
+                "subscription": {
+                    "from_version_id": previous_version_id,
+                    "to_version_id": _model_id(version),
+                    "content_hash": version.content_hash,
+                    "format": version.format,
+                    "node_count": version.node_count,
+                },
+                "note": note,
+            },
+            validation={
+                "valid": True,
+                "errors": [],
+                "effective_cidrs": cidrs,
+                "acl_sources": sources,
+                "subscription": {
+                    "parse_ok": version.parse_ok,
+                    "content_hash": version.content_hash,
+                    "format": version.format,
+                },
+            },
+            risk_level="medium",
+            status="draft",
+            created_by=actor,
+            expires_at=utcnow() + timedelta(hours=24),
+        )
+        await draft.insert()
+        try:
+            release, _ = await _create_release_from_draft(
+                draft=draft,
+                site=site,
+                requested_node_ids=draft.node_ids,
+                expected_current_version=None,
+                idempotency_key=task_keys[site_id],
+                request_id=request_id,
+                actor=actor,
+            )
+        except Exception:
+            # The selection was changed before the Desired Bundle was built;
+            # restore it when a local release cannot be created.
+            if binding_created:
+                await binding.delete()
+            elif binding_changed:
+                binding.subscription_version_id = previous_version_id
+                binding.previous_subscription_version_id = previous_rollback_version_id
+                binding.source_id = previous_source_id or binding.source_id
+                binding.updated_at = utcnow()
+                await binding.save()
+            raise
+        releases.append(release)
+        created_releases.append(release)
+
+    if created_releases or changed_site_ids:
+        version.published = True
+        await version.save()
+        await append_audit(
+            action=f"subscription.{operation}",
+            target_type="subscription_version",
+            target_id=_model_id(version),
+            actor=actor,
+            request_id=request_id,
+            after={
+                "content_hash": version.content_hash,
+                "site_ids": list(
+                    dict.fromkeys(
+                        [release.site_id for release in created_releases] + changed_site_ids
+                    )
+                ),
+                "release_ids": [release.release_id for release in created_releases],
+            },
+        )
+    return releases
+
+
+@app.post(
+    "/api/v1/subscriptions/{source_id}/versions/{version_id}/publish",
+    response_model=SubscriptionPublishOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def publish_subscription_version(
+    source_id: str,
+    version_id: str,
+    payload: SubscriptionPublishRequest,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> SubscriptionPublishOut:
+    version = await SubscriptionVersion.get(version_id)
+    if version is None or version.source_id != source_id:
+        raise HTTPException(404, "subscription_version_not_found")
+    requested_ids = list(dict.fromkeys(payload.site_ids))
+    if requested_ids:
+        sites = [await Site.get(site_id) for site_id in requested_ids]
+        if any(site is None for site in sites):
+            raise HTTPException(404, "site_not_found")
+        target_sites = [site for site in sites if site is not None]
+    else:
+        target_sites = await Site.find_all().sort(+Site.slug).to_list()
+    if not target_sites:
+        raise HTTPException(409, "subscription_publish_no_sites")
+    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
+    releases = await _publish_subscription_version(
+        version=version,
+        sites=target_sites,
+        request_id=request_id,
+        actor=_settings().admin_username,
+        note=payload.note,
+        idempotency_key=idempotency_key_header,
+    )
+    return SubscriptionPublishOut(
+        version=_subscription_version_out(version),
+        releases=[_release_out(item) for item in releases],
+    )
+
+
+@app.post(
+    "/api/v1/subscriptions/sites/{site_id}/rollback",
+    response_model=SubscriptionPublishOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def rollback_site_subscription(
+    site_id: str,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> SubscriptionPublishOut:
+    site = await Site.get(site_id)
+    binding = await SiteSubscription.find_one(SiteSubscription.site_id == site_id)
+    if site is None or binding is None or not binding.previous_subscription_version_id:
+        raise HTTPException(409, "subscription_rollback_not_available")
+    version = await SubscriptionVersion.get(binding.previous_subscription_version_id)
+    if version is None or not version.parse_ok:
+        raise HTTPException(409, "subscription_rollback_not_available")
+    request_id = request.headers.get("x-request-id", "") or secrets.token_hex(16)
+    releases = await _publish_subscription_version(
+        version=version,
+        sites=[site],
+        request_id=request_id,
+        actor=_settings().admin_username,
+        note="Subscription rollback",
+        idempotency_key=idempotency_key_header,
+        operation="rollback",
+    )
+    return SubscriptionPublishOut(
+        version=_subscription_version_out(version),
+        releases=[_release_out(item) for item in releases],
+    )
 
 
 @app.get("/api/v1/config/releases/{release_id}", response_model=ReleaseOut)
@@ -907,6 +1407,11 @@ async def cancel_task(task_id: str, _: str = Depends(require_management)) -> Tas
         raise HTTPException(404, "task_not_found")
     if task.status == "queued":
         task.status = "cancelled"
+        task.active = False
+        task.stage = "cancelled"
+        task.progress_message = "Cancellation acknowledged"
+        task.locked_by = ""
+        task.lease_expires_at = None
         task.finished_at = utcnow()
     elif task.status == "running":
         task.cancel_requested = True
@@ -938,6 +1443,30 @@ async def agent_desired(  # noqa: B008 - FastAPI dependency declaration
     stale = desired.desired_version > supplied_version or desired.bundle_hash != supplied_hash
     return DesiredResponse(
         desired_stale=stale, release_id=desired.release_id, bundle=desired.bundle if stale else None
+    )
+
+
+@app.get("/agent/v1/blobs/{content_hash}")
+async def agent_subscription_blob(
+    content_hash: str,
+    node: Node = Depends(require_agent),  # noqa: B008 - FastAPI dependency declaration
+) -> Response:
+    # A node may only retrieve the blob referenced by its own current Desired
+    # Bundle. This keeps a valid node token from becoming a subscription dump.
+    desired = await latest_release(node.site_id, node.agent_id)
+    subscription = desired.bundle.get("subscription") if desired else None
+    if not isinstance(subscription, dict) or subscription.get("hash") != content_hash:
+        raise HTTPException(404, "subscription_blob_not_assigned")
+    version = await SubscriptionVersion.find_one(SubscriptionVersion.content_hash == content_hash)
+    if version is None or not version.parse_ok:
+        raise HTTPException(404, "subscription_blob_not_found")
+    return Response(
+        content=version.content,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-SHA256": version.content_hash,
+        },
     )
 
 

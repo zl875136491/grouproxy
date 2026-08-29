@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     allow_insecure_agent_http: bool = False
     default_http_port: int = 80
     bundle_ttl_days: int = 30
+    subscription_default_interval_sec: int = 21_600
+    subscription_max_body_bytes: int = 2_000_000
+    subscription_inline_max_bytes: int = 128_000
+    subscription_worker_poll_seconds: float = 1.0
+    subscription_task_lease_seconds: int = 60
     seed_default_sites: bool = True
 
 

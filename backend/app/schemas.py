@@ -134,6 +134,65 @@ class DestinationBlacklistOut(BaseModel):
     created_at: datetime
 
 
+class SubscriptionSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    url: str = Field(min_length=1, max_length=2048)
+    fetch_interval_sec: int = Field(default=21_600, ge=300, le=604_800)
+    max_body_bytes: int = Field(default=2_000_000, ge=1_024, le=10_000_000)
+    redirect_limit: int = Field(default=3, ge=0, le=5)
+
+
+class SubscriptionSourceOut(BaseModel):
+    id: str
+    name: str
+    url_hint: str
+    fetch_interval_sec: int
+    max_body_bytes: int
+    redirect_limit: int
+    enabled: bool
+    refreshable: bool
+    last_refresh_at: datetime | None
+    last_refresh_attempt_at: datetime | None
+    last_refresh_error: str
+    consecutive_failures: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionVersionOut(BaseModel):
+    id: str
+    source_id: str
+    version: int
+    content_hash: str
+    size_bytes: int
+    format: str
+    fetched_at: datetime
+    parse_ok: bool
+    parse_error: str
+    node_count: int
+    published: bool
+    created_at: datetime
+
+
+class SiteSubscriptionOut(BaseModel):
+    site_id: str
+    source_id: str
+    subscription_version_id: str
+    previous_subscription_version_id: str | None
+    updated_at: datetime
+
+
+class SubscriptionCatalogOut(BaseModel):
+    sources: list[SubscriptionSourceOut]
+    versions: list[SubscriptionVersionOut]
+    site_subscriptions: list[SiteSubscriptionOut]
+
+
+class SubscriptionPublishRequest(BaseModel):
+    site_ids: list[str] = Field(default_factory=list)
+    note: str = Field(default="", max_length=500)
+
+
 class DraftCreate(BaseModel):
     site_id: str
     node_ids: list[str] = Field(default_factory=list)
@@ -199,6 +258,22 @@ class TaskOut(BaseModel):
     next_run_at: datetime
     locked_by: str
     lease_expires_at: datetime | None
+
+
+class SubscriptionRefreshResponse(BaseModel):
+    source: SubscriptionSourceOut
+    task: TaskOut
+    merged: bool = False
+
+
+class SubscriptionUploadResponse(BaseModel):
+    source: SubscriptionSourceOut
+    version: SubscriptionVersionOut
+
+
+class SubscriptionPublishOut(BaseModel):
+    version: SubscriptionVersionOut
+    releases: list[ReleaseOut]
 
 
 class AgentAckOut(BaseModel):

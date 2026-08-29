@@ -8,6 +8,8 @@ from ..models import (
     DestinationBlacklist,
     Node,
     Site,
+    SiteSubscription,
+    SubscriptionVersion,
 )
 from .cidr import effective_cidrs
 from .crypto import sign_bundle
@@ -24,6 +26,39 @@ async def latest_release(site_id: str, node_id: str | None = None) -> DesiredRel
     return await DesiredRelease.find_one(query, sort=[("desired_version", -1)])
 
 
+async def selected_subscription_bundle(
+    *, site_id: str, settings: Settings
+) -> dict[str, Any] | None:
+    """Return only the immutable subscription version selected for a site."""
+
+    selected = await SiteSubscription.find_one(SiteSubscription.site_id == site_id)
+    if selected is None:
+        return None
+    version = await SubscriptionVersion.get(selected.subscription_version_id)
+    if version is None or not version.parse_ok:
+        # A broken historical row must never produce an unsigned or incomplete
+        # Desired Bundle. The publish API prevents this normal path.
+        raise ValueError("selected_subscription_version_invalid")
+    try:
+        content = version.content.decode("utf-8")
+    except UnicodeDecodeError as exc:  # pragma: no cover - guarded at ingestion
+        raise ValueError("selected_subscription_content_invalid") from exc
+    payload: dict[str, Any] = {
+        "version": version.version,
+        "version_id": str(version.id),
+        "hash": version.content_hash,
+        "format": version.format,
+        "size_bytes": version.size_bytes,
+    }
+    if version.size_bytes <= settings.subscription_inline_max_bytes:
+        payload["content"] = content
+    else:
+        payload["blob_url"] = (
+            f"{settings.backend_public_url.rstrip('/')}/agent/v1/blobs/{version.content_hash}"
+        )
+    return payload
+
+
 async def build_signed_bundle(
     *,
     site: Site,
@@ -37,22 +72,20 @@ async def build_signed_bundle(
         DestinationBlacklist.enabled == True,  # noqa: E712 - Beanie expression
     ).to_list()
     now = datetime.now(timezone.utc)
+    subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
     bundle: dict[str, Any] = {
         "schema_version": 1,
         "release_id": release_id,
         "desired_version": desired_version,
-        "min_monitor_version": "0.1.0",
+        "min_monitor_version": "0.2.1",
         "site_id": str(site.id),
         "node_id": node.agent_id,
         "shutdown": site.shutdown,
-        "listen": {
-            "http_port": site.http_port,
-            "https_port": None,
-        },
+        "listen": {"http_port": site.http_port},
         "allow_cidrs": allow_cidrs,
         "deny_destinations": [{"pattern": item.pattern, "kind": item.kind} for item in blacklist],
         "proxy_auth": {"required": False, "users": []},
-        "subscription": None,
+        "subscription": subscription,
         "acl_note": sources,
         "issued_at": iso(now),
         "expires_at": iso(now + timedelta(days=settings.bundle_ttl_days)),

@@ -8,23 +8,30 @@ import (
 )
 
 type State struct {
-	LastGoodBundle  map[string]any `json:"last_good_bundle,omitempty"`
-	LastGoodVersion int            `json:"last_good_version"`
-	LastGoodHash    string         `json:"last_good_hash"`
-	AppliedVersion  int            `json:"applied_version"`
-	AppliedHash     string         `json:"applied_hash"`
-	Sequence        int            `json:"sequence"`
-	ConfigStatus    string         `json:"config_status"`
-	ServiceStatus   string         `json:"service_status"`
-	LastError       string         `json:"last_error,omitempty"`
-	LastReloadAt    time.Time      `json:"last_reload_at,omitempty"`
+	LastGoodBundle      map[string]any `json:"last_good_bundle,omitempty"`
+	LastGoodVersion     int            `json:"last_good_version"`
+	LastGoodHash        string         `json:"last_good_hash"`
+	AppliedVersion      int            `json:"applied_version"`
+	AppliedHash         string         `json:"applied_hash"`
+	SubscriptionVersion int            `json:"subscription_version"`
+	SubscriptionHash    string         `json:"subscription_hash"`
+	SubscriptionStatus  string         `json:"subscription_status"`
+	Sequence            int            `json:"sequence"`
+	ConfigStatus        string         `json:"config_status"`
+	ServiceStatus       string         `json:"service_status"`
+	LastError           string         `json:"last_error,omitempty"`
+	LastReloadAt        time.Time      `json:"last_reload_at,omitempty"`
 }
 
 func Load(dir string) (State, error) {
 	path := filepath.Join(dir, "monitor-state.json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return State{ConfigStatus: "unknown", ServiceStatus: "unknown"}, nil
+		return State{
+			ConfigStatus:       "unknown",
+			ServiceStatus:      "unknown",
+			SubscriptionStatus: "not_configured",
+		}, nil
 	}
 	if err != nil {
 		return State{}, err

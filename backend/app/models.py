@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from beanie import Document, Indexed
 from pydantic import Field
+from pymongo import ASCENDING, IndexModel
 
 
 def utcnow() -> datetime:
@@ -86,6 +87,57 @@ class DestinationBlacklist(Document):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class SubscriptionSource(Document):
+    """A control-plane-owned upstream subscription definition.
+
+    ``url`` can contain an upstream credential, so API response models must
+    never expose it. Nodes only ever receive an immutable content version.
+    """
+
+    name: Indexed(str, unique=True)
+    url: str = ""
+    secret_ref: str = ""
+    fetch_interval_sec: int = 21_600
+    max_body_bytes: int = 2_000_000
+    redirect_limit: int = 3
+    enabled: bool = True
+    last_refresh_at: datetime | None = None
+    last_refresh_attempt_at: datetime | None = None
+    last_refresh_error: str = ""
+    consecutive_failures: int = 0
+    created_by: str = "system"
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class SubscriptionVersion(Document):
+    """An immutable fetched or uploaded subscription payload."""
+
+    source_id: str
+    version: int
+    content_hash: Indexed(str)
+    size_bytes: int
+    format: str
+    content: bytes
+    fetched_at: datetime = Field(default_factory=utcnow)
+    parse_ok: bool = False
+    parse_error: str = ""
+    node_count: int = 0
+    published: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SiteSubscription(Document):
+    """The currently selected subscription version for one site."""
+
+    site_id: Indexed(str, unique=True)
+    subscription_version_id: str
+    previous_subscription_version_id: str | None = None
+    source_id: str
+    updated_by: str = "system"
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class DesiredRelease(Document):
     release_id: str
     node_id: str
@@ -162,6 +214,7 @@ class Task(Document):
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: Indexed(str, unique=True)
     status: str = "queued"
+    active: bool = True
     progress: int = 0
     stage: str = "queued"
     progress_message: str = ""
@@ -180,6 +233,19 @@ class Task(Document):
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("target_id", ASCENDING)],
+                name="unique_active_subscription_refresh",
+                unique=True,
+                partialFilterExpression={
+                    "task_type": "subscription.refresh",
+                    "active": True,
+                },
+            )
+        ]
 
 
 class HeartbeatLatest(Document):
@@ -261,6 +327,9 @@ DOCUMENT_MODELS: list[type[Document]] = [
     TravelException,
     CrossSiteAllow,
     DestinationBlacklist,
+    SubscriptionSource,
+    SubscriptionVersion,
+    SiteSubscription,
     DesiredRelease,
     AgentAck,
     ConfigDraft,

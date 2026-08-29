@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const maxBlobBytes = 10 << 20
+
 type Client struct {
 	BaseURL    string
 	Token      string
@@ -90,4 +92,33 @@ func (c *Client) Heartbeat(payload any) error {
 
 func (c *Client) Ack(payload any) error {
 	return c.request(http.MethodPost, "/agent/v1/ack", nil, payload, nil)
+}
+
+// Blob retrieves only a backend-assigned immutable subscription payload. The
+// caller supplies the hash from a signed bundle, rather than a bundle-provided
+// URL, so the monitor cannot be redirected into arbitrary internal services.
+func (c *Client) Blob(contentHash string) ([]byte, error) {
+	endpoint := c.BaseURL + "/agent/v1/blobs/" + url.PathEscape(contentHash)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxBlobBytes+1))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("agent blob http %d", resp.StatusCode)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("agent blob empty")
+	}
+	if len(data) > maxBlobBytes {
+		return nil, fmt.Errorf("agent blob too large")
+	}
+	return data, nil
 }

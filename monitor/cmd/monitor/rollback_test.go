@@ -12,6 +12,7 @@ import (
 
 	"github.com/zl875136491/grouproxy/monitor/internal/client"
 	"github.com/zl875136491/grouproxy/monitor/internal/config"
+	"github.com/zl875136491/grouproxy/monitor/internal/routingdata"
 	"github.com/zl875136491/grouproxy/monitor/internal/runtime"
 	"github.com/zl875136491/grouproxy/monitor/internal/state"
 )
@@ -69,5 +70,58 @@ func TestRollbackUsesPortOverrideAndKeepsLastGoodConfig(t *testing.T) {
 	}
 	if !bytes.Contains(ackBody, []byte(`"rollback_attempted":true`)) || !bytes.Contains(ackBody, []byte(`"rollback_ok":true`)) {
 		t.Fatalf("rollback ACK missing outcome: %s", ackBody)
+	}
+}
+
+func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := routingdata.Ensure(stateDir); err != nil {
+		t.Fatalf("ensure routing data: %v", err)
+	}
+	config := renderSingbox(
+		map[string]any{
+			"allow_cidrs":       []string{"10.32.12.0/24"},
+			"deny_destinations": []any{map[string]any{"kind": "domain", "pattern": "blocked.test"}},
+		},
+		18080,
+		stateDir,
+		"127.0.0.1:19090",
+		[]any{map[string]any{
+			"type":        "shadowsocks",
+			"tag":         "edge-a",
+			"server":      "198.51.100.20",
+			"server_port": 8388,
+			"method":      "aes-256-gcm",
+			"password":    "secret",
+		}},
+	)
+	route := config["route"].(map[string]any)
+	if route["final"] != "subscription" {
+		t.Fatalf("route final = %v", route["final"])
+	}
+	foundSelector := false
+	for _, raw := range config["outbounds"].([]any) {
+		outbound := raw.(map[string]any)
+		if outbound["tag"] == "subscription" && outbound["type"] == "selector" {
+			foundSelector = true
+		}
+	}
+	if !foundSelector {
+		t.Fatal("subscription selector missing")
+	}
+	foundCNDirect := false
+	for _, raw := range route["rules"].([]any) {
+		rule := raw.(map[string]any)
+		tags, ok := rule["rule_set"].([]string)
+		if ok && len(tags) == 2 && tags[0] == routingdata.GeoIPCNTag && tags[1] == routingdata.GeoSiteCNTag && rule["outbound"] == "direct" {
+			foundCNDirect = true
+		}
+	}
+	if !foundCNDirect {
+		t.Fatal("CN direct-routing rule missing")
+	}
+	ruleSets := route["rule_set"].([]any)
+	if len(ruleSets) != 2 {
+		t.Fatalf("rule-set count = %d, want 2", len(ruleSets))
 	}
 }

@@ -1,47 +1,39 @@
-# Grouproxy deployment
+# Grouproxy Deployment
 
-Phase 0/1 uses one control plane on `codedev` and two agent-capable nodes:
+One control plane runs on `codedev`; both `codedev` and `nuc` are agent nodes
+that run monitor and sing-box. The test environment uses HTTP between monitor
+and backend with a node Bearer token and bundle HMAC.
 
-- `codedev`: backend, frontend, MongoDB, monitor and sing-box.
-- `nuc`: monitor and sing-box only.
+The employee path is HTTP CONNECT on port `80`. This phase has no HTTPS proxy
+listener, certificate material, client certificate handling, mTLS, or port
+`443` configuration. `linux-setup-proxy.sh` sets `http_proxy` and
+`https_proxy` to the HTTP proxy URL so encrypted destinations remain inside
+the CONNECT tunnel.
 
-The test environment uses HTTP between monitor and backend with a Bearer token
-and bundle HMAC. This is deliberate for the current certificate constraint; it
-is not a production security posture. Production must use the HTTPS transport
-and a rotated node credential before exposing the control plane beyond the
-isolated test network.
-
-The employee path is HTTP CONNECT on `:80`. No `:443` listener, TLS material,
-CA installation, or HTTPS proxy is enabled in this phase. The script
-`linux-setup-proxy.sh` configures `http_proxy` and `https_proxy` to the HTTP
-proxy URL, which still carries HTTPS destinations through CONNECT.
-
-## Local validation
+## Local Validation
 
 From the repository root:
 
 ```bash
 ./scripts/testenv-up.sh
 ./scripts/verify-phase1.sh
+./scripts/verify-phase2.sh
 ./scripts/testenv-down.sh
 ```
 
-Runtime state, tokens, logs, and the temporary MongoDB data directory are
-created under `testenv/` and are ignored by Git.
+Runtime state, tokens, logs, and temporary MongoDB data are created under
+`testenv/` and ignored by Git.
 
-## Remote node installation
+## Remote Node Installation
 
-`install-node.sh` requires an explicit SSH user and optional key. It does not
-guess credentials and does not use Jenkins credentials:
+`install-node.sh` requires an explicit SSH user and optional key:
 
 ```bash
 NUC_SSH_USER=operator NUC_SSH_KEY=/path/to/key \
   ./deploy/install-node.sh 10.32.12.110
 ```
 
-Use `DRY_RUN=1` to inspect the commands when access to the node is not yet
-available. The script copies only the monitor/sing-box artifacts and systemd
-units; the control plane is never installed remotely. It enables only
-`grouproxy-monitor.service`: monitor owns the sing-box child lifecycle, so
-enabling `sing-box.service` as well would create a second process competing
-for the proxy listener.
+Use `DRY_RUN=1` to inspect the node commands. The script copies only monitor,
+sing-box, and systemd artifacts; the control plane is never installed remotely.
+It enables only `grouproxy-monitor.service` because monitor owns the sing-box
+child lifecycle.

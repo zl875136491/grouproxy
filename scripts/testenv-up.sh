@@ -48,6 +48,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_ADMIN_PASSWORD=%s\n' "$admin_password"
     printf 'GROUPROXY_MANAGEMENT_TOKEN=%s\n' "$management_token"
     printf 'GROUPROXY_ALLOW_INSECURE_AGENT_HTTP=true\n'
+    printf 'GROUPROXY_SUBSCRIPTION_INLINE_MAX_BYTES=64\n'
     printf 'GROUPROXY_SEED_DEFAULT_SITES=true\n'
   } > "$ENV_FILE"
 fi

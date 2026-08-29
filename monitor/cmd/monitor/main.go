@@ -20,11 +20,13 @@ import (
 	"github.com/zl875136491/grouproxy/monitor/internal/client"
 	"github.com/zl875136491/grouproxy/monitor/internal/config"
 	"github.com/zl875136491/grouproxy/monitor/internal/firewall"
+	"github.com/zl875136491/grouproxy/monitor/internal/routingdata"
 	"github.com/zl875136491/grouproxy/monitor/internal/runtime"
 	"github.com/zl875136491/grouproxy/monitor/internal/state"
+	"github.com/zl875136491/grouproxy/monitor/internal/subscription"
 )
 
-const monitorVersion = "0.1.0"
+const monitorVersion = "0.2.1"
 
 type agent struct {
 	cfg       config.Config
@@ -154,7 +156,20 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if a.cfg.ListenPortOverride > 0 {
 		port = a.cfg.ListenPortOverride
 	}
-	configValue := renderSingbox(value, port, a.cfg.StateDir, a.cfg.ClashAPIListen)
+	subscriptionOutbounds, subscriptionVersion, subscriptionHash, subscriptionStatus, err := a.resolveSubscription(value)
+	if err != nil {
+		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
+	}
+	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
+		return a.ackFailure(value, "routing_data_write_failed", err.Error(), false, false, false, false)
+	}
+	configValue := renderSingbox(
+		value,
+		port,
+		a.cfg.StateDir,
+		a.cfg.ClashAPIListen,
+		subscriptionOutbounds,
+	)
 	versionsDir := filepath.Join(a.cfg.StateDir, "versions")
 	if err := os.MkdirAll(versionsDir, 0o700); err != nil {
 		return err
@@ -208,6 +223,9 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err := bundle.WriteJSON(a.cfg.SingboxConfig, configValue); err != nil {
 		return err
 	}
+	if err := bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good.json"), configValue); err != nil {
+		return err
+	}
 	if err := bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good-bundle.json"), value); err != nil {
 		return err
 	}
@@ -220,10 +238,14 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	a.state.LastGoodHash = hashValue
 	a.state.AppliedVersion = version
 	a.state.AppliedHash = hashValue
+	a.state.SubscriptionVersion = subscriptionVersion
+	a.state.SubscriptionHash = subscriptionHash
+	a.state.SubscriptionStatus = subscriptionStatus
 	a.state.ConfigStatus = "in_sync"
 	a.state.ServiceStatus = "healthy"
 	a.state.LastError = ""
 	a.state.LastReloadAt = time.Now().UTC()
+	a.lastError = ""
 	a.sequence++
 	a.state.Sequence = a.sequence
 	saveErr := state.Save(a.cfg.StateDir, a.state)
@@ -241,7 +263,6 @@ func (a *agent) rollback(value map[string]any, candidatePath, reason string, pro
 	nftRollbackOK := a.restoreLastGoodFirewall() == nil
 	a.stateMu.Lock()
 	lastGood := a.state.LastGoodBundle
-	lastGoodVersion := a.state.LastGoodVersion
 	a.stateMu.Unlock()
 	if lastGood != nil {
 		if listen, ok := lastGood["listen"].(map[string]any); ok {
@@ -249,12 +270,13 @@ func (a *agent) rollback(value map[string]any, candidatePath, reason string, pro
 				if a.cfg.ListenPortOverride > 0 {
 					port = a.cfg.ListenPortOverride
 				}
-				lastPath := filepath.Join(a.cfg.StateDir, "last-good.json")
-				configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen)
-				if err := bundle.WriteJSON(lastPath, configValue); err == nil {
+				lastPath, err := a.ensureLastGoodConfig(lastGood, port)
+				if err == nil {
 					// Keep the configured path and the rollback snapshot identical;
 					// a restart must not resurrect the failed candidate.
-					if err := bundle.WriteJSON(a.cfg.SingboxConfig, configValue); err != nil {
+					if configData, readErr := os.ReadFile(lastPath); readErr != nil {
+						a.log.Printf("read rollback config: %v", readErr)
+					} else if err := bundle.WriteBytes(a.cfg.SingboxConfig, configData, ".rollback-*"); err != nil {
 						a.log.Printf("write rollback config: %v", err)
 					}
 					a.runtime.ListenPort = port
@@ -281,7 +303,6 @@ func (a *agent) rollback(value map[string]any, candidatePath, reason string, pro
 	_ = state.Save(a.cfg.StateDir, a.state)
 	a.stateMu.Unlock()
 	_ = a.sendAck(value, false, processOK, nftRollbackOK, false, true, rollbackOK, "rolled_back", "health_check_failed", reason)
-	_ = lastGoodVersion
 	return errors.New(reason)
 }
 
@@ -327,12 +348,15 @@ func (a *agent) restoreLastGood() error {
 	if a.cfg.ListenPortOverride > 0 {
 		port = a.cfg.ListenPortOverride
 	}
-	path := filepath.Join(a.cfg.StateDir, "last-good.json")
-	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen)
-	if err := bundle.WriteJSON(path, configValue); err != nil {
+	path, err := a.ensureLastGoodConfig(lastGood, port)
+	if err != nil {
 		return err
 	}
-	if err := bundle.WriteJSON(a.cfg.SingboxConfig, configValue); err != nil {
+	configData, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := bundle.WriteBytes(a.cfg.SingboxConfig, configData, ".restore-*"); err != nil {
 		return err
 	}
 	a.runtime.ListenPort = port
@@ -348,10 +372,42 @@ func (a *agent) restoreLastGood() error {
 	return nil
 }
 
+// ensureLastGoodConfig keeps the resolved configuration locally. In
+// particular, restart and rollback do not need the control plane to retrieve
+// a historical blob while it is unavailable.
+func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string, error) {
+	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(a.cfg.StateDir, "last-good.json")
+	if data, err := os.ReadFile(path); err == nil {
+		var configValue map[string]any
+		if json.Unmarshal(data, &configValue) == nil && ensureRoutingRules(configValue, a.cfg.StateDir) {
+			if err := bundle.WriteJSON(path, configValue); err != nil {
+				return "", err
+			}
+			return path, nil
+		}
+		if configValue != nil {
+			return path, nil
+		}
+	}
+	outbounds, _, _, _, err := a.resolveSubscription(lastGood)
+	if err != nil {
+		return "", err
+	}
+	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds)
+	if err := bundle.WriteJSON(path, configValue); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func (a *agent) ackFailure(value map[string]any, code, message string, singboxOK, nftOK, healthOK, rollbackAttempted bool) error {
 	a.stateMu.Lock()
 	a.state.ConfigStatus = "failed"
 	a.state.LastError = message
+	a.lastError = message
 	a.sequence++
 	a.state.Sequence = a.sequence
 	_ = state.Save(a.cfg.StateDir, a.state)
@@ -421,7 +477,7 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 		"liveness_status":     status,
 		"config_status":       value.ConfigStatus,
 		"service_status":      value.ServiceStatus,
-		"subscription_status": "not_configured",
+		"subscription_status": subscriptionStatus(value.SubscriptionStatus),
 		"process_ok":          processOK,
 		"port_ok":             portOK,
 		"api_ok":              apiOK,
@@ -432,7 +488,140 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 	return a.client.Heartbeat(payload)
 }
 
-func renderSingbox(value map[string]any, port int, stateDir, clashAPIListen string) map[string]any {
+func (a *agent) resolveSubscription(value map[string]any) ([]any, int, string, string, error) {
+	raw, exists := value["subscription"]
+	if !exists || raw == nil {
+		return nil, 0, "", "not_configured", nil
+	}
+	spec, ok := raw.(map[string]any)
+	if !ok {
+		return nil, 0, "", "", errors.New("invalid_subscription")
+	}
+	version, ok := asInt(spec["version"])
+	if !ok || version < 1 {
+		return nil, 0, "", "", errors.New("invalid_subscription_version")
+	}
+	hashValue := stringValue(spec["hash"])
+	format := stringValue(spec["format"])
+	var content []byte
+	if inline, present := spec["content"].(string); present {
+		content = []byte(inline)
+	} else if _, present := spec["blob_url"].(string); present {
+		var err error
+		content, err = a.client.Blob(hashValue)
+		if err != nil {
+			return nil, 0, "", "", fmt.Errorf("subscription_blob_fetch_failed: %w", err)
+		}
+	} else {
+		return nil, 0, "", "", errors.New("invalid_subscription_content")
+	}
+	if err := subscription.VerifyHash(content, hashValue); err != nil {
+		return nil, 0, "", "", err
+	}
+	outbounds, err := subscription.Parse(content, format)
+	if err != nil {
+		return nil, 0, "", "", err
+	}
+	return outbounds, version, hashValue, "current", nil
+}
+
+func subscriptionStatus(value string) string {
+	if value == "" {
+		return "not_configured"
+	}
+	return value
+}
+
+func localRuleSets(stateDir string) []any {
+	return []any{
+		map[string]any{
+			"type":   "local",
+			"tag":    routingdata.GeoIPCNTag,
+			"format": "binary",
+			"path":   routingdata.Path(stateDir, routingdata.GeoIPCNTag),
+		},
+		map[string]any{
+			"type":   "local",
+			"tag":    routingdata.GeoSiteCNTag,
+			"format": "binary",
+			"path":   routingdata.Path(stateDir, routingdata.GeoSiteCNTag),
+		},
+	}
+}
+
+func cnDirectRule() map[string]any {
+	return map[string]any{
+		"rule_set": []string{routingdata.GeoIPCNTag, routingdata.GeoSiteCNTag},
+		"outbound": "direct",
+	}
+}
+
+// ensureRoutingRules upgrades a persisted pre-rule-set last-good config in
+// place. It deliberately uses the already resolved config, so no historical
+// subscription blob needs to be fetched while the control plane is down.
+func ensureRoutingRules(configValue map[string]any, stateDir string) bool {
+	route, ok := configValue["route"].(map[string]any)
+	if !ok {
+		return false
+	}
+	rules, ok := route["rules"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	if !hasCNRuleSetDefinitions(route["rule_set"]) {
+		route["rule_set"] = localRuleSets(stateDir)
+		changed = true
+	}
+	if !hasCNDirectRule(rules) {
+		route["rules"] = append(rules, cnDirectRule())
+		changed = true
+	}
+	return changed
+}
+
+func hasCNRuleSetDefinitions(value any) bool {
+	definitions, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	foundIP, foundSite := false, false
+	for _, raw := range definitions {
+		definition, ok := raw.(map[string]any)
+		if !ok || stringValue(definition["type"]) != "local" || stringValue(definition["format"]) != "binary" {
+			continue
+		}
+		switch stringValue(definition["tag"]) {
+		case routingdata.GeoIPCNTag:
+			foundIP = true
+		case routingdata.GeoSiteCNTag:
+			foundSite = true
+		}
+	}
+	return foundIP && foundSite
+}
+
+func hasCNDirectRule(rules []any) bool {
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]any)
+		if !ok || stringValue(rule["outbound"]) != "direct" {
+			continue
+		}
+		tags := stringSlice(rule["rule_set"])
+		if len(tags) == 2 && tags[0] == routingdata.GeoIPCNTag && tags[1] == routingdata.GeoSiteCNTag {
+			return true
+		}
+	}
+	return false
+}
+
+func renderSingbox(
+	value map[string]any,
+	port int,
+	stateDir string,
+	clashAPIListen string,
+	subscriptionOutbounds []any,
+) map[string]any {
 	inbound := map[string]any{
 		"type":             "http",
 		"tag":              "grouproxy-http",
@@ -468,7 +657,7 @@ func renderSingbox(value map[string]any, port int, stateDir, clashAPIListen stri
 			if pattern == "" {
 				continue
 			}
-			rule := map[string]any{"action": "reject"}
+			rule := map[string]any{"outbound": "block"}
 			switch kind {
 			case "ip", "cidr":
 				rule["ip_cidr"] = []string{pattern}
@@ -478,14 +667,47 @@ func renderSingbox(value map[string]any, port int, stateDir, clashAPIListen stri
 			routeRules = append(routeRules, rule)
 		}
 	}
+	// Pin CN domain and IP handling to local binary rule-sets. Explicit
+	// blacklist rules remain above this rule, so destination deny policy wins.
+	routeRules = append(routeRules, cnDirectRule())
+	outbounds := []any{
+		map[string]any{"type": "direct", "tag": "direct"},
+		map[string]any{"type": "block", "tag": "block"},
+	}
+	finalOutbound := "direct"
+	if len(subscriptionOutbounds) > 0 {
+		tags := make([]string, 0, len(subscriptionOutbounds))
+		for _, raw := range subscriptionOutbounds {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			tag := stringValue(entry["tag"])
+			if tag == "" {
+				continue
+			}
+			tags = append(tags, tag)
+			outbounds = append(outbounds, entry)
+		}
+		if len(tags) > 0 {
+			outbounds = append(outbounds, map[string]any{
+				"type":      "selector",
+				"tag":       "subscription",
+				"outbounds": tags,
+				"default":   tags[0],
+			})
+			finalOutbound = "subscription"
+		}
+	}
 	return map[string]any{
-		"log":      map[string]any{"level": "info", "output": filepath.Join(stateDir, "sing-box.log")},
-		"inbounds": []any{inbound},
-		"outbounds": []any{
-			map[string]any{"type": "direct", "tag": "direct"},
-			map[string]any{"type": "block", "tag": "block"},
+		"log":       map[string]any{"level": "info", "output": filepath.Join(stateDir, "sing-box.log")},
+		"inbounds":  []any{inbound},
+		"outbounds": outbounds,
+		"route": map[string]any{
+			"rule_set": localRuleSets(stateDir),
+			"rules":    routeRules,
+			"final":    finalOutbound,
 		},
-		"route": map[string]any{"rules": routeRules, "final": "direct"},
 		"experimental": map[string]any{
 			"clash_api": map[string]any{
 				"external_controller": clashAPIListen,

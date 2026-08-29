@@ -14,6 +14,7 @@ import {
   LogOut,
   Menu,
   Network,
+  Radio,
   RefreshCw,
   ScrollText,
   ServerCog,
@@ -54,6 +55,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "DEPLOY",
     items: [
+      { href: "/subscriptions", label: "Subscriptions", icon: Radio },
       { href: "/releases", label: "Releases", icon: Boxes },
       { href: "/tasks", label: "Tasks", icon: ClipboardList },
     ],
