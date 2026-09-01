@@ -2,16 +2,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zl875136491/grouproxy/monitor/internal/client"
 	"github.com/zl875136491/grouproxy/monitor/internal/config"
+	"github.com/zl875136491/grouproxy/monitor/internal/firewall"
 	"github.com/zl875136491/grouproxy/monitor/internal/routingdata"
 	"github.com/zl875136491/grouproxy/monitor/internal/runtime"
 	"github.com/zl875136491/grouproxy/monitor/internal/state"
@@ -98,6 +101,7 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 			"method":      "aes-256-gcm",
 			"password":    "secret",
 		}},
+		"",
 	)
 	route := config["route"].(map[string]any)
 	if route["final"] != "subscription" {
@@ -136,6 +140,82 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 	ruleSets := route["rule_set"].([]any)
 	if len(ruleSets) != 2 {
 		t.Fatalf("rule-set count = %d, want 2", len(ruleSets))
+	}
+}
+
+func TestRenderSingboxSupportsLoopbackIngress(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := routingdata.Ensure(stateDir); err != nil {
+		t.Fatalf("ensure routing data: %v", err)
+	}
+	config := renderSingbox(
+		map[string]any{"allow_cidrs": []string{"10.32.12.0/24"}},
+		18080,
+		stateDir,
+		"127.0.0.1:19090",
+		nil,
+		"127.0.0.1",
+	)
+	inbound := config["inbounds"].([]any)[0].(map[string]any)
+	if inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != 18080 {
+		t.Fatalf("unexpected internal ingress: %#v", inbound)
+	}
+	if _, exists := inbound["proxy_protocol"]; exists {
+		t.Fatalf("unsupported PROXY protocol option rendered: %#v", inbound)
+	}
+}
+
+func TestEnsureLastGoodConfigReappliesOperationalIngress(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := routingdata.Ensure(stateDir); err != nil {
+		t.Fatalf("ensure routing data: %v", err)
+	}
+	lastGood := map[string]any{
+		"allow_cidrs": []string{"10.32.12.0/24"},
+		"shutdown":    false,
+	}
+	persisted := renderSingbox(lastGood, 18080, stateDir, "127.0.0.1:19090", nil, "")
+	persistedData, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "last-good.json"), persistedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent := &agent{cfg: config.Config{
+		StateDir:              stateDir,
+		ListenAddressOverride: "127.0.0.1",
+	}}
+	path, err := agent.ensureLastGoodConfig(lastGood, 18080)
+	if err != nil {
+		t.Fatalf("ensure last-good config: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored map[string]any
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	inbound := restored["inbounds"].([]any)[0].(map[string]any)
+	if inbound["listen"] != "127.0.0.1" {
+		t.Fatalf("operational ingress was not restored: %#v", inbound)
+	}
+}
+
+func TestRestoreLastGoodFirewallUsesOverridePort(t *testing.T) {
+	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 80, FirewallMode: "dry-run"}}
+	lastGood := map[string]any{
+		"listen":      map[string]any{"http_port": 80},
+		"allow_cidrs": []string{"10.32.12.0/24"},
+	}
+	if err := agent.restoreLastGoodFirewallForBundle(lastGood); err != nil {
+		t.Fatalf("render last-good firewall: %v", err)
+	}
+	script := firewall.Render(agent.firewallPort(80), []string{"10.32.12.0/24"}, false)
+	if !strings.Contains(script, "tcp dport 80") || strings.Contains(script, "tcp dport 18080") {
+		t.Fatalf("firewall override was not selected:\n%s", script)
 	}
 }
 
