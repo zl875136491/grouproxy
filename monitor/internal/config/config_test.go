@@ -33,3 +33,24 @@ func TestLoadRejectsNonLoopbackClashAPI(t *testing.T) {
 		t.Fatal("non-loopback Clash API listener accepted")
 	}
 }
+
+func TestLoadAcceptsOperationalIngressOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "monitor.yaml")
+	base := "backend_url: https://control.example\nnode_id: n\ntoken_file: /tmp/t\nsingbox_bin: /tmp/s\nhmac_secret: \"01234567890123456789012345678901\"\n"
+	if err := os.WriteFile(path, []byte(base+"listen_address_override: invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid ingress address was accepted")
+	}
+	if err := os.WriteFile(path, []byte(base+"listen_address_override: 127.0.0.1\nfirewall_port_override: 80\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("loopback ingress overrides rejected: %v", err)
+	}
+	if cfg.FirewallPortOverride != 80 || cfg.ListenAddressOverride != "127.0.0.1" {
+		t.Fatalf("operational ingress overrides were not loaded: %#v", cfg)
+	}
+}

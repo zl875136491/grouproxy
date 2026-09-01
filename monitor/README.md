@@ -45,4 +45,7 @@ make dist
 
 The generated `dist/grouproxy-monitor-linux-amd64` and `dist/SHA256SUMS` are
 versioned together with monitor code. `-once` is available for isolated node
-bootstrap and integration tests.
+bootstrap and integration tests. `-validate` loads the monitor configuration
+and referenced token file without creating state, contacting the backend, or
+changing sing-box/nftables; the systemd unit and node installer use it before
+starting the service.

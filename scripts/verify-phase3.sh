@@ -16,6 +16,7 @@ set +a
 
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 FRONTEND_URL="http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
+DASHBOARD_BASE_PATH="${GROUPROXY_TEST_DASHBOARD_BASE_PATH:-/dashboard}"
 AUTH_HEADER="Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}"
 
 curl -fsS "$BACKEND_URL/healthz" >/dev/null
@@ -78,5 +79,5 @@ grep -q -- '--uninstall' <<<"$linux_setup_script"
 grep -q 'gsettings set org.gnome.system.proxy mode manual' <<<"$linux_setup_script"
 grep -q 'kwriteconfig' <<<"$linux_setup_script"
 
-curl -fsS "$FRONTEND_URL/alerts" | grep -q 'grouproxy'
+curl -fsS "$FRONTEND_URL${DASHBOARD_BASE_PATH}/alerts" | grep -q 'grouproxy'
 printf 'Phase 3 local observability and access validation passed.\n'

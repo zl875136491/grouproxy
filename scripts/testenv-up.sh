@@ -5,13 +5,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TESTENV_DIR="${GROUPROXY_TESTENV_DIR:-$ROOT_DIR/testenv}"
 BACKEND_PORT="${GROUPROXY_TEST_BACKEND_PORT:-8000}"
 FRONTEND_PORT="${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
+PUBLIC_PORT="${GROUPROXY_TEST_PUBLIC_PORT:-80}"
+DASHBOARD_BASE_PATH="${GROUPROXY_TEST_DASHBOARD_BASE_PATH:-/dashboard}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 MONGODB_URL_OVERRIDE="${GROUPROXY_TEST_MONGODB_URL:-}"
 MONGODB_DATABASE_OVERRIDE="${GROUPROXY_TEST_MONGODB_DATABASE:-grouproxy_test}"
 GQUAN_DELIVERY_MODE="${GROUPROXY_TEST_GQUAN_DELIVERY_MODE:-app}"
 GQUAN_APP_TOKEN="${GROUPROXY_TEST_GQUAN_APP_TOKEN:-}"
 GQUAN_TEST_CODE="${GROUPROXY_TEST_GQUAN_CODE:-123456}"
-PROXY_ACCESS_FQDN="${GROUPROXY_TEST_PROXY_ACCESS_FQDN:-proxy.1oa.com.cn}"
+PROXY_ACCESS_FQDN="${GROUPROXY_TEST_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}"
 
 case "$GQUAN_DELIVERY_MODE" in
   app)
@@ -104,6 +106,8 @@ if ! rg -q '^GROUPROXY_PROXY_CREDENTIAL_SECRET=' "$ENV_FILE"; then
 fi
 if ! rg -q '^GROUPROXY_PROXY_ACCESS_FQDN=' "$ENV_FILE"; then
   printf 'GROUPROXY_PROXY_ACCESS_FQDN=%s\n' "$PROXY_ACCESS_FQDN" >> "$ENV_FILE"
+elif [[ "$(sed -n 's/^GROUPROXY_PROXY_ACCESS_FQDN=//p' "$ENV_FILE")" != "$PROXY_ACCESS_FQDN" ]]; then
+  sed -i -E "s|^GROUPROXY_PROXY_ACCESS_FQDN=.*|GROUPROXY_PROXY_ACCESS_FQDN=${PROXY_ACCESS_FQDN}|" "$ENV_FILE"
 fi
 if ! rg -q '^GROUPROXY_PROBE_AUTO_ENABLED=' "$ENV_FILE"; then
   printf 'GROUPROXY_PROBE_AUTO_ENABLED=false\n' >> "$ENV_FILE"
@@ -201,6 +205,7 @@ curl -fsS "$BACKEND_URL/readyz" >/dev/null
 
 bootstrap_node() {
   local slug="$1" name="$2" port="$3" cidr="$4" extra_cidr="$5" api_port="$6"
+  local firewall_port="$7" firewall_mode="$8"
   local sites site_id nodes node_id response draft draft_id release
   sites="$(curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites")"
   site_id="$(jq -r --arg slug "$slug" '.[] | select(.slug == $slug) | .id' <<<"$sites" | head -n 1)"
@@ -243,7 +248,9 @@ singbox_bin: "$ROOT_DIR/singbox/sing-box"
 singbox_config: "$state_dir/state/sing-box.json"
 listen_port: $port
 listen_port_override: $port
-firewall_mode: dry-run
+listen_address_override: "127.0.0.1"
+firewall_port_override: $firewall_port
+firewall_mode: $firewall_mode
 poll_interval_seconds: 2
 heartbeat_interval_seconds: 2
 proxy_config_interval_seconds: 2
@@ -262,18 +269,22 @@ EOF
   printf '%s\n' "$!" > "$state_dir/monitor.pid"
 }
 
-if [[ ! -x "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" ]]; then
+if [[ ! -x "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" ]] || \
+  [[ -n "$(find "$ROOT_DIR/monitor/cmd" "$ROOT_DIR/monitor/internal" "$ROOT_DIR/monitor/go.mod" "$ROOT_DIR/monitor/go.sum" -newer "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" -print -quit)" ]]; then
   (cd "$ROOT_DIR/monitor" && make dist)
 fi
 
-bootstrap_node north codedev 18080 10.32.12.0/24 127.0.0.1/32 19090
-bootstrap_node east nuc 18081 10.32.13.0/24 127.0.0.1/32 19091
+bootstrap_node north codedev 18080 10.32.12.0/24 127.0.0.1/32 19090 "$PUBLIC_PORT" dry-run
+# A second :80 listener cannot exist on the same test host. The simulated nuc
+# stays loopback-only and dry-runs its own firewall; on 10.32.12.110 it uses
+# the normal direct :80 deployment instead.
+bootstrap_node east nuc 18081 10.32.13.0/24 127.0.0.1/32 19091 0 dry-run
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND_PORT" >/dev/null 2>&1; then
   (
     cd "$ROOT_DIR/frontend"
     if [[ ! -d node_modules ]]; then npm install --no-audit --no-fund; fi
-    nohup setsid env NEXT_PUBLIC_API_BASE_URL=/backend-api GROUPROXY_BACKEND_API_URL="$BACKEND_URL" NEXT_DIST_DIR=.next-dev npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
+    nohup setsid env GROUPROXY_FRONTEND_BASE_PATH="$DASHBOARD_BASE_PATH" NEXT_PUBLIC_API_BASE_URL="${DASHBOARD_BASE_PATH}/backend-api" GROUPROXY_BACKEND_API_URL="$BACKEND_URL" NEXT_DIST_DIR=.next-dev npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
       </dev/null >"$TESTENV_DIR/logs/frontend.log" 2>&1 &
     printf '%s\n' "$!" > "$TESTENV_DIR/frontend.pid"
   )
@@ -281,12 +292,17 @@ fi
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]]; then
   for _ in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}" >/dev/null 2>&1; then break; fi
+    if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}${DASHBOARD_BASE_PATH}" >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  curl -fsS "http://127.0.0.1:${FRONTEND_PORT}" >/dev/null
+  curl -fsS "http://127.0.0.1:${FRONTEND_PORT}${DASHBOARD_BASE_PATH}" >/dev/null
 fi
 
-printf 'Test environment is starting. Backend: %s  Frontend: http://127.0.0.1:%s\n' "$BACKEND_URL" "$FRONTEND_PORT"
+if [[ "${GROUPROXY_CONFIGURE_TEST_NGINX:-1}" == "1" ]]; then
+  "$ROOT_DIR/scripts/setup-test-nginx.sh"
+fi
+
+printf 'Test environment is starting. Backend: %s  Frontend: http://127.0.0.1:%s%s\n' "$BACKEND_URL" "$FRONTEND_PORT" "$DASHBOARD_BASE_PATH"
+printf 'Unified public entrypoint: http://%s:%s/dashboard\n' "$PROXY_ACCESS_FQDN" "$PUBLIC_PORT"
 printf 'Shared MongoDB database: %s\n' "$GROUPROXY_MONGODB_DATABASE"
 printf 'Run scripts/verify-phase1.sh after monitor ACKs arrive.\n'

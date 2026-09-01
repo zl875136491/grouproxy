@@ -72,6 +72,7 @@ cross_node_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BACKEND_U
 for port in 18080 18081 19090 19091; do
   nc -z 127.0.0.1 "$port"
 done
-frontend_html="$(curl -fsS "http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}")"
+frontend_html="$(curl -fsS "http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}/dashboard")"
 rg -q 'grouproxy' <<<"$frontend_html"
+"$ROOT_DIR/scripts/verify-test-entrypoint.sh"
 printf 'Phase 0/1 validation passed.\n%s\n' "$overview"

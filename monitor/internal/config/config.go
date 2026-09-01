@@ -18,6 +18,8 @@ type Config struct {
 	SingboxConfig              string `yaml:"singbox_config"`
 	ListenPort                 int    `yaml:"listen_port"`
 	ListenPortOverride         int    `yaml:"listen_port_override"`
+	ListenAddressOverride      string `yaml:"listen_address_override"`
+	FirewallPortOverride       int    `yaml:"firewall_port_override"`
 	FirewallMode               string `yaml:"firewall_mode"` // dry-run or apply
 	PollIntervalSeconds        int    `yaml:"poll_interval_seconds"`
 	HeartbeatIntervalSeconds   int    `yaml:"heartbeat_interval_seconds"`
@@ -45,6 +47,9 @@ func (c *Config) Defaults() {
 	}
 	if c.ListenPortOverride < 0 || c.ListenPortOverride > 65535 {
 		c.ListenPortOverride = 0
+	}
+	if c.FirewallPortOverride < 0 || c.FirewallPortOverride > 65535 {
+		c.FirewallPortOverride = 0
 	}
 	if c.FirewallMode == "" {
 		c.FirewallMode = "dry-run"
@@ -102,6 +107,12 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.ListenPort < 1 || cfg.ListenPort > 65535 {
 		return Config{}, errors.New("listen_port must be between 1 and 65535")
+	}
+	if cfg.ListenAddressOverride != "" {
+		address := net.ParseIP(cfg.ListenAddressOverride)
+		if address == nil {
+			return Config{}, errors.New("listen_address_override must be an IP address")
+		}
 	}
 	host, port, err := net.SplitHostPort(cfg.ClashAPIListen)
 	if err != nil || host == "" || port == "" {

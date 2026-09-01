@@ -12,6 +12,20 @@ remove only its own changes with `--uninstall`. `--system` writes only system
 shell/environment defaults and requires root. All HTTPS destination traffic
 remains inside the HTTP CONNECT tunnel.
 
+On the resource-constrained codedev test host, Nginx owns public `:80` and
+inspects only enough of the initial HTTP bytes to choose an upstream. Requests
+for `test-proxy.1oa.com.cn/dashboard` go to the loopback control plane; all
+other requests remain byte-for-byte forward-proxy traffic and go to sing-box
+at `127.0.0.1:18080`. Because the checked-in sing-box 1.13 binary removed
+inbound PROXY protocol, the test Nginx stream guard applies the configured
+proxy CIDRs before forwarding; sing-box itself sees the loopback hop. This is
+an explicit test-host limitation: a production shared-IP deployment must keep
+sing-box directly on `:80`, place the console on another listener, or use a
+PROXY-aware data-plane build. The co-located test profile validates but does
+not apply its nft candidate because a packet-level `dport 80` rule would also
+gate `/dashboard`; SSH, MongoDB, control-plane, and Clash API ports are outside
+both controls.
+
 Where a site has HTTP Basic authentication enabled, users obtain their
 per-site proxy credentials from the control-plane access page. The proxy
 password is shown only on create or rotation and must not be stored in shell
@@ -55,5 +69,18 @@ NUC_SSH_USER=operator NUC_SSH_KEY=/path/to/key \
 
 Use `DRY_RUN=1` to inspect the node commands. The script copies only monitor,
 sing-box, and systemd artifacts; the control plane is never installed remotely.
-It enables only `grouproxy-monitor.service` because monitor owns the sing-box
-child lifecycle.
+Before enabling, it runs the monitor's local `-validate` mode as `grouproxy`;
+this checks `monitor.yaml` and the referenced non-empty token without contacting
+the backend. If validation fails, artifacts are left installed but the service
+is not enabled or started. Create the files, then run:
+
+```bash
+sudo systemctl enable --now grouproxy-monitor.service
+```
+
+The monitor unit grants only the capabilities required by the data plane:
+`CAP_NET_BIND_SERVICE` for a direct proxy listener on port `80`, and
+`CAP_NET_ADMIN` for the proxy-port nftables policy. It enables only
+`grouproxy-monitor.service` because monitor owns the sing-box child lifecycle;
+starting the standalone `sing-box.service` as well would race for the proxy
+port.

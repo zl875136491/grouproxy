@@ -1,0 +1,26 @@
+stream {
+    js_path /etc/nginx/njs;
+    js_import grouproxy_stream from grouproxy-stream.js;
+    js_var $grouproxy_route proxy;
+    js_var $grouproxy_dashboard_host "@@DASHBOARD_HOST@@";
+
+    map $grouproxy_route $grouproxy_upstream {
+        default   127.0.0.1:@@SINGBOX_PORT@@;
+        dashboard 127.0.0.1:@@DASHBOARD_HTTP_PORT@@;
+    }
+
+    log_format grouproxy_stream '$remote_addr:$remote_port route=$grouproxy_route '
+                                 'upstream=$grouproxy_upstream sent=$bytes_sent received=$bytes_received '
+                                 'session_time=$session_time';
+
+    server {
+        listen 0.0.0.0:@@PUBLIC_PORT@@;
+        preread_buffer_size 32k;
+        proxy_connect_timeout 5s;
+        proxy_timeout 1h;
+        proxy_socket_keepalive on;
+        js_preread grouproxy_stream.preread;
+        proxy_pass $grouproxy_upstream;
+        access_log /var/log/nginx/grouproxy-stream-access.log grouproxy_stream;
+    }
+}

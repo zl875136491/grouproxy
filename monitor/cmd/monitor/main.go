@@ -85,11 +85,18 @@ type accessLogEntry struct {
 func main() {
 	configPath := flag.String("config", "/etc/grouproxy/monitor.yaml", "monitor configuration")
 	once := flag.Bool("once", false, "fetch and apply once, then exit")
+	validate := flag.Bool("validate", false, "validate configuration and token, then exit")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+	if *validate {
+		if _, err := client.New(cfg.BackendURL, cfg.TokenFile); err != nil {
+			log.Fatalf("validate agent credentials: %v", err)
+		}
+		return
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		log.Fatalf("create state directory: %v", err)
@@ -1085,6 +1092,10 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if a.cfg.ListenPortOverride > 0 {
 		port = a.cfg.ListenPortOverride
 	}
+	firewallPort := port
+	if a.cfg.FirewallPortOverride > 0 {
+		firewallPort = a.cfg.FirewallPortOverride
+	}
 	subscriptionOutbounds, subscriptionVersion, subscriptionHash, subscriptionStatus, err := a.resolveSubscription(value)
 	if err != nil {
 		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
@@ -1098,6 +1109,7 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 		a.cfg.StateDir,
 		a.cfg.ClashAPIListen,
 		subscriptionOutbounds,
+		a.cfg.ListenAddressOverride,
 	)
 	versionsDir := filepath.Join(a.cfg.StateDir, "versions")
 	if err := os.MkdirAll(versionsDir, 0o700); err != nil {
@@ -1111,7 +1123,7 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 		return a.ackFailure(value, "singbox_check_failed", err.Error(), true, false, false, false)
 	}
 	cidrs := stringSlice(value["allow_cidrs"])
-	nftScript := firewall.Render(port, cidrs, boolValue(value["shutdown"]))
+	nftScript := firewall.Render(firewallPort, cidrs, boolValue(value["shutdown"]))
 	if err := firewall.Check(nftScript); err != nil {
 		return a.ackFailure(value, "nft_check_failed", err.Error(), true, false, false, false)
 	}
@@ -1188,10 +1200,10 @@ func (a *agent) rollback(value map[string]any, candidatePath, reason string, pro
 	a.log.Printf("rolling back candidate %s: %s", candidatePath, reason)
 	a.runtime.Close()
 	rollbackOK := false
-	nftRollbackOK := a.restoreLastGoodFirewall() == nil
 	a.stateMu.Lock()
 	lastGood := a.state.LastGoodBundle
 	a.stateMu.Unlock()
+	nftRollbackOK := a.restoreLastGoodFirewall() == nil
 	if lastGood != nil {
 		if listen, ok := lastGood["listen"].(map[string]any); ok {
 			if port, ok := asInt(listen["http_port"]); ok {
@@ -1235,6 +1247,23 @@ func (a *agent) rollback(value map[string]any, candidatePath, reason string, pro
 }
 
 func (a *agent) restoreLastGoodFirewall() error {
+	a.stateMu.Lock()
+	lastGood := a.state.LastGoodBundle
+	a.stateMu.Unlock()
+	if lastGood == nil {
+		data, err := os.ReadFile(filepath.Join(a.cfg.StateDir, "last-good-bundle.json"))
+		if err == nil {
+			var persisted map[string]any
+			if json.Unmarshal(data, &persisted) == nil {
+				lastGood = persisted
+			}
+		}
+	}
+	if lastGood != nil {
+		return a.restoreLastGoodFirewallForBundle(lastGood)
+	}
+
+	// Legacy fallback for state written before bundles were persisted locally.
 	if a.cfg.FirewallMode != "apply" {
 		return nil
 	}
@@ -1244,6 +1273,28 @@ func (a *agent) restoreLastGoodFirewall() error {
 		return err
 	}
 	return firewall.Apply(string(data))
+}
+
+func (a *agent) restoreLastGoodFirewallForBundle(lastGood map[string]any) error {
+	listen, ok := lastGood["listen"].(map[string]any)
+	if !ok {
+		return errors.New("last-good listen missing")
+	}
+	port, ok := asInt(listen["http_port"])
+	if !ok {
+		return errors.New("last-good port invalid")
+	}
+	script := firewall.Render(a.firewallPort(port), stringSlice(lastGood["allow_cidrs"]), boolValue(lastGood["shutdown"]))
+	if err := firewall.Check(script); err != nil {
+		return err
+	}
+	if err := bundle.WriteBytes(filepath.Join(a.cfg.StateDir, "last-good-nft.json"), []byte(script), ".last-good-nft-*"); err != nil {
+		return err
+	}
+	if a.cfg.FirewallMode == "apply" {
+		return firewall.Apply(script)
+	}
+	return nil
 }
 
 func (a *agent) restoreLastGood() error {
@@ -1294,8 +1345,8 @@ func (a *agent) restoreLastGood() error {
 	if ok, err := a.runtime.Apply(path); !ok || err != nil {
 		return fmt.Errorf("restore last-good: %v", err)
 	}
-	if err := a.restoreLastGoodFirewall(); err != nil && a.cfg.FirewallMode == "apply" {
-		return fmt.Errorf("restore last-good firewall: %v", err)
+	if err := a.restoreLastGoodFirewallForBundle(lastGood); err != nil {
+		return fmt.Errorf("restore last-good firewall: %w", err)
 	}
 	return nil
 }
@@ -1310,13 +1361,12 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	path := filepath.Join(a.cfg.StateDir, "last-good.json")
 	if data, err := os.ReadFile(path); err == nil {
 		var configValue map[string]any
-		if json.Unmarshal(data, &configValue) == nil && ensureRoutingRules(configValue, a.cfg.StateDir) {
+		if json.Unmarshal(data, &configValue) == nil {
+			ensureRoutingRules(configValue, a.cfg.StateDir)
+			applySingboxIngress(configValue, port, boolValue(lastGood["shutdown"]), a.cfg.ListenAddressOverride)
 			if err := bundle.WriteJSON(path, configValue); err != nil {
 				return "", err
 			}
-			return path, nil
-		}
-		if configValue != nil {
 			return path, nil
 		}
 	}
@@ -1324,7 +1374,7 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	if err != nil {
 		return "", err
 	}
-	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds)
+	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds, a.cfg.ListenAddressOverride)
 	if err := bundle.WriteJSON(path, configValue); err != nil {
 		return "", err
 	}
@@ -1568,26 +1618,53 @@ func hasCNDirectRule(rules []any) bool {
 	return false
 }
 
+func (a *agent) firewallPort(listenPort int) int {
+	if a.cfg.FirewallPortOverride > 0 {
+		return a.cfg.FirewallPortOverride
+	}
+	return listenPort
+}
+
+func applySingboxIngress(configValue map[string]any, port int, shutdown bool, listenAddress string) {
+	inbounds, ok := configValue["inbounds"].([]any)
+	if !ok || len(inbounds) == 0 {
+		return
+	}
+	inbound, ok := inbounds[0].(map[string]any)
+	if !ok {
+		return
+	}
+	if listenAddress == "" {
+		listenAddress = "0.0.0.0"
+	}
+	if shutdown {
+		listenAddress = "127.0.0.1"
+	}
+	inbound["listen"] = listenAddress
+	inbound["listen_port"] = port
+	delete(inbound, "proxy_protocol")
+	delete(inbound, "proxy_protocol_accept_no_header")
+}
+
 func renderSingbox(
 	value map[string]any,
 	port int,
 	stateDir string,
 	clashAPIListen string,
 	subscriptionOutbounds []any,
+	listenAddress string,
 ) map[string]any {
 	inbound := map[string]any{
 		"type":             "http",
 		"tag":              "grouproxy-http",
-		"listen":           "0.0.0.0",
 		"listen_port":      port,
 		"set_system_proxy": false,
 	}
 	if users := proxyAuthUsers(value); len(users) > 0 {
 		inbound["users"] = users
 	}
-	if boolValue(value["shutdown"]) {
-		inbound["listen"] = "127.0.0.1"
-	}
+	configValue := map[string]any{"inbounds": []any{inbound}}
+	applySingboxIngress(configValue, port, boolValue(value["shutdown"]), listenAddress)
 	routeRules := make([]any, 0)
 	allowCIDRs := stringSlice(value["allow_cidrs"])
 	if len(allowCIDRs) == 0 {

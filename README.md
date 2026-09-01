@@ -6,8 +6,10 @@ proxy-port firewall policy. User traffic never traverses the control plane.
 
 ## Phase 0-4 Quickstart
 
-Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, access to the codedev
-MongoDB test database, and the checked-in Linux amd64 sing-box binary.
+Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, root access for the test
+`:80` entrypoint, access to the codedev MongoDB test database, and the
+checked-in Linux amd64 sing-box binary. The startup script installs the Ubuntu
+Nginx stream and stream-njs modules when they are absent.
 
 ```bash
 export GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<codedev-host>:<port>/?authSource=admin'
@@ -22,9 +24,11 @@ GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 
 The script validates connectivity and authentication against the explicitly
 configured codedev MongoDB URI before it starts any local process. It does not
-start, reset, or shut down a local MongoDB process. It starts the backend on
-`127.0.0.1:8000`, the operations console on `http://127.0.0.1:3000`, and two
-local agent simulations:
+start, reset, or shut down a local MongoDB process. Nginx owns the unified
+`http://test-proxy.1oa.com.cn:80` entrypoint: `/dashboard` goes to the control
+plane and all CONNECT or forward-proxy traffic goes to codedev sing-box. The
+backend stays on `127.0.0.1:8000`, the Next.js console stays on
+`127.0.0.1:3000/dashboard`, and the local agent simulations are:
 
 - `codedev` monitor + sing-box on `127.0.0.1:18080`, Clash API on `127.0.0.1:19090`
 - `nuc` monitor + sing-box on `127.0.0.1:18081`, Clash API on `127.0.0.1:19091`
@@ -37,6 +41,11 @@ Generated test credentials, state, and logs remain below the ignored
 ```bash
 ./scripts/testenv-down.sh
 ```
+
+Nginx is a host service and keeps the public `:80` entrypoint available across
+control-plane restarts. Reapply its idempotent test configuration with
+`./scripts/setup-test-nginx.sh`; validate the listener, `/dashboard`, and the
+backend route with `./scripts/verify-test-entrypoint.sh`.
 
 The default test profile delivers verification codes through the real One
 Login GQuan APP API. Its APP Token is required at process start and is not

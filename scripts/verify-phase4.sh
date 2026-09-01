@@ -78,9 +78,10 @@ access_config="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/config"
 proxy_host="$(jq -r '.fqdn' <<<"$access_config")"
 proxy_port="$(jq -r '.port' <<<"$access_config")"
 [[ "$proxy_port" == "80" ]]
-# The test node deliberately uses an unprivileged local listener. `--resolve`
-# is curl's request-scoped hosts override, so no system resolver state changes.
-test_proxy_port="${GROUPROXY_TEST_PROXY_LISTEN_PORT:-18080}"
+# `--resolve` is curl's request-scoped hosts override, so no system resolver
+# state changes. The request exercises the same public :80 Nginx entrypoint
+# used by employee clients, not sing-box's loopback-only internal listener.
+test_proxy_port="${GROUPROXY_TEST_PUBLIC_PORT:-80}"
 proxy_url="http://${proxy_host}:${test_proxy_port}"
 proxy_resolve="${proxy_host}:${test_proxy_port}:127.0.0.1"
 

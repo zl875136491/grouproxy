@@ -17,6 +17,8 @@ if [[ -n "$SSH_KEY" ]]; then
   SSH_ARGS+=(-i "$SSH_KEY")
 fi
 REMOTE="${SSH_USER}@${TARGET_HOST}"
+NODE_CONFIG_PATH=/opt/grouproxy/etc/monitor.yaml
+MONITOR_BIN_PATH=/opt/grouproxy/bin/grouproxy-monitor
 
 run_remote() {
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -40,8 +42,25 @@ if [[ "$DRY_RUN" != "1" ]]; then
   run_remote "sudo install -m 0644 /tmp/grouproxy-monitor.service /etc/systemd/system/grouproxy-monitor.service"
   run_remote "sudo install -m 0644 /tmp/sing-box.service /etc/systemd/system/sing-box.service"
   run_remote "sudo systemctl daemon-reload"
-  # monitor owns the child sing-box lifecycle. Enabling the standalone unit
-  # too would create a second process and make the proxy port race at boot.
+  # Validate the complete monitor configuration, including the token file,
+  # before enabling the service. The validation path performs no network call
+  # and does not apply a bundle or firewall policy.
+  if run_remote "sudo -u grouproxy $MONITOR_BIN_PATH -config $NODE_CONFIG_PATH -validate"; then
+    # monitor owns the child sing-box lifecycle. Enabling the standalone unit
+    # too would create a second process and make the proxy port race at boot.
+    run_remote "sudo systemctl enable --now grouproxy-monitor.service"
+    printf 'Monitor configuration validated; grouproxy-monitor.service enabled and started.\n'
+  else
+    printf 'Node artifacts installed, but monitor.yaml or its token_file is missing/invalid; service was not enabled or started.\n' >&2
+    printf 'Create %s and the referenced token as user grouproxy, then run: sudo systemctl enable --now grouproxy-monitor.service\n' "$NODE_CONFIG_PATH" >&2
+    exit 1
+  fi
+else
+  # Keep dry-run output representative of the real ordering without trying to
+  # inspect files on the operator workstation.
+  run_remote "sudo -u grouproxy $MONITOR_BIN_PATH -config $NODE_CONFIG_PATH -validate"
   run_remote "sudo systemctl enable --now grouproxy-monitor.service"
 fi
-printf 'Node artifacts installed. Create monitor.yaml and token_file before enabling in production.\n'
+if [[ "$DRY_RUN" == "1" ]]; then
+  printf 'Dry-run complete. The remote monitor validation precedes service enablement.\n'
+fi

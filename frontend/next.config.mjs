@@ -3,8 +3,13 @@ const backendApiUrl = (process.env.GROUPROXY_BACKEND_API_URL || "http://127.0.0.
   /\/$/,
   "",
 );
+const configuredBasePath = (process.env.GROUPROXY_FRONTEND_BASE_PATH || "").trim();
+if (configuredBasePath && !/^\/[A-Za-z0-9/_-]*[A-Za-z0-9_-]$/.test(configuredBasePath)) {
+  throw new Error("GROUPROXY_FRONTEND_BASE_PATH must start with / and must not end with /");
+}
 
 const nextConfig = {
+  basePath: configuredBasePath,
   devIndicators: false,
   output: "standalone",
   // Keep the dev compiler output separate from production builds. Running
