@@ -12,6 +12,8 @@ const password = process.env.GROUPROXY_BROWSER_PASSWORD;
 const chromeBin = process.env.CHROME_BIN;
 const screenshotPath = process.env.GROUPROXY_BROWSER_SCREENSHOT;
 const viewport = process.env.GROUPROXY_BROWSER_VIEWPORT || "1440x900";
+const readySelector = process.env.GROUPROXY_BROWSER_READY_SELECTOR || "tbody tr";
+const smokeOnly = process.env.GROUPROXY_BROWSER_SMOKE_ONLY === "1";
 
 if (!itcode || !password) {
   throw new Error("GROUPROXY_BROWSER_ITCODE and GROUPROXY_BROWSER_PASSWORD are required");
@@ -178,51 +180,66 @@ try {
     return readValue(result);
   };
   await waitFor(
-    () => evaluate("document.querySelectorAll('tbody tr').length > 0"),
-    "connection telemetry",
+    () => evaluate(`document.querySelector(${JSON.stringify(readySelector)}) !== null`),
+    `page element ${readySelector}`,
   );
   await waitFor(
     () => evaluate("document.documentElement.lang === 'zh-CN'"),
     "initial Chinese locale",
   );
 
-  const before = await evaluate(
-    "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
-  );
-  const requestCountBeforeSwitch = apiRequests.length;
-
-  async function switchLocale(locale) {
-    await evaluate(`(() => {
-      const select = document.querySelector('.preferences-controls select');
-      if (!select) throw new Error('Locale selector is missing');
-      select.value = ${JSON.stringify(locale)};
-      select.dispatchEvent(new Event('change', { bubbles: true }));
+  if (smokeOnly) {
+    const visualState = await evaluate(`(() => {
+      const target = document.querySelector(${JSON.stringify(readySelector)});
+      return {
+        stylesheets: document.styleSheets.length,
+        targetDisplay: target ? getComputedStyle(target).display : "none",
+        bodyFont: getComputedStyle(document.body).fontFamily,
+      };
     })()`);
-    await waitFor(() => evaluate(`document.documentElement.lang === ${JSON.stringify(locale)}`), locale);
-    await sleep(300);
+    assert.ok(visualState.stylesheets > 0, "The page did not load a stylesheet");
+    assert.notEqual(visualState.targetDisplay, "none", "The ready element is not visible");
+    assert.match(visualState.bodyFont, /Euclid|Inter|Segoe UI/, "The application font stack is missing");
+    console.log(`Rendered ${browserPath} with ${visualState.stylesheets} stylesheet(s).`);
+  } else {
+    const before = await evaluate(
+      "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
+    );
+    const requestCountBeforeSwitch = apiRequests.length;
+
+    async function switchLocale(locale) {
+      await evaluate(`(() => {
+        const select = document.querySelector('.preferences-controls select');
+        if (!select) throw new Error('Locale selector is missing');
+        select.value = ${JSON.stringify(locale)};
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await waitFor(() => evaluate(`document.documentElement.lang === ${JSON.stringify(locale)}`), locale);
+      await sleep(300);
+    }
+
+    await switchLocale("en");
+    const english = await evaluate(
+      "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
+    );
+    await switchLocale("es");
+    const spanish = await evaluate(
+      "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
+    );
+
+    assert.notDeepEqual(before, english, "Chinese telemetry presentation did not update to English");
+    assert.notDeepEqual(english, spanish, "English telemetry presentation did not update to Spanish");
+    assert.equal(
+      apiRequests.length,
+      requestCountBeforeSwitch,
+      "Changing locale unexpectedly refetched /backend-api data",
+    );
+    console.log("Locale switch updated cached telemetry in Chinese, English, and Spanish without an API refetch.");
   }
-
-  await switchLocale("en");
-  const english = await evaluate(
-    "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
-  );
-  await switchLocale("es");
-  const spanish = await evaluate(
-    "[...document.querySelectorAll('tbody tr:first-child td')].map((cell) => cell.innerText)",
-  );
-
-  assert.notDeepEqual(before, english, "Chinese telemetry presentation did not update to English");
-  assert.notDeepEqual(english, spanish, "English telemetry presentation did not update to Spanish");
-  assert.equal(
-    apiRequests.length,
-    requestCountBeforeSwitch,
-    "Changing locale unexpectedly refetched /backend-api data",
-  );
   if (screenshotPath) {
     const screenshot = await client.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
   }
-  console.log("Locale switch updated cached telemetry in Chinese, English, and Spanish without an API refetch.");
 } finally {
   if (token) {
     await fetch(`${backendURL}/api/v1/auth/logout`, {

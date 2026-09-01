@@ -273,7 +273,7 @@ if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND
   (
     cd "$ROOT_DIR/frontend"
     if [[ ! -d node_modules ]]; then npm install --no-audit --no-fund; fi
-    nohup setsid env NEXT_PUBLIC_API_BASE_URL=/backend-api GROUPROXY_BACKEND_API_URL="$BACKEND_URL" npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
+    nohup setsid env NEXT_PUBLIC_API_BASE_URL=/backend-api GROUPROXY_BACKEND_API_URL="$BACKEND_URL" NEXT_DIST_DIR=.next-dev npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
       </dev/null >"$TESTENV_DIR/logs/frontend.log" 2>&1 &
     printf '%s\n' "$!" > "$TESTENV_DIR/frontend.pid"
   )
