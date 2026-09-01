@@ -100,7 +100,10 @@ async def append_audit(
 
 async def verify_audit_chain() -> tuple[bool, str, int]:
     events = await AuditEvent.find().sort(+AuditEvent.at).to_list()
-    previous_hash = ""
+    # TTL retention may remove the historical predecessor of the first event
+    # still present. Treat that predecessor hash as the retained chain anchor;
+    # all links inside the retained window remain strictly verified.
+    previous_hash = events[0].previous_hash if events else ""
     for index, event in enumerate(events):
         payload = {
             "event_id": event.event_id,
@@ -118,7 +121,7 @@ async def verify_audit_chain() -> tuple[bool, str, int]:
             "previous_hash": event.previous_hash,
             "at": event.at.isoformat(),
         }
-        if event.previous_hash != previous_hash:
+        if index > 0 and event.previous_hash != previous_hash:
             return False, f"previous_hash_mismatch:{index}", len(events)
         if hashlib.sha256(canonical_json(payload)).hexdigest() != event.immutable_hash:
             return False, f"immutable_hash_mismatch:{index}", len(events)

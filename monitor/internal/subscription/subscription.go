@@ -197,9 +197,18 @@ func parseClash(content []byte) ([]any, error) {
 			}
 			outbound["uuid"] = uuid
 		}
-		// Preserve common sing-box-compatible transport and TLS values while
-		// retaining control over identity, endpoint and route ownership.
-		for _, key := range []string{"tls", "transport", "flow", "packet_encoding"} {
+		tls, tlsErr := clashTLS(proxy, kind, host)
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		if tls != nil {
+			outbound["tls"] = tls
+		}
+		// ``flow`` and ``packet_encoding`` already use sing-box's field names.
+		// Transport is accepted only when the upstream has provided a sing-box
+		// shaped object; route, selector and direct/block ownership always remain
+		// with the monitor.
+		for _, key := range []string{"flow", "packet_encoding", "transport"} {
 			if value, exists := proxy[key]; exists {
 				outbound[key] = value
 			}
@@ -207,6 +216,122 @@ func parseClash(content []byte) ([]any, error) {
 		result = append(result, outbound)
 	}
 	return validateOutbounds(result)
+}
+
+// clashTLS converts the commonly used Clash TLS fields into the explicit
+// sing-box TLS object. In particular, Trojan is always TLS-backed: omitting
+// this conversion silently changes a valid Clash endpoint into a plain TCP
+// connection and results in a timeout rather than a useful configuration
+// failure.
+func clashTLS(proxy map[string]any, kind, host string) (map[string]any, error) {
+	tls := map[string]any{}
+	enabled := false
+	if raw, exists := proxy["tls"]; exists {
+		switch value := raw.(type) {
+		case bool:
+			enabled = value
+		case map[string]any:
+			if rawEnabled, present := value["enabled"]; present {
+				parsed, ok := rawEnabled.(bool)
+				if !ok {
+					return nil, errors.New("subscription_clash_tls_invalid")
+				}
+				enabled = parsed
+			} else {
+				enabled = true
+			}
+			copyTLSField(tls, value, "server_name")
+			copyTLSField(tls, value, "insecure")
+			copyTLSField(tls, value, "alpn")
+			copyTLSField(tls, value, "utls")
+		default:
+			return nil, errors.New("subscription_clash_tls_invalid")
+		}
+	}
+
+	// Trojan's protocol handshake always runs over TLS. Its documented
+	// sing-box configuration uses an explicit TLS object even when the Clash
+	// source omits a separate ``tls: true`` flag.
+	if kind == "trojan" {
+		enabled = true
+	}
+
+	for _, key := range []string{"sni", "servername", "server-name"} {
+		if raw, exists := proxy[key]; exists {
+			serverName, err := optionalString(raw)
+			if err != nil {
+				return nil, errors.New("subscription_clash_tls_invalid")
+			}
+			if serverName != "" {
+				tls["server_name"] = serverName
+				enabled = true
+			}
+			break
+		}
+	}
+	if _, present := tls["server_name"]; !present && enabled && host != "" {
+		tls["server_name"] = host
+	}
+	if raw, exists := proxy["skip-cert-verify"]; exists {
+		insecure, ok := raw.(bool)
+		if !ok {
+			return nil, errors.New("subscription_clash_tls_invalid")
+		}
+		tls["insecure"] = insecure
+		enabled = true
+	}
+	if raw, exists := proxy["alpn"]; exists {
+		alpn, err := stringList(raw)
+		if err != nil {
+			return nil, errors.New("subscription_clash_tls_invalid")
+		}
+		if len(alpn) > 0 {
+			tls["alpn"] = alpn
+			enabled = true
+		}
+	}
+	if raw, exists := proxy["client-fingerprint"]; exists {
+		fingerprint, err := optionalString(raw)
+		if err != nil || fingerprint == "" {
+			return nil, errors.New("subscription_clash_tls_invalid")
+		}
+		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fingerprint}
+		enabled = true
+	}
+	if !enabled {
+		return nil, nil
+	}
+	tls["enabled"] = true
+	return tls, nil
+}
+
+func copyTLSField(destination, source map[string]any, key string) {
+	if value, exists := source[key]; exists {
+		destination[key] = value
+	}
+}
+
+func stringList(value any) ([]string, error) {
+	if text, ok := value.(string); ok {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, nil
+		}
+		return []string{text}, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil, errors.New("invalid_string_list")
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text, err := optionalString(item)
+		if err != nil || text == "" {
+			return nil, errors.New("invalid_string_list")
+		}
+		result = append(result, text)
+	}
+	return result, nil
 }
 
 func validateOutbounds(entries []any) ([]any, error) {

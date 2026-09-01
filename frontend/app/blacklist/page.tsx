@@ -5,14 +5,13 @@ import { Ban, CirclePlus, Trash2 } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { createBlacklist, deleteBlacklist, getBlacklist, type DestinationBlacklist } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
-import { formatDate } from "../../lib/utils";
 import { ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
 import { Button, ConfirmDialog, Panel, StatusBadge } from "../../components/ui";
 
 export default function BlacklistPage() {
-  const { t } = usePreferences();
+  const { t, formatDate } = usePreferences();
   const session = useManagementSession();
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);

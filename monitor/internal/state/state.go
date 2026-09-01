@@ -21,6 +21,11 @@ type State struct {
 	ServiceStatus       string         `json:"service_status"`
 	LastError           string         `json:"last_error,omitempty"`
 	LastReloadAt        time.Time      `json:"last_reload_at,omitempty"`
+	LogOffset           int64          `json:"log_offset"`
+	LogSequence         int            `json:"log_sequence"`
+	ConnectionSequence  int            `json:"connection_sequence"`
+	ProbeSequence       int            `json:"probe_sequence"`
+	ProxyConfigSequence int            `json:"proxy_config_sequence"`
 }
 
 func Load(dir string) (State, error) {

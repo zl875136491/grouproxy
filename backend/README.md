@@ -54,3 +54,18 @@ password changes, and passwordless GQuan login all consume a single-use
 verification challenge. Challenges are rate-limited, HMAC-digested, and
 short-lived; browser access tokens are opaque server-side sessions and become
 invalid when the password changes.
+
+Proxy configuration is an operator-facing, read-only projection of each
+node's loopback Clash `/proxies` API. Monitors post it to
+`/agent/v1/proxy-config`; the control plane stores one bounded latest snapshot
+per node and exposes it through `GET /api/v1/proxy-configs` (also available as
+`/api/v1/proxies`) and `GET /api/v1/nodes/{id}/proxy-config`. Server addresses,
+subscription payloads, and endpoint credentials are discarded before storage.
+When a node's local API is temporarily unavailable, the latest known group
+projection is retained while the snapshot is marked unavailable.
+
+Administrators can change only a node's display label with
+`PATCH /api/v1/nodes/{id}` and `{ "name": "..." }`. The immutable `agent_id`,
+node token, and site binding are never changed; successful renames are written
+to the audit chain and are reflected on both the node inventory and proxy
+configuration pages.

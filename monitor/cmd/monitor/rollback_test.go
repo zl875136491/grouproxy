@@ -82,6 +82,10 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 		map[string]any{
 			"allow_cidrs":       []string{"10.32.12.0/24"},
 			"deny_destinations": []any{map[string]any{"kind": "domain", "pattern": "blocked.test"}},
+			"proxy_auth": map[string]any{
+				"required": true,
+				"users":    []any{map[string]any{"username": "example.user", "password": "derived-password"}},
+			},
 		},
 		18080,
 		stateDir,
@@ -109,6 +113,15 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 	if !foundSelector {
 		t.Fatal("subscription selector missing")
 	}
+	inbound := config["inbounds"].([]any)[0].(map[string]any)
+	users, ok := inbound["users"].([]any)
+	if !ok || len(users) != 1 {
+		t.Fatalf("inbound users = %#v", inbound["users"])
+	}
+	user := users[0].(map[string]any)
+	if user["username"] != "example.user" || user["password"] != "derived-password" {
+		t.Fatalf("rendered inbound user = %#v", user)
+	}
 	foundCNDirect := false
 	for _, raw := range route["rules"].([]any) {
 		rule := raw.(map[string]any)
@@ -123,5 +136,15 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 	ruleSets := route["rule_set"].([]any)
 	if len(ruleSets) != 2 {
 		t.Fatalf("rule-set count = %d, want 2", len(ruleSets))
+	}
+}
+
+func TestParseAccessLogClassifiesAuthenticationFailure(t *testing.T) {
+	entry, ok := parseAccessLog([]byte(`{"message":"inbound/http: authentication failed"}`))
+	if !ok {
+		t.Fatal("authentication failure was skipped")
+	}
+	if entry.Action != "deny" || entry.DenyReason != "auth_failed" {
+		t.Fatalf("parsed auth failure = %#v", entry)
 	}
 }

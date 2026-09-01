@@ -13,6 +13,7 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
     itcode: str
+    role: Literal["admin", "employee"]
     expires_at: datetime
 
 
@@ -64,11 +65,58 @@ class SiteOut(BaseModel):
     config_revision: int
 
 
+class SiteProxyAuthUpdate(BaseModel):
+    required: bool
+
+
+class ProxyCredentialOut(BaseModel):
+    site_id: str
+    username: str
+    active: bool
+    rotated_at: datetime
+
+
+class ProxyCredentialReveal(ProxyCredentialOut):
+    password: str
+    release_id: str | None = None
+
+
+class EmployeeOut(BaseModel):
+    """Management-safe view of a local employee account."""
+
+    itcode: str
+    auth_source: str
+    is_active: bool
+    created_at: datetime
+    password_changed_at: datetime | None
+    last_login_at: datetime | None
+
+
+class EmployeeAccessSiteOut(BaseModel):
+    id: str
+    slug: str
+    name: str
+    proxy_auth_required: bool
+    credential_configured: bool
+    username: str | None = None
+
+
+class EmployeeProxyAccessOut(BaseModel):
+    itcode: str
+    sites: list[EmployeeAccessSiteOut]
+
+
 class NodeCreate(BaseModel):
     site_id: str
     name: str
     agent_id: str
     advertise_ip: str = ""
+
+
+class NodeNameUpdate(BaseModel):
+    """Only the operator-facing label is mutable; node identity is not."""
+
+    name: str = Field(min_length=1, max_length=128)
 
 
 class NodeOut(BaseModel):
@@ -87,6 +135,7 @@ class NodeOut(BaseModel):
     config_status: str
     service_status: str
     subscription_status: str
+    probe_status: str
     last_error: str
 
 
@@ -350,6 +399,267 @@ class AuditEventOut(BaseModel):
     immutable_hash: str
     previous_hash: str
     at: datetime
+
+
+class BackupRecordOut(BaseModel):
+    backup_id: str
+    scope: str
+    origin: Literal["manual", "scheduled"]
+    artifact_paths: list[str]
+    format: str
+    checksum: str
+    encrypted: bool
+    storage_ref: str
+    status: str
+    created_by: str
+    created_at: datetime
+    verified_at: datetime | None
+    last_rehearsed_at: datetime | None
+    restore_task_id: str | None
+    error: str
+    size_bytes: int = 0
+    manifest: dict[str, Any] = Field(default_factory=dict)
+
+
+class BackupCreateRequest(BaseModel):
+    scope: Literal["control_plane"] = "control_plane"
+
+
+class BackupRestoreRequest(BaseModel):
+    # Verification rehearsal is the safe default. A destructive write-back is
+    # only accepted when the operator explicitly confirms it.
+    confirm: bool = False
+
+
+class BackupCreateResponse(BaseModel):
+    backup: BackupRecordOut
+    task: TaskOut
+
+
+class BackupRestoreResponse(BaseModel):
+    backup: BackupRecordOut
+    task: TaskOut
+
+
+class AccessLogIn(BaseModel):
+    ts: datetime
+    policy_version: int = Field(default=0, ge=0)
+    src_ip: str = Field(default="", max_length=64)
+    src_cidr_match: str = Field(default="", max_length=64)
+    username: str = Field(default="", max_length=128)
+    cert_fp: str = Field(default="", max_length=256)
+    dst_host: str = Field(default="", max_length=255)
+    dst_port: int = Field(default=0, ge=0, le=65535)
+    action: Literal["allow", "deny"]
+    deny_reason: str = Field(default="", max_length=64)
+    bytes_up: int = Field(default=0, ge=0)
+    bytes_down: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+
+
+class AgentLogBatch(BaseModel):
+    node_id: str = Field(min_length=1, max_length=128)
+    batch_id: str = Field(min_length=8, max_length=128)
+    sequence: int = Field(ge=1)
+    entries: list[AccessLogIn] = Field(default_factory=list, max_length=500)
+
+
+class ConnectionTopItem(BaseModel):
+    label: str = Field(min_length=1, max_length=255)
+    connections: int = Field(default=0, ge=0)
+    bytes_up: int = Field(default=0, ge=0)
+    bytes_down: int = Field(default=0, ge=0)
+
+
+class ConnectionSnapshotIn(BaseModel):
+    sampled_at: datetime
+    active_connections: int = Field(default=0, ge=0)
+    bytes_up: int = Field(default=0, ge=0)
+    bytes_down: int = Field(default=0, ge=0)
+    top_sources: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
+    top_destinations: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
+    top_users: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
+    api_available: bool = True
+
+
+class AgentConnectionBatch(BaseModel):
+    node_id: str = Field(min_length=1, max_length=128)
+    batch_id: str = Field(min_length=8, max_length=128)
+    sequence: int = Field(ge=1)
+    snapshots: list[ConnectionSnapshotIn] = Field(default_factory=list, max_length=16)
+
+
+class ProxyHistoryPoint(BaseModel):
+    at: datetime | None = None
+    delay_ms: int | None = Field(default=None, ge=0, le=300_000)
+
+
+class ProxyEndpointSnapshot(BaseModel):
+    """Safe metadata for one outbound endpoint; no server or credential data."""
+
+    name: str = Field(min_length=1, max_length=255)
+    type: str = Field(default="unknown", max_length=64)
+    udp: bool = False
+    alive: bool | None = None
+    delay_ms: int | None = Field(default=None, ge=0, le=300_000)
+    history: list[ProxyHistoryPoint] = Field(default_factory=list, max_length=20)
+
+
+class ProxyGroupSnapshot(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    type: str = Field(default="unknown", max_length=64)
+    now: str = Field(default="", max_length=255)
+    all: list[str] = Field(default_factory=list, max_length=500)
+    nodes: list[ProxyEndpointSnapshot] = Field(default_factory=list, max_length=500)
+    udp: bool = False
+    delay_ms: int | None = Field(default=None, ge=0, le=300_000)
+    history: list[ProxyHistoryPoint] = Field(default_factory=list, max_length=20)
+
+
+class AgentProxyConfigBatch(BaseModel):
+    node_id: str = Field(min_length=1, max_length=128)
+    batch_id: str = Field(min_length=8, max_length=128)
+    sequence: int = Field(ge=1)
+    sampled_at: datetime
+    api_available: bool = False
+    groups: list[ProxyGroupSnapshot] = Field(default_factory=list, max_length=100)
+    error: str = Field(default="", max_length=256)
+
+
+class ProbeResultIn(BaseModel):
+    outbound_tag: str = Field(min_length=1, max_length=128)
+    target_url: str = Field(min_length=1, max_length=2048)
+    success: bool
+    latency_ms: int = Field(default=0, ge=0, le=300_000)
+    error_class: str = Field(default="", max_length=64)
+    sampled_at: datetime
+
+
+class AgentProbeBatch(BaseModel):
+    node_id: str = Field(min_length=1, max_length=128)
+    batch_id: str = Field(min_length=8, max_length=128)
+    sequence: int = Field(ge=1)
+    results: list[ProbeResultIn] = Field(default_factory=list, max_length=100)
+    task_id: str | None = Field(default=None, max_length=128)
+
+
+class TelemetryBatchResponse(BaseModel):
+    accepted: bool
+    duplicate: bool = False
+
+
+class ProbeRequestForAgent(BaseModel):
+    task_id: str
+    target_url: str
+    outbound_tags: list[str] = Field(default_factory=list)
+
+
+class AgentHeartbeatResponse(BaseModel):
+    accepted: bool
+    duplicate: bool = False
+    desired_stale: bool = False
+    probe_requests: list[ProbeRequestForAgent] = Field(default_factory=list)
+
+
+class AccessLogOut(BaseModel):
+    id: str
+    ts: datetime
+    site_id: str
+    node_id: str
+    policy_version: int
+    src_ip: str
+    src_cidr_match: str
+    username: str
+    cert_fp: str
+    dst_host: str
+    dst_port: int
+    action: str
+    deny_reason: str
+    bytes_up: int
+    bytes_down: int
+    duration_ms: int
+
+
+class ConnectionSnapshotOut(BaseModel):
+    id: str
+    node_id: str
+    site_id: str
+    sampled_at: datetime
+    active_connections: int
+    bytes_up: int
+    bytes_down: int
+    top_sources: list[ConnectionTopItem]
+    top_destinations: list[ConnectionTopItem]
+    top_users: list[ConnectionTopItem]
+    api_available: bool
+    received_at: datetime
+
+
+class ProxyConfigSnapshotOut(BaseModel):
+    id: str
+    node_id: str
+    site_id: str
+    sampled_at: datetime
+    api_available: bool
+    groups: list[ProxyGroupSnapshot]
+    error: str
+    received_at: datetime
+
+
+class ProbeHistoryOut(BaseModel):
+    id: str
+    node_id: str
+    site_id: str
+    outbound_tag: str
+    target_url: str
+    success: bool
+    latency_ms: int
+    error_class: str
+    sampled_at: datetime
+
+
+class ProbeCircuitOut(BaseModel):
+    node_id: str
+    site_id: str
+    outbound_tag: str
+    state: str
+    consecutive_failures: int
+    consecutive_successes: int
+    opened_at: datetime | None
+    half_open_at: datetime | None
+    last_success_at: datetime | None
+    last_failure_at: datetime | None
+    last_latency_ms: int
+    last_error_class: str
+    reason: str
+    updated_at: datetime
+
+
+class AlertOut(BaseModel):
+    id: str
+    fingerprint: str
+    category: str
+    severity: str
+    site_id: str
+    node_id: str
+    title: str
+    detail: str
+    status: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    resolved_at: datetime | None
+
+
+class ProbeTaskRequest(BaseModel):
+    target_url: str = Field(default="https://www.google.com/ncr", min_length=1, max_length=2048)
+    outbound_tags: list[str] = Field(default_factory=list, max_length=100)
+
+
+class AccessConfigOut(BaseModel):
+    fqdn: str
+    port: int
+    protocol: Literal["http-connect"] = "http-connect"
+    https_proxy_enabled: bool = False
 
 
 class AgentHeartbeat(BaseModel):

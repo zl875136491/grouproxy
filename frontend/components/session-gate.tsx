@@ -3,7 +3,7 @@
 import { LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { hasManagementSession } from "../lib/api";
+import { hasAuthenticatedSession, hasManagementSession } from "../lib/api";
 import { usePreferences } from "../lib/preferences";
 import { Button } from "./ui";
 
@@ -12,6 +12,16 @@ export function useManagementSession(): boolean | null {
 
   useEffect(() => {
     setSession(hasManagementSession());
+  }, []);
+
+  return session;
+}
+
+export function useAuthenticatedSession(): boolean | null {
+  const [session, setSession] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setSession(hasAuthenticatedSession());
   }, []);
 
   return session;

@@ -96,7 +96,7 @@ async def create_session(user: AdminUser, settings: Settings) -> tuple[str, Mana
     return token, session
 
 
-async def resolve_session(token: str) -> ManagementSession | None:
+async def resolve_session(token: str) -> tuple[ManagementSession, AdminUser] | None:
     session = await ManagementSession.find_one(ManagementSession.token_hash == _token_hash(token))
     if session is None or session.revoked_at is not None or session.expires_at <= utcnow():
         return None
@@ -105,7 +105,7 @@ async def resolve_session(token: str) -> ManagementSession | None:
         return None
     session.last_seen_at = utcnow()
     await session.save()
-    return session
+    return session, user
 
 
 async def revoke_session_token(token: str) -> bool:
@@ -240,6 +240,7 @@ async def create_registered_user(*, itcode: str, password: str) -> AdminUser:
             username=itcode,
             itcode=itcode,
             password_hash=hash_password(password),
+            role="employee",
             auth_source="local",
             password_changed_at=utcnow(),
         )

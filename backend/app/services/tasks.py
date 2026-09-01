@@ -93,6 +93,42 @@ async def claim_due_task(
     return await Task.get(document["_id"])
 
 
+async def claim_probe_task_for_node(
+    *, node_id: str, worker_id: str, lease_seconds: int = 60
+) -> Task | None:
+    """Lease one manual probe to its owning monitor on the next heartbeat."""
+
+    current = now()
+    collection = Task.get_motor_collection()
+    document = await collection.find_one_and_update(
+        {
+            "task_type": "node.probe",
+            "target_id": node_id,
+            "status": "queued",
+            "$or": [{"active": True}, {"active": {"$exists": False}}],
+            "next_run_at": {"$lte": current},
+        },
+        {
+            "$set": {
+                "status": "running",
+                "locked_by": worker_id,
+                "locked_at": current,
+                "heartbeat_at": current,
+                "lease_expires_at": current + timedelta(seconds=lease_seconds),
+                "started_at": current,
+                "stage": "probing",
+                "progress": 20,
+                "progress_message": "Monitor accepted probe request",
+            }
+        },
+        sort=[("next_run_at", 1), ("created_at", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+    if document is None:
+        return None
+    return await Task.get(document["_id"])
+
+
 async def heartbeat_task(task: Task, lease_seconds: int = 60) -> Task:
     current = now()
     task.heartbeat_at = current

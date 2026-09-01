@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,17 +32,54 @@ import (
 	"github.com/zl875136491/grouproxy/monitor/internal/subscription"
 )
 
-const monitorVersion = "0.2.1"
+const monitorVersion = "0.3.0"
 
 type agent struct {
-	cfg       config.Config
-	client    *client.Client
-	state     state.State
-	runtime   *runtime.Manager
-	sequence  int
-	log       *log.Logger
-	stateMu   sync.Mutex
-	lastError string
+	cfg               config.Config
+	client            *client.Client
+	state             state.State
+	runtime           *runtime.Manager
+	sequence          int
+	log               *log.Logger
+	stateMu           sync.Mutex
+	probeMu           sync.Mutex
+	proxyConfigMu     sync.Mutex
+	lastProxyConfigAt time.Time
+	// syncError only represents the latest inability to reach the control plane.
+	// Configuration failures are persisted in state.LastError and reported on the
+	// configuration dimension without making a healthy monitor look offline.
+	syncError string
+}
+
+type clashSelector struct {
+	Type string   `json:"type"`
+	Name string   `json:"name"`
+	Now  string   `json:"now"`
+	All  []string `json:"all"`
+	UDP  bool     `json:"udp"`
+}
+
+type spoolEnvelope struct {
+	Kind      string          `json:"kind"`
+	Priority  int             `json:"priority"`
+	CreatedAt time.Time       `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type accessLogEntry struct {
+	TS            time.Time `json:"ts"`
+	PolicyVersion int       `json:"policy_version"`
+	SrcIP         string    `json:"src_ip"`
+	SrcCIDRMatch  string    `json:"src_cidr_match"`
+	Username      string    `json:"username"`
+	CertFP        string    `json:"cert_fp"`
+	DstHost       string    `json:"dst_host"`
+	DstPort       int       `json:"dst_port"`
+	Action        string    `json:"action"`
+	DenyReason    string    `json:"deny_reason"`
+	BytesUp       int64     `json:"bytes_up"`
+	BytesDown     int64     `json:"bytes_down"`
+	DurationMS    int64     `json:"duration_ms"`
 }
 
 func main() {
@@ -99,7 +142,6 @@ func (a *agent) run(ctx context.Context) {
 			return
 		case <-pollTicker.C:
 			if err := a.sync(ctx); err != nil {
-				a.lastError = err.Error()
 				a.log.Printf("sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
@@ -110,14 +152,901 @@ func (a *agent) run(ctx context.Context) {
 	}
 }
 
+func (a *agent) nextTelemetrySequence(kind string) (int, string) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	var sequence int
+	switch kind {
+	case "logs":
+		a.state.LogSequence++
+		sequence = a.state.LogSequence
+	case "connections":
+		a.state.ConnectionSequence++
+		sequence = a.state.ConnectionSequence
+	case "probes":
+		a.state.ProbeSequence++
+		sequence = a.state.ProbeSequence
+	case "proxy_config":
+		a.state.ProxyConfigSequence++
+		sequence = a.state.ProxyConfigSequence
+	}
+	_ = state.Save(a.cfg.StateDir, a.state)
+	return sequence, fmt.Sprintf("%s-%s-%d-%d", a.cfg.NodeID, kind, sequence, time.Now().UnixNano())
+}
+
+func (a *agent) telemetrySpoolDir() string {
+	return filepath.Join(a.cfg.StateDir, "spool")
+}
+
+func (a *agent) enqueueSpool(kind string, payload any, priority int) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	envelope, err := json.Marshal(spoolEnvelope{
+		Kind: kind, Priority: priority, CreatedAt: time.Now().UTC(), Payload: data,
+	})
+	if err != nil {
+		return err
+	}
+	dir := a.telemetrySpoolDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// Keep deny batches ahead of sampled allow/connection data when the cap is
+	// reached. A single oversized batch is dropped rather than bypassing the
+	// bound.
+	if int64(len(envelope))+directorySize(dir) > a.cfg.SpoolMaxBytes {
+		_ = a.trimSpool(int64(len(envelope)))
+	}
+	if int64(len(envelope))+directorySize(dir) > a.cfg.SpoolMaxBytes {
+		return errors.New("telemetry_spool_full")
+	}
+	name := fmt.Sprintf("%d-%020d-%s.json", priority, time.Now().UnixNano(), kind)
+	tmp, err := os.CreateTemp(dir, ".spool-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(envelope); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(dir, name))
+}
+
+func (a *agent) trimSpool(required int64) error {
+	dir := a.telemetrySpoolDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	type spoolFile struct {
+		path     string
+		priority int
+		size     int64
+	}
+	files := make([]spoolFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		priority := 1
+		if strings.HasPrefix(entry.Name(), "0-") {
+			priority = 0
+		}
+		files = append(files, spoolFile{filepath.Join(dir, entry.Name()), priority, info.Size()})
+	}
+	// Evict sampled data first, oldest first. Deny data is retained until no
+	// other option exists, and even then the hard cap is respected.
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].priority != files[j].priority {
+			return files[i].priority > files[j].priority
+		}
+		return files[i].path < files[j].path
+	})
+	current := directorySize(dir)
+	for _, file := range files {
+		if current+required <= a.cfg.SpoolMaxBytes {
+			break
+		}
+		if err := os.Remove(file.path); err == nil {
+			current -= file.size
+		}
+	}
+	return nil
+}
+
+func (a *agent) replaySpool() {
+	dir := a.telemetrySpoolDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+		var envelope spoolEnvelope
+		if json.Unmarshal(data, &envelope) != nil {
+			_ = os.Remove(path)
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(envelope.Payload, &payload) != nil {
+			_ = os.Remove(path)
+			continue
+		}
+		var sendErr error
+		switch envelope.Kind {
+		case "logs":
+			sendErr = a.client.Logs(payload)
+		case "connections":
+			sendErr = a.client.Connections(payload)
+		case "proxy_config":
+			sendErr = a.client.ProxyConfig(payload)
+		case "probes":
+			sendErr = a.client.Probes(payload)
+		default:
+			_ = os.Remove(path)
+			continue
+		}
+		if sendErr != nil {
+			return
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func (a *agent) sendTelemetry(ctx context.Context) {
+	_ = ctx
+	a.replaySpool()
+	a.collectLogs()
+	a.collectConnections()
+	a.collectProxyConfig()
+}
+
+func (a *agent) collectLogs() {
+	path := filepath.Join(a.cfg.StateDir, "sing-box.log")
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return
+	}
+	a.stateMu.Lock()
+	offset := a.state.LogOffset
+	if offset > info.Size() {
+		// sing-box may truncate the file in place during rotation. Resetting the
+		// cursor prevents a seek past EOF from permanently skipping new entries.
+		offset = 0
+		a.state.LogOffset = 0
+		_ = state.Save(a.cfg.StateDir, a.state)
+	}
+	a.stateMu.Unlock()
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return
+	}
+	reader := bufio.NewReaderSize(file, 64*1024)
+	entries := make([]accessLogEntry, 0, a.cfg.TelemetryBatchMax)
+	newOffset := offset
+	for len(entries) < a.cfg.TelemetryBatchMax {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) == 0 && readErr != nil {
+			break
+		}
+		if readErr == io.EOF && (len(line) == 0 || line[len(line)-1] != '\n') {
+			// Keep a partial final line for the next collection pass.
+			break
+		}
+		newOffset += int64(len(line))
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if parsed, ok := parseAccessLog(line); ok {
+			entries = append(entries, parsed)
+		}
+	}
+	a.stateMu.Lock()
+	if newOffset > a.state.LogOffset {
+		a.state.LogOffset = newOffset
+		_ = state.Save(a.cfg.StateDir, a.state)
+	}
+	a.stateMu.Unlock()
+	if len(entries) == 0 {
+		return
+	}
+	sequence, batchID := a.nextTelemetrySequence("logs")
+	payload := map[string]any{"node_id": a.cfg.NodeID, "batch_id": batchID, "sequence": sequence, "entries": entries}
+	if err := a.client.Logs(payload); err != nil {
+		priority := 1
+		for _, entry := range entries {
+			if entry.Action == "deny" {
+				priority = 0
+				break
+			}
+		}
+		if spoolErr := a.enqueueSpool("logs", payload, priority); spoolErr != nil {
+			a.log.Printf("log telemetry dropped: %v", spoolErr)
+		}
+	}
+}
+
+func parseAccessLog(line []byte) (accessLogEntry, bool) {
+	entry := accessLogEntry{TS: time.Now().UTC(), Action: "allow"}
+	isDeny := false
+	var raw map[string]any
+	if json.Unmarshal(line, &raw) == nil {
+		if value := stringValue(raw["action"]); value == "allow" || value == "deny" {
+			entry.Action = value
+			isDeny = value == "deny"
+		}
+		if value := stringValue(raw["timestamp"]); value != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+				entry.TS = parsed
+			}
+		} else if value := stringValue(raw["time"]); value != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+				entry.TS = parsed
+			}
+		}
+		entry.SrcIP = stringValue(raw["src_ip"])
+		entry.DstHost = stripQuery(stringValue(raw["dst_host"]))
+		entry.DstPort, _ = asInt(raw["dst_port"])
+		entry.Username = stringValue(raw["username"])
+		entry.DenyReason = stringValue(raw["deny_reason"])
+		entry.BytesUp = asInt64(raw["bytes_up"])
+		entry.BytesDown = asInt64(raw["bytes_down"])
+		entry.DurationMS = asInt64(raw["duration_ms"])
+		message := strings.ToLower(stringValue(raw["message"]))
+		if entry.Action == "allow" && isAuthenticationFailure(message) {
+			entry.Action = "deny"
+			isDeny = true
+			if entry.DenyReason == "" {
+				entry.DenyReason = "auth_failed"
+			}
+		} else if entry.Action == "allow" && (strings.Contains(message, "deny") || strings.Contains(message, "reject") || strings.Contains(message, "blocked")) {
+			entry.Action = "deny"
+			isDeny = true
+			if entry.DenyReason == "" {
+				entry.DenyReason = "other"
+			}
+		}
+	} else {
+		message := strings.ToLower(string(line))
+		if isAuthenticationFailure(message) {
+			entry.Action = "deny"
+			entry.DenyReason = "auth_failed"
+		} else if !strings.Contains(message, "deny") && !strings.Contains(message, "reject") && !strings.Contains(message, "blocked") {
+			// Allow logs are sampled to approximately one percent.
+			hash := sha256.Sum256(line)
+			if hash[0]%100 != 0 {
+				return accessLogEntry{}, false
+			}
+		} else {
+			entry.Action = "deny"
+			entry.DenyReason = "other"
+		}
+	}
+	if entry.Action == "allow" && !isDeny {
+		// Allow telemetry is intentionally sampled at approximately one
+		// percent; deny telemetry remains complete for policy investigations.
+		hash := sha256.Sum256(line)
+		if hash[0]%100 != 0 {
+			return accessLogEntry{}, false
+		}
+	}
+	entry.SrcIP = strings.Join(strings.Fields(entry.SrcIP), "")[:minLen(len(strings.Join(strings.Fields(entry.SrcIP), "")), 64)]
+	entry.Username = strings.Join(strings.Fields(entry.Username), "")[:minLen(len(strings.Join(strings.Fields(entry.Username), "")), 128)]
+	entry.DstHost = stripQuery(entry.DstHost)
+	return entry, true
+}
+
+func isAuthenticationFailure(message string) bool {
+	return strings.Contains(message, "authentication failed") ||
+		strings.Contains(message, "auth failed") ||
+		strings.Contains(message, "proxy authentication") ||
+		strings.Contains(message, "unauthorized")
+}
+
+func stripQuery(value string) string {
+	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return strings.Split(value, "?")[0]
+}
+
+func minLen(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func asInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := strconv.ParseInt(string(typed), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func (a *agent) collectConnections() {
+	endpoint := "http://" + a.cfg.ClashAPIListen + "/connections"
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	snapshot := map[string]any{
+		"sampled_at":         time.Now().UTC(),
+		"active_connections": 0,
+		"bytes_up":           int64(0),
+		"bytes_down":         int64(0),
+		"top_sources":        []any{},
+		"top_destinations":   []any{},
+		"top_users":          []any{},
+		"api_available":      false,
+	}
+	response, err := client.Do(request)
+	if err == nil {
+		defer response.Body.Close()
+		data, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if readErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+			var raw map[string]any
+			if json.Unmarshal(data, &raw) == nil {
+				connections, _ := raw["connections"].([]any)
+				snapshot["active_connections"] = len(connections)
+				snapshot["api_available"] = true
+			}
+		}
+	}
+	sequence, batchID := a.nextTelemetrySequence("connections")
+	payload := map[string]any{"node_id": a.cfg.NodeID, "batch_id": batchID, "sequence": sequence, "snapshots": []any{snapshot}}
+	if err := a.client.Connections(payload); err != nil {
+		if spoolErr := a.enqueueSpool("connections", payload, 2); spoolErr != nil {
+			a.log.Printf("connection telemetry dropped: %v", spoolErr)
+		}
+	}
+}
+
+// collectProxyConfig publishes the operator-facing projection of the local
+// Clash API. The API is deliberately loopback-only; the control plane never
+// reaches into a node or receives raw proxy endpoint credentials.
+func (a *agent) collectProxyConfig() {
+	now := time.Now().UTC()
+	interval := time.Duration(a.cfg.ProxyConfigIntervalSeconds) * time.Second
+	a.proxyConfigMu.Lock()
+	if interval > 0 && !a.lastProxyConfigAt.IsZero() && now.Sub(a.lastProxyConfigAt) < interval {
+		a.proxyConfigMu.Unlock()
+		return
+	}
+	a.lastProxyConfigAt = now
+	a.proxyConfigMu.Unlock()
+
+	groups, err := a.readProxyGroups()
+	payload := map[string]any{
+		"node_id":       a.cfg.NodeID,
+		"batch_id":      "",
+		"sequence":      0,
+		"sampled_at":    now,
+		"api_available": err == nil,
+		"groups":        groups,
+		"error":         proxyConfigError(err),
+	}
+	sequence, batchID := a.nextTelemetrySequence("proxy_config")
+	payload["sequence"] = sequence
+	payload["batch_id"] = batchID
+	if sendErr := a.client.ProxyConfig(payload); sendErr != nil {
+		if spoolErr := a.enqueueSpool("proxy_config", payload, 2); spoolErr != nil {
+			a.log.Printf("proxy config telemetry dropped: %v", spoolErr)
+		}
+	}
+}
+
+func (a *agent) readProxyGroups() ([]any, error) {
+	var response struct {
+		Proxies map[string]json.RawMessage `json:"proxies"`
+	}
+	proxyErr := a.clashAPIRequest(http.MethodGet, "/proxies", nil, &response)
+	if proxyErr != nil {
+		// Older Clash-compatible APIs may expose only the selector resource.
+		// A successful fallback is still safe because it goes through the same
+		// metadata-only projection and never returns endpoint credentials.
+		fallback, fallbackErr := a.subscriptionSelectorProjection(nil)
+		if fallbackErr == nil && len(fallback) > 0 {
+			return fallback, nil
+		}
+		return nil, proxyErr
+	}
+	if response.Proxies == nil {
+		fallback, fallbackErr := a.subscriptionSelectorProjection(nil)
+		if fallbackErr == nil && len(fallback) > 0 {
+			return fallback, nil
+		}
+		return nil, errors.New("clash_api_invalid_response")
+	}
+
+	keys := make([]string, 0, len(response.Proxies))
+	metadata := make(map[string]map[string]any, len(response.Proxies))
+	for key, raw := range response.Proxies {
+		var value map[string]any
+		if json.Unmarshal(raw, &value) != nil {
+			continue
+		}
+		keys = append(keys, key)
+		metadata[key] = value
+	}
+	sort.Strings(keys)
+	groups := make([]any, 0, len(keys))
+	for _, key := range keys {
+		value := metadata[key]
+		all := safeProxyNames(stringSlice(value["all"]))
+		if len(all) == 0 {
+			// A few Clash-compatible APIs call this field outbounds.
+			all = safeProxyNames(stringSlice(value["outbounds"]))
+		}
+		if len(all) == 0 {
+			continue
+		}
+		groups = append(groups, proxyGroupProjection(key, value, all, metadata))
+	}
+
+	// The subscription selector endpoint is retained as a compatibility
+	// fallback for older experimental APIs that do not expose /proxies.
+	if len(groups) == 0 {
+		fallback, selectorErr := a.subscriptionSelectorProjection(metadata)
+		if len(response.Proxies) > 0 && len(metadata) == 0 {
+			return nil, errors.New("clash_api_invalid_response")
+		}
+		if selectorErr == nil && len(fallback) > 0 {
+			groups = append(groups, fallback...)
+		} else if len(metadata) == 0 {
+			// A non-empty but undecodable response is malformed.  A valid API
+			// response containing only direct/block entries, however, is a
+			// legitimate empty selectable-group view and should remain online.
+			return nil, errors.New("clash_api_invalid_response")
+		}
+	}
+	return groups, nil
+}
+
+func (a *agent) subscriptionSelectorProjection(metadata map[string]map[string]any) ([]any, error) {
+	selector, err := a.readSubscriptionSelector()
+	if err != nil {
+		return nil, err
+	}
+	all := safeProxyNames(selector.All)
+	if len(all) == 0 {
+		return nil, nil
+	}
+	value := map[string]any{
+		"type": selector.Type,
+		"name": selector.Name,
+		"now":  selector.Now,
+		"all":  all,
+		"udp":  selector.UDP,
+	}
+	return []any{proxyGroupProjection("subscription", value, all, metadata)}, nil
+}
+
+func proxyGroupProjection(key string, value map[string]any, all []string, metadata map[string]map[string]any) map[string]any {
+	name := safeProxyLabel(stringValue(value["name"]))
+	if name == "" {
+		name = safeProxyLabel(key)
+	}
+	group := map[string]any{
+		"name":     name,
+		"type":     safeProxyType(stringValue(value["type"])),
+		"now":      safeProxyLabel(stringValue(value["now"])),
+		"all":      all,
+		"nodes":    make([]any, 0, len(all)),
+		"udp":      boolValue(value["udp"]),
+		"delay_ms": latestProxyDelay(value),
+		"history":  proxyHistoryProjection(value["history"]),
+	}
+	if group["type"] == "" {
+		group["type"] = "unknown"
+	}
+	nodes := group["nodes"].([]any)
+	for _, endpointName := range all {
+		endpoint := metadata[endpointName]
+		if endpoint == nil {
+			endpoint = map[string]any{}
+		}
+		nodes = append(nodes, proxyEndpointProjection(endpointName, endpoint))
+	}
+	group["nodes"] = nodes
+	return group
+}
+
+func proxyEndpointProjection(name string, value map[string]any) map[string]any {
+	result := map[string]any{
+		"name":     safeProxyLabel(name),
+		"type":     safeProxyType(stringValue(value["type"])),
+		"udp":      boolValue(value["udp"]),
+		"delay_ms": latestProxyDelay(value),
+		"history":  proxyHistoryProjection(value["history"]),
+	}
+	if result["type"] == "" {
+		result["type"] = "unknown"
+	}
+	if alive, ok := value["alive"].(bool); ok {
+		result["alive"] = alive
+	}
+	return result
+}
+
+func proxyHistoryProjection(value any) []any {
+	items, ok := value.([]any)
+	if !ok {
+		return []any{}
+	}
+	result := make([]any, 0, minInt(len(items), 20))
+	for _, raw := range items {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		delay, valid := asInt(entry["delay"])
+		if !valid || delay < 0 || delay > 300000 {
+			continue
+		}
+		point := map[string]any{"delay_ms": delay}
+		at := stringValue(entry["time"])
+		if parsed, err := time.Parse(time.RFC3339Nano, at); err == nil {
+			point["at"] = parsed.UTC()
+		} else {
+			point["at"] = nil
+		}
+		result = append(result, point)
+		if len(result) >= 20 {
+			break
+		}
+	}
+	return result
+}
+
+func latestProxyDelay(value map[string]any) any {
+	if delay, ok := asInt(value["delay"]); ok && delay >= 0 && delay <= 300000 {
+		return delay
+	}
+	history := proxyHistoryProjection(value["history"])
+	if len(history) > 0 {
+		if point, ok := history[len(history)-1].(map[string]any); ok {
+			return point["delay_ms"]
+		}
+	}
+	return nil
+}
+
+func safeProxyNames(values []string) []string {
+	result := make([]string, 0, minInt(len(values), 500))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		name := safeProxyLabel(value)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+		if len(result) >= 500 {
+			break
+		}
+	}
+	return result
+}
+
+func safeProxyLabel(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 255 {
+		return string(runes[:255])
+	}
+	return value
+}
+
+func safeProxyType(value string) string {
+	value = safeProxyLabel(value)
+	runes := []rune(value)
+	if len(runes) > 64 {
+		return string(runes[:64])
+	}
+	return value
+}
+
+func proxyConfigError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if strings.Contains(err.Error(), "clash_api_invalid_response") {
+		return "clash_api_invalid_response"
+	}
+	return "clash_api_unavailable"
+}
+
+func (a *agent) clashAPIRequest(method, path string, body any, out any) error {
+	endpoint := "http://" + a.cfg.ClashAPIListen + path
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, endpoint, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("clash_api_http_%d", resp.StatusCode)
+	}
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *agent) readSubscriptionSelector() (clashSelector, error) {
+	var selector clashSelector
+	err := a.clashAPIRequest(
+		http.MethodGet,
+		"/proxies/"+url.PathEscape("subscription"),
+		nil,
+		&selector,
+	)
+	return selector, err
+}
+
+func (a *agent) configuredProbeTags() []string {
+	paths := []string{a.cfg.SingboxConfig, filepath.Join(a.cfg.StateDir, "last-good.json")}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var configValue map[string]any
+		if json.Unmarshal(data, &configValue) != nil {
+			continue
+		}
+		outbounds, ok := configValue["outbounds"].([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range outbounds {
+			entry, ok := raw.(map[string]any)
+			if !ok || stringValue(entry["type"]) != "selector" || stringValue(entry["tag"]) != "subscription" {
+				continue
+			}
+			return uniqueProbeTags(stringSlice(entry["outbounds"]), a.cfg.ProbeMaxOutbounds)
+		}
+	}
+	return nil
+}
+
+func uniqueProbeTags(values []string, max int) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, minInt(len(values), max))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "subscription" || value == "direct" || value == "block" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+		if len(result) >= max {
+			break
+		}
+	}
+	return result
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func (a *agent) selectOutbound(tag string) error {
+	return a.clashAPIRequest(
+		http.MethodPut,
+		"/proxies/"+url.PathEscape("subscription"),
+		map[string]string{"name": tag},
+		nil,
+	)
+}
+
+func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
+	started := time.Now()
+	success := false
+	errorClass := ""
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", a.cfg.ListenPort))
+	if err != nil {
+		return false, "proxy_url_invalid", time.Since(started).Milliseconds()
+	}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   8 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	defer transport.CloseIdleConnections()
+	req, err := http.NewRequest(http.MethodHead, targetURL, nil)
+	if err != nil {
+		return false, "request_error", time.Since(started).Milliseconds()
+	}
+	req.Header.Set("Accept", "*/*")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, "connect_error", time.Since(started).Milliseconds()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		errorClass = fmt.Sprintf("http_%d", resp.StatusCode)
+	} else {
+		success = true
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
+	return success, errorClass, time.Since(started).Milliseconds()
+}
+
+func (a *agent) executeProbe(request client.ProbeRequest) {
+	// Switching a selector is a process-wide operation. Serialize probe runs
+	// and restore the operator's original selection before returning.
+	a.probeMu.Lock()
+	defer a.probeMu.Unlock()
+
+	selector, selectorErr := a.readSubscriptionSelector()
+	available := selector.All
+	if len(available) == 0 {
+		available = a.configuredProbeTags()
+	}
+	tags := uniqueProbeTags(request.OutboundTags, a.cfg.ProbeMaxOutbounds)
+	if len(tags) == 0 {
+		tags = uniqueProbeTags(available, a.cfg.ProbeMaxOutbounds)
+	}
+	if len(tags) == 0 {
+		tags = []string{"subscription"}
+	}
+	availableSet := make(map[string]struct{}, len(available))
+	for _, tag := range available {
+		availableSet[tag] = struct{}{}
+	}
+	original := selector.Now
+	current := original
+	changed := false
+	if selectorErr == nil && original != "" {
+		defer func() {
+			if changed && current != original {
+				if err := a.selectOutbound(original); err != nil {
+					a.log.Printf("restore selector %q: %v", original, err)
+				}
+			}
+		}()
+	}
+
+	results := make([]map[string]any, 0, len(tags))
+	for _, tag := range tags {
+		if selectorErr != nil {
+			results = append(results, probeResult(request.TargetURL, tag, false, "selector_unavailable", 0))
+			continue
+		}
+		if _, exists := availableSet[tag]; !exists {
+			results = append(results, probeResult(request.TargetURL, tag, false, "outbound_not_found", 0))
+			continue
+		}
+		if tag != current {
+			if err := a.selectOutbound(tag); err != nil {
+				results = append(results, probeResult(request.TargetURL, tag, false, "selector_switch_error", 0))
+				continue
+			}
+			current = tag
+			changed = true
+		}
+		success, errorClass, latency := a.probeThroughProxy(request.TargetURL)
+		results = append(results, probeResult(request.TargetURL, tag, success, errorClass, latency))
+	}
+	sequence, batchID := a.nextTelemetrySequence("probes")
+	payload := map[string]any{
+		"node_id":  a.cfg.NodeID,
+		"batch_id": batchID,
+		"sequence": sequence,
+		"task_id":  request.TaskID,
+		"results":  results,
+	}
+	if err := a.client.Probes(payload); err != nil {
+		if spoolErr := a.enqueueSpool("probes", payload, 1); spoolErr != nil {
+			a.log.Printf("probe telemetry dropped: %v", spoolErr)
+		}
+	}
+}
+
+func probeResult(targetURL, tag string, success bool, errorClass string, latency int64) map[string]any {
+	return map[string]any{
+		"outbound_tag": tag,
+		"target_url":   targetURL,
+		"success":      success,
+		"latency_ms":   latency,
+		"error_class":  errorClass,
+		"sampled_at":   time.Now().UTC(),
+	}
+}
+
 func (a *agent) sync(ctx context.Context) error {
 	a.stateMu.Lock()
 	appliedVersion, appliedHash := a.state.AppliedVersion, a.state.AppliedHash
 	a.stateMu.Unlock()
 	desired, err := a.client.Desired(a.cfg.NodeID, appliedVersion, appliedHash)
 	if err != nil {
+		a.setSyncError(err.Error())
 		return err
 	}
+	// A reachable control plane resolves only the transient communication error.
+	// state.LastError remains until a candidate bundle succeeds, so a failed
+	// application is still visible as config_status=failed after reconnection.
+	a.setSyncError("")
 	if !desired.DesiredStale || desired.Bundle == nil {
 		return nil
 	}
@@ -245,7 +1174,6 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	a.state.ServiceStatus = "healthy"
 	a.state.LastError = ""
 	a.state.LastReloadAt = time.Now().UTC()
-	a.lastError = ""
 	a.sequence++
 	a.state.Sequence = a.sequence
 	saveErr := state.Save(a.cfg.StateDir, a.state)
@@ -407,7 +1335,6 @@ func (a *agent) ackFailure(value map[string]any, code, message string, singboxOK
 	a.stateMu.Lock()
 	a.state.ConfigStatus = "failed"
 	a.state.LastError = message
-	a.lastError = message
 	a.sequence++
 	a.state.Sequence = a.sequence
 	_ = state.Save(a.cfg.StateDir, a.state)
@@ -457,15 +1384,10 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 	}
 	value := a.state
 	sequence := a.sequence
+	syncError := a.syncError
 	a.stateMu.Unlock()
 	processOK, portOK, apiOK := a.runtime.Health(context.Background())
-	status := "online"
-	if !processOK || !portOK {
-		status = "degraded"
-	}
-	if a.lastError != "" {
-		status = "degraded"
-	}
+	status, lastError := heartbeatStatus(value, syncError, processOK, portOK)
 	payload := map[string]any{
 		"node_id":             a.cfg.NodeID,
 		"monitor_version":     monitorVersion,
@@ -482,10 +1404,41 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 		"port_ok":             portOK,
 		"api_ok":              apiOK,
 		"spool_bytes":         directorySize(filepath.Join(a.cfg.StateDir, "spool")),
-		"last_error":          a.lastError,
+		"last_error":          lastError,
 		"sequence":            sequence,
 	}
-	return a.client.Heartbeat(payload)
+	response, err := a.client.Heartbeat(payload)
+	if err != nil {
+		// Collection still advances its local offset and persists failed
+		// batches in spool, so a control-plane outage does not lose deny data.
+		a.sendTelemetry(ctx)
+		return err
+	}
+	for _, probeRequest := range response.ProbeRequests {
+		go a.executeProbe(probeRequest)
+	}
+	a.sendTelemetry(ctx)
+	return nil
+}
+
+func (a *agent) setSyncError(message string) {
+	a.stateMu.Lock()
+	a.syncError = message
+	a.stateMu.Unlock()
+}
+
+// heartbeatStatus keeps liveness separate from configuration state. A monitor
+// with a rejected candidate can remain online and keep serving last-good.
+func heartbeatStatus(value state.State, syncError string, processOK, portOK bool) (string, string) {
+	status := "online"
+	if !processOK || !portOK || syncError != "" {
+		status = "degraded"
+	}
+	lastError := value.LastError
+	if lastError == "" {
+		lastError = syncError
+	}
+	return status, lastError
 }
 
 func (a *agent) resolveSubscription(value map[string]any) ([]any, int, string, string, error) {
@@ -629,6 +1582,9 @@ func renderSingbox(
 		"listen_port":      port,
 		"set_system_proxy": false,
 	}
+	if users := proxyAuthUsers(value); len(users) > 0 {
+		inbound["users"] = users
+	}
 	if boolValue(value["shutdown"]) {
 		inbound["listen"] = "127.0.0.1"
 	}
@@ -714,6 +1670,34 @@ func renderSingbox(
 			},
 		},
 	}
+}
+
+func proxyAuthUsers(value map[string]any) []any {
+	rawAuth, ok := value["proxy_auth"].(map[string]any)
+	if !ok || !boolValue(rawAuth["required"]) {
+		return nil
+	}
+	rawUsers, ok := rawAuth["users"].([]any)
+	if !ok {
+		return nil
+	}
+	users := make([]any, 0, len(rawUsers))
+	for _, rawUser := range rawUsers {
+		user, ok := rawUser.(map[string]any)
+		if !ok {
+			continue
+		}
+		username, usernameOK := user["username"].(string)
+		password, passwordOK := user["password"].(string)
+		if !usernameOK || !passwordOK || username == "" || password == "" {
+			continue
+		}
+		// Only keep the sing-box HTTP inbound fields; the signed bundle is
+		// still validated earlier, but config rendering should never carry
+		// through incidental object keys.
+		users = append(users, map[string]any{"username": username, "password": password})
+	}
+	return users
 }
 
 func singboxVersion(binary string) string {

@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:i18n": "node scripts/test-i18n-formatters.mjs",
+    "test:i18n:browser": "node scripts/test-i18n-browser.mjs",
+    "test:session-role": "node scripts/test-session-role.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.15",

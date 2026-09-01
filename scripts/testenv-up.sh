@@ -11,6 +11,7 @@ MONGODB_DATABASE_OVERRIDE="${GROUPROXY_TEST_MONGODB_DATABASE:-grouproxy_test}"
 GQUAN_DELIVERY_MODE="${GROUPROXY_TEST_GQUAN_DELIVERY_MODE:-app}"
 GQUAN_APP_TOKEN="${GROUPROXY_TEST_GQUAN_APP_TOKEN:-}"
 GQUAN_TEST_CODE="${GROUPROXY_TEST_GQUAN_CODE:-123456}"
+PROXY_ACCESS_FQDN="${GROUPROXY_TEST_PROXY_ACCESS_FQDN:-proxy.1oa.com.cn}"
 
 case "$GQUAN_DELIVERY_MODE" in
   app)
@@ -48,8 +49,8 @@ if [[ "${GROUPROXY_TESTENV_RESET:-0}" == "1" ]]; then
   fi
 fi
 
-mkdir -p "$TESTENV_DIR"/{state,logs,monitor-codedev,monitor-nuc}
-chmod 700 "$TESTENV_DIR" "$TESTENV_DIR"/{state,logs,monitor-codedev,monitor-nuc}
+mkdir -p "$TESTENV_DIR"/{state,logs,backups,monitor-codedev,monitor-nuc}
+chmod 700 "$TESTENV_DIR" "$TESTENV_DIR"/{state,logs,backups,monitor-codedev,monitor-nuc}
 ENV_FILE="$TESTENV_DIR/backend.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -60,6 +61,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   umask 077
   management_token="${GROUPROXY_TEST_MANAGEMENT_TOKEN:-$(openssl rand -hex 24)}"
   bundle_secret="${GROUPROXY_TEST_BUNDLE_HMAC_SECRET:-$(openssl rand -hex 32)}"
+  proxy_credential_secret="${GROUPROXY_TEST_PROXY_CREDENTIAL_SECRET:-$(openssl rand -hex 32)}"
+  backup_encryption_key="${GROUPROXY_TEST_BACKUP_ENCRYPTION_KEY:-$(openssl rand -hex 32)}"
   admin_password="${GROUPROXY_TEST_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
   {
     printf 'GROUPROXY_ENVIRONMENT=test\n'
@@ -68,18 +71,52 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_HOST=127.0.0.1\n'
     printf 'GROUPROXY_PORT=%s\n' "$BACKEND_PORT"
     printf 'GROUPROXY_BACKEND_PUBLIC_URL=%s\n' "$BACKEND_URL"
+    printf 'GROUPROXY_PROXY_ACCESS_FQDN=%s\n' "$PROXY_ACCESS_FQDN"
     printf 'GROUPROXY_BUNDLE_HMAC_SECRET=%s\n' "$bundle_secret"
+    printf 'GROUPROXY_PROXY_CREDENTIAL_SECRET=%s\n' "$proxy_credential_secret"
+    printf 'GROUPROXY_BACKUP_DIRECTORY=%q\n' "$TESTENV_DIR/backups"
+    printf 'GROUPROXY_BACKUP_ENCRYPTION_KEY=%q\n' "$backup_encryption_key"
+    # Keep archive creation explicit in the shared test database. Phase 4
+    # creates a manual encrypted archive and runs a non-destructive rehearsal.
+    printf 'GROUPROXY_BACKUP_AUTO_ENABLED=false\n'
     printf 'GROUPROXY_ADMIN_USERNAME=admin\n'
     printf 'GROUPROXY_ADMIN_PASSWORD=%s\n' "$admin_password"
     printf 'GROUPROXY_MANAGEMENT_TOKEN=%s\n' "$management_token"
     printf 'GROUPROXY_ALLOW_INSECURE_AGENT_HTTP=true\n'
     printf 'GROUPROXY_SUBSCRIPTION_INLINE_MAX_BYTES=64\n'
+    # Keep shared test data-plane validation operator-driven. Automatic probes
+    # target public sites and are inappropriate here unless explicitly enabled.
+    printf 'GROUPROXY_PROBE_AUTO_ENABLED=false\n'
     printf 'GROUPROXY_GQUAN_DELIVERY_MODE=%q\n' "$GQUAN_DELIVERY_MODE"
     if [[ "$GQUAN_DELIVERY_MODE" == "stub" ]]; then
       printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE"
     fi
     printf 'GROUPROXY_SEED_DEFAULT_SITES=true\n'
   } > "$ENV_FILE"
+fi
+
+# Phase 4 credentials must remain derivable after a test environment restart.
+# Existing runtime files predate this setting, so add one once without printing
+# or replacing any of their protected values.
+if ! rg -q '^GROUPROXY_PROXY_CREDENTIAL_SECRET=' "$ENV_FILE"; then
+  umask 077
+  printf 'GROUPROXY_PROXY_CREDENTIAL_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_PROXY_ACCESS_FQDN=' "$ENV_FILE"; then
+  printf 'GROUPROXY_PROXY_ACCESS_FQDN=%s\n' "$PROXY_ACCESS_FQDN" >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_PROBE_AUTO_ENABLED=' "$ENV_FILE"; then
+  printf 'GROUPROXY_PROBE_AUTO_ENABLED=false\n' >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_BACKUP_DIRECTORY=' "$ENV_FILE"; then
+  printf 'GROUPROXY_BACKUP_DIRECTORY=%q\n' "$TESTENV_DIR/backups" >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_BACKUP_ENCRYPTION_KEY=' "$ENV_FILE"; then
+  umask 077
+  printf 'GROUPROXY_BACKUP_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_BACKUP_AUTO_ENABLED=' "$ENV_FILE"; then
+  printf 'GROUPROXY_BACKUP_AUTO_ENABLED=false\n' >> "$ENV_FILE"
 fi
 
 set -a
@@ -209,6 +246,7 @@ listen_port_override: $port
 firewall_mode: dry-run
 poll_interval_seconds: 2
 heartbeat_interval_seconds: 2
+proxy_config_interval_seconds: 2
 run_singbox: true
 hmac_secret: "${GROUPROXY_BUNDLE_HMAC_SECRET}"
 allow_insecure_http: true

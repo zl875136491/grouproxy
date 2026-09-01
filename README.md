@@ -4,7 +4,7 @@ Grouproxy is a regional proxy control plane. The backend computes signed
 Desired Bundles, while each monitor owns its local sing-box process and
 proxy-port firewall policy. User traffic never traverses the control plane.
 
-## Phase 0/1/2 Quickstart
+## Phase 0-4 Quickstart
 
 Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, access to the codedev
 MongoDB test database, and the checked-in Linux amd64 sing-box binary.
@@ -16,6 +16,8 @@ export GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>'
 GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-phase1.sh
 ./scripts/verify-phase2.sh
+./scripts/verify-phase3.sh
+./scripts/verify-phase4.sh
 ```
 
 The script validates connectivity and authentication against the explicitly
@@ -26,6 +28,8 @@ local agent simulations:
 
 - `codedev` monitor + sing-box on `127.0.0.1:18080`, Clash API on `127.0.0.1:19090`
 - `nuc` monitor + sing-box on `127.0.0.1:18081`, Clash API on `127.0.0.1:19091`
+- `/proxies` presents each region's read-only strategy groups and outbound
+  health projection; administrators rename node display labels from `/nodes`.
 
 Generated test credentials, state, and logs remain below the ignored
 `testenv/` directory. Stop the local processes without removing evidence:
@@ -83,6 +87,24 @@ visible for diagnosis but cannot be published.
   direct, and other traffic uses the selected subscription. Nodes never fetch
   routing data or subscription-provider URLs themselves.
 
+## Phase 3 Observability
+
+`scripts/verify-phase3.sh` performs only local control-plane checks. It verifies
+canonical telemetry fields, alert and audit APIs, node probe summaries, PAC,
+and the HTTP-only Linux setup script. It does not create a probe, backup, or
+external proxy request.
+
+The frontend also provides two focused i18n checks:
+
+```bash
+(cd frontend && npm run test:i18n)
+```
+
+The browser check needs a local Chrome binary and the generated test admin
+credentials in the current process environment. It loads cached connection
+telemetry, switches Chinese, English, and Spanish, and asserts that no API
+request occurs during either locale switch.
+
 ## Account Authentication
 
 The `/login` screen uses an `itcode` as the account identity. Password login,
@@ -99,6 +121,36 @@ password hashes are upgraded after a successful password login.
 - Set `GROUPROXY_GQUAN_APP_TOKEN` in the backend environment. The default
   test profile also uses a runtime-only APP Token and sends real GQuan
   messages only after an operator requests a code from the login page.
+
+## Phase 4 HTTP Basic Credentials
+
+Phase 4 keeps the employee data path on HTTP CONNECT while adding optional
+per-site HTTP Basic authentication. An employee receives one credential per
+site from `/access`; creating or rotating one reveals the generated password
+exactly once. The backend stores an Argon2 verifier and a random credential
+identifier, never the clear-text password. A stable
+`GROUPROXY_PROXY_CREDENTIAL_SECRET` derives the password again only when the
+signed Desired Bundle is built, so it must be retained with other control-plane
+secrets for backups and restores.
+
+- An administrator enables site authentication only after at least one active
+  credential exists. Credential changes for an enabled site create a normal,
+  auditable release; nodes continue to accept their last-good user list during
+  a control-plane outage.
+- Administrators manage registered employee identities and per-site credential
+  metadata at `/employees`. `GET /api/v1/employees` and
+  `GET /api/v1/employees/{itcode}/proxy-credentials` intentionally return
+  metadata only; issuing or rotating a password remains a one-time reveal.
+- Credential responses use `Cache-Control: no-store`; passwords are omitted
+  from audit records, logs, ordinary APIs, and MongoDB documents.
+- Monitor `0.3.0` validates the signed `proxy_auth` object and renders the
+  users into the local sing-box HTTP inbound. It also translates Clash Trojan
+  SNI and certificate-validation fields to sing-box TLS settings for the
+  subscription's *outbound* connection.
+- `./scripts/verify-phase4.sh` exercises the local Basic-authentication flow.
+  It does not make an external request by default. Set
+  `GROUPROXY_VERIFY_PROXY_EXTERNAL=1` only for the single approved
+  `HEAD https://www.google.com/ncr` check.
 
 ## Deployment Boundary
 

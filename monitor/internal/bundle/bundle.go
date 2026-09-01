@@ -152,6 +152,9 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 	default:
 		return "", errors.New("invalid_allow_cidr_list")
 	}
+	if err := validateProxyAuth(value); err != nil {
+		return "", err
+	}
 	if err := validateSubscription(value); err != nil {
 		return "", err
 	}
@@ -159,6 +162,58 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 		return "", err
 	}
 	return stringValue(value["bundle_hash"]), nil
+}
+
+func validateProxyAuth(value Bundle) error {
+	raw, exists := value["proxy_auth"]
+	if !exists || raw == nil {
+		return errors.New("missing_proxy_auth")
+	}
+	proxyAuth, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("invalid_proxy_auth")
+	}
+	required, ok := proxyAuth["required"].(bool)
+	if !ok {
+		return errors.New("invalid_proxy_auth_required")
+	}
+	rawUsers, exists := proxyAuth["users"]
+	if !exists {
+		return errors.New("missing_proxy_auth_users")
+	}
+	users, ok := rawUsers.([]any)
+	if !ok {
+		return errors.New("invalid_proxy_auth_users")
+	}
+	if len(users) > 10_000 {
+		return errors.New("proxy_auth_too_many_users")
+	}
+	if required && len(users) == 0 {
+		return errors.New("proxy_auth_requires_user")
+	}
+	if !required && len(users) != 0 {
+		return errors.New("proxy_auth_users_not_allowed")
+	}
+	seen := make(map[string]struct{}, len(users))
+	for _, rawUser := range users {
+		user, ok := rawUser.(map[string]any)
+		if !ok {
+			return errors.New("invalid_proxy_auth_user")
+		}
+		username, usernameOK := user["username"].(string)
+		password, passwordOK := user["password"].(string)
+		if !usernameOK || !passwordOK || strings.TrimSpace(username) == "" || password == "" {
+			return errors.New("invalid_proxy_auth_user")
+		}
+		if len(username) > 128 || len(password) > 512 {
+			return errors.New("invalid_proxy_auth_user")
+		}
+		if _, duplicate := seen[username]; duplicate {
+			return errors.New("duplicate_proxy_auth_username")
+		}
+		seen[username] = struct{}{}
+	}
+	return nil
 }
 
 func validateSubscription(value Bundle) error {

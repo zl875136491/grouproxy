@@ -223,8 +223,8 @@ export default function LoginPage() {
     try {
       if (loginMode === "password") {
         const result = await loginWithPassword(loginItcode.trim(), loginPassword);
-        saveManagementSession(result.access_token);
-        router.replace("/");
+        saveManagementSession(result.access_token, result.role);
+        router.replace(result.role === "admin" ? "/" : "/access");
         return;
       }
       if (!loginChallenge) throw new Error("verification_code_invalid");
@@ -233,8 +233,8 @@ export default function LoginPage() {
         challenge_id: loginChallenge.challenge_id,
         verification_code: loginVerificationCode,
       });
-      saveManagementSession(result.access_token);
-      router.replace("/");
+      saveManagementSession(result.access_token, result.role);
+      router.replace(result.role === "admin" ? "/" : "/access");
     } catch (submitError) {
       setLoginError(authErrorMessage(submitError, t));
     } finally {

@@ -5,7 +5,6 @@ import { CalendarClock, CirclePlus, Trash2 } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
 import { createException, deleteException, getExceptions, type TravelException } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
-import { formatDate, formatDurationUntil } from "../../lib/utils";
 import { ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
@@ -18,7 +17,7 @@ function defaultExpiry() {
 }
 
 export default function ExceptionsPage() {
-  const { t } = usePreferences();
+  const { t, formatDate, formatDurationUntil } = usePreferences();
   const session = useManagementSession();
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);

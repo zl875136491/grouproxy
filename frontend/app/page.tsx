@@ -13,7 +13,7 @@ import {
   type Site,
 } from "../lib/api";
 import { usePreferences } from "../lib/preferences";
-import { formatDate, label } from "../lib/utils";
+import { label } from "../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../components/data-state";
 import { PageHeader } from "../components/page-header";
 import { SessionGate, useManagementSession } from "../components/session-gate";
@@ -34,7 +34,7 @@ function siteState(site: Site, nodes: Node[]) {
 }
 
 export default function OverviewPage() {
-  const { t } = usePreferences();
+  const { t, formatDate, formatNumber, formatPercent } = usePreferences();
   const session = useManagementSession();
   const overview = useQuery({ queryKey: ["overview"], queryFn: getOverview, enabled: session === true, refetchInterval: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, refetchInterval: 10_000 });
@@ -74,16 +74,22 @@ export default function OverviewPage() {
       {overviewData.drifted_nodes > 0 ? (
         <div className="alert-strip alert-danger" role="alert">
           <ShieldCheck size={18} />
-          <div><strong>{t("{count} nodes need attention", { count: overviewData.drifted_nodes })}</strong><span>{t("Configuration or service state differs from the desired release.")}</span></div>
+          <div><strong>{t("{count} nodes need attention", { count: formatNumber(overviewData.drifted_nodes) })}</strong><span>{t("Configuration or service state differs from the desired release.")}</span></div>
           <Link href="/nodes">{t("Review nodes")} <ArrowRight size={15} /></Link>
         </div>
       ) : null}
 
       <section className="metric-grid" aria-label={t("Control-plane summary")}>
-        <Panel className="metric-panel"><span>{t("Nodes online")}</span><strong>{overviewData.online_nodes}<small> / {overviewData.nodes}</small></strong><em>{t("Heartbeat state")}</em></Panel>
-        <Panel className="metric-panel"><span>{t("Configuration in sync")}</span><strong>{overviewData.in_sync_nodes}<small> / {overviewData.nodes}</small></strong><em>{t("Applied bundle matches")}</em></Panel>
-        <Panel className="metric-panel"><span>{t("Drift or failure")}</span><strong>{overviewData.drifted_nodes}</strong><em>{t("Requires operator review")}</em></Panel>
-        <Panel className="metric-panel"><span>{t("Active deployments")}</span><strong>{activeReleases.length}</strong><em>{t("{count} queued or running tasks", { count: activeTasks.length })}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Nodes online")}</span><strong>{formatNumber(overviewData.online_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Heartbeat state")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Configuration in sync")}</span><strong>{formatNumber(overviewData.in_sync_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Applied bundle matches")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Drift or failure")}</span><strong>{formatNumber(overviewData.drifted_nodes)}</strong><em>{t("Requires operator review")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Active connections")}</span><strong>{formatNumber(overviewData.connections)}</strong><em>{t("Control plane telemetry")}</em></Panel>
+      </section>
+
+      <section className="metric-grid metric-grid-trio" aria-label={t("Deployment and alert summary")}>
+        <Panel className="metric-panel"><span>{t("Active deployments")}</span><strong>{formatNumber(activeReleases.length)}</strong><em>{t("{count} queued or running tasks", { count: formatNumber(activeTasks.length) })}</em></Panel>
+        <Link className="panel metric-panel metric-panel-link" href="/alerts"><span>{t("Open alerts")}</span><strong>{formatNumber(overviewData.open_alerts)}</strong><em>{t("Review active conditions")}</em></Link>
+        <Link className="panel metric-panel metric-panel-link" href="/probes"><span>{t("Open circuits")}</span><strong>{formatNumber(overviewData.open_circuits)}</strong><em>{t("Review outbound health")}</em></Link>
       </section>
 
       <section className="dashboard-grid dashboard-grid-primary">
@@ -98,7 +104,7 @@ export default function OverviewPage() {
                 return (
                   <Link className="topology-site" href={`/sites/${site.slug}/cidrs`} key={site.id}>
                     <span className={`topology-dot topology-${state.replaceAll(" ", "-")}`} />
-                    <div><strong>{t(site.name)}</strong><span>{siteNodes.length ? `${siteNodes.length} ${t(siteNodes.length === 1 ? "node" : "nodes")}` : t("No node enrolled")}</span></div>
+                    <div><strong>{t(site.name)}</strong><span>{siteNodes.length ? `${formatNumber(siteNodes.length)} ${t(siteNodes.length === 1 ? "node" : "nodes")}` : t("No node enrolled")}</span></div>
                     <StatusBadge status={state} />
                   </Link>
                 );
@@ -120,11 +126,11 @@ export default function OverviewPage() {
       <section className="dashboard-grid dashboard-grid-secondary">
         <Panel>
           <div className="panel-heading"><div><span className="panel-kicker">{t("EDGE INVENTORY")}</span><h2>{t("Node state")}</h2></div><Link href="/nodes">{t("Open nodes")} <ArrowRight size={15} /></Link></div>
-          <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Liveness")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Applied / desired")}</th></tr></thead><tbody>{nodeItems.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary">{t(siteNames.get(node.site_id) || node.site_id)}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td>{node.applied_version} / {node.desired_version}</td></tr>)}</tbody></table></div>
+          <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Liveness")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Applied / desired")}</th></tr></thead><tbody>{nodeItems.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary">{t(siteNames.get(node.site_id) || node.site_id)}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td>{formatNumber(node.applied_version)} / {formatNumber(node.desired_version)}</td></tr>)}</tbody></table></div>
         </Panel>
         <Panel>
           <div className="panel-heading"><div><span className="panel-kicker">{t("TASK QUEUE")}</span><h2>{t("Active work")}</h2></div><Link href="/tasks">{t("Open queue")} <ArrowRight size={15} /></Link></div>
-          {tasks.isLoading ? <LoadingState rows={3} /> : tasks.isError ? <ErrorState error="Task queue is unavailable." onRetry={() => void tasks.refetch()} /> : activeTasks.length ? <div className="activity-list">{activeTasks.slice(0, 5).map((task) => <Link className="activity-row" href="/tasks" key={task.task_id}><span className="activity-icon"><Activity size={16} /></span><div><strong>{t(label(task.task_type))}</strong><span>{t(task.stage.replaceAll("_", " "))} · {task.progress}%</span></div><StatusBadge status={task.status} /></Link>)}</div> : <EmptyState title="No active tasks" detail="Queued and running jobs appear here." />}
+          {tasks.isLoading ? <LoadingState rows={3} /> : tasks.isError ? <ErrorState error="Task queue is unavailable." onRetry={() => void tasks.refetch()} /> : activeTasks.length ? <div className="activity-list">{activeTasks.slice(0, 5).map((task) => <Link className="activity-row" href="/tasks" key={task.task_id}><span className="activity-icon"><Activity size={16} /></span><div><strong>{t(label(task.task_type))}</strong><span>{t(task.stage.replaceAll("_", " "))} · {formatPercent(task.progress)}</span></div><StatusBadge status={task.status} /></Link>)}</div> : <EmptyState title="No active tasks" detail="Queued and running jobs appear here." />}
         </Panel>
       </section>
     </div>

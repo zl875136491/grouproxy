@@ -62,11 +62,15 @@ export function StatusBadge({ status, className }: { status: string; className?:
           normalized,
         )
       ? "danger"
-      : ["applying", "health-check", "queued", "running", "degraded", "drift", "pending", "attention", "high", "medium", "expired", "rolled-back"].includes(
+      : ["critical"].includes(normalized)
+        ? "danger"
+        : ["applying", "health-check", "queued", "running", "degraded", "drift", "pending", "attention", "high", "medium", "warning", "expired", "rolled-back"].includes(
             normalized,
           )
-        ? "warning"
-        : "neutral";
+          ? "warning"
+          : ["resolved"].includes(normalized)
+            ? "success"
+            : "neutral";
   return <span className={cn("status-badge", `status-${tone}`, className)}>{t(status.replaceAll("_", " "))}</span>;
 }
 

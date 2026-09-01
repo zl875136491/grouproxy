@@ -13,6 +13,7 @@ from ..models import (
 )
 from .cidr import effective_cidrs
 from .crypto import sign_bundle
+from .proxy_credentials import proxy_auth_bundle
 
 
 def iso(value: datetime) -> str:
@@ -73,18 +74,23 @@ async def build_signed_bundle(
     ).to_list()
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
+    proxy_auth = await proxy_auth_bundle(
+        site_id=str(site.id), required=site.proxy_auth_required, settings=settings
+    )
     bundle: dict[str, Any] = {
         "schema_version": 1,
         "release_id": release_id,
         "desired_version": desired_version,
-        "min_monitor_version": "0.2.1",
+        # HTTP Basic authentication must never be silently ignored by an old
+        # monitor, so credential-bearing bundles require the matching parser.
+        "min_monitor_version": "0.3.0",
         "site_id": str(site.id),
         "node_id": node.agent_id,
         "shutdown": site.shutdown,
         "listen": {"http_port": site.http_port},
         "allow_cidrs": allow_cidrs,
         "deny_destinations": [{"pattern": item.pattern, "kind": item.kind} for item in blacklist],
-        "proxy_auth": {"required": False, "users": []},
+        "proxy_auth": proxy_auth,
         "subscription": subscription,
         "acl_note": sources,
         "issued_at": iso(now),

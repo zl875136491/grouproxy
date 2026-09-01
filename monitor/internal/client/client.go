@@ -26,6 +26,19 @@ type DesiredResponse struct {
 	Bundle       map[string]any `json:"bundle"`
 }
 
+type ProbeRequest struct {
+	TaskID       string   `json:"task_id"`
+	TargetURL    string   `json:"target_url"`
+	OutboundTags []string `json:"outbound_tags"`
+}
+
+type HeartbeatResponse struct {
+	Accepted      bool           `json:"accepted"`
+	Duplicate     bool           `json:"duplicate"`
+	DesiredStale  bool           `json:"desired_stale"`
+	ProbeRequests []ProbeRequest `json:"probe_requests"`
+}
+
 func New(baseURL, tokenFile string) (*Client, error) {
 	data, err := os.ReadFile(tokenFile)
 	if err != nil {
@@ -86,12 +99,30 @@ func (c *Client) Desired(nodeID string, appliedVersion int, appliedHash string) 
 	return result, err
 }
 
-func (c *Client) Heartbeat(payload any) error {
-	return c.request(http.MethodPost, "/agent/v1/heartbeat", nil, payload, nil)
+func (c *Client) Heartbeat(payload any) (HeartbeatResponse, error) {
+	var result HeartbeatResponse
+	err := c.request(http.MethodPost, "/agent/v1/heartbeat", nil, payload, &result)
+	return result, err
 }
 
 func (c *Client) Ack(payload any) error {
 	return c.request(http.MethodPost, "/agent/v1/ack", nil, payload, nil)
+}
+
+func (c *Client) Logs(payload any) error {
+	return c.request(http.MethodPost, "/agent/v1/logs", nil, payload, nil)
+}
+
+func (c *Client) Connections(payload any) error {
+	return c.request(http.MethodPost, "/agent/v1/connections", nil, payload, nil)
+}
+
+func (c *Client) ProxyConfig(payload any) error {
+	return c.request(http.MethodPost, "/agent/v1/proxy-config", nil, payload, nil)
+}
+
+func (c *Client) Probes(payload any) error {
+	return c.request(http.MethodPost, "/agent/v1/probes", nil, payload, nil)
 }
 
 // Blob retrieves only a backend-assigned immutable subscription payload. The

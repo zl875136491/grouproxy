@@ -52,3 +52,41 @@ func TestParseRejectsControlOwnedOutbound(t *testing.T) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
+
+func TestParseClashTrojanNormalizesTLSFields(t *testing.T) {
+	content := []byte(`proxies:
+  - name: edge-a
+    type: trojan
+    server: edge.example.net
+    port: 443
+    password: secret
+    sni: cdn.example.net
+    skip-cert-verify: true
+    client-fingerprint: chrome
+    alpn: [h2, http/1.1]
+`)
+
+	outbounds, err := Parse(content, "clash")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("outbound count = %d", len(outbounds))
+	}
+	outbound := outbounds[0].(map[string]any)
+	tls, ok := outbound["tls"].(map[string]any)
+	if !ok {
+		t.Fatalf("TLS object was not rendered: %#v", outbound["tls"])
+	}
+	if tls["enabled"] != true || tls["server_name"] != "cdn.example.net" || tls["insecure"] != true {
+		t.Fatalf("TLS values = %#v", tls)
+	}
+	alpn, ok := tls["alpn"].([]string)
+	if !ok || len(alpn) != 2 || alpn[0] != "h2" || alpn[1] != "http/1.1" {
+		t.Fatalf("TLS ALPN = %#v", tls["alpn"])
+	}
+	utls, ok := tls["utls"].(map[string]any)
+	if !ok || utls["enabled"] != true || utls["fingerprint"] != "chrome" {
+		t.Fatalf("TLS uTLS = %#v", tls["utls"])
+	}
+}

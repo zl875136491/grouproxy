@@ -22,7 +22,7 @@ import { Button, ConfirmDialog, Panel, StatusBadge } from "../../../../component
 type Change = { action: "added" | "removed"; cidr: string };
 
 export default function SiteCIDRPage() {
-  const { t } = usePreferences();
+  const { t, formatNumber } = usePreferences();
   const params = useParams<{ slug: string }>();
   const router = useRouter();
   const session = useManagementSession();
@@ -98,14 +98,14 @@ export default function SiteCIDRPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="SITE POLICY" title={t("{name} CIDRs", { name: t(site.name) })} description={t("Policy revision v{revision} · HTTP :{port}", { revision: site.config_revision, port: site.http_port })} actions={<Button variant="primary" onClick={() => draft.mutate()} disabled={draft.isPending}><FileDiff size={16} /> {t("Create draft")}</Button>} />
+      <PageHeader eyebrow="SITE POLICY" title={t("{name} CIDRs", { name: t(site.name) })} description={t("Policy revision v{revision} · HTTP :{port}", { revision: formatNumber(site.config_revision), port: formatNumber(site.http_port, { useGrouping: false }) })} actions={<Button variant="primary" onClick={() => draft.mutate()} disabled={draft.isPending}><FileDiff size={16} /> {t("Create draft")}</Button>} />
       {mutationError ? <div className="inline-error" role="alert">{mutationError instanceof Error ? mutationError.message : "The policy change was not accepted."}</div> : null}
       <section className="policy-grid">
         <Panel>
           <div className="panel-heading"><div><span className="panel-kicker">{t("SOURCE ACCESS")}</span><h2>{t("Site CIDRs")}</h2></div><Button size="sm" variant="secondary" onClick={() => setShowAdd((value) => !value)}><CirclePlus size={15} /> {t("Add CIDR")}</Button></div>
           {showAdd ? <form className="inline-form" onSubmit={submit}><label><span>CIDR</span><input autoFocus value={cidr} onChange={(event) => setCIDR(event.target.value)} placeholder="10.32.12.0/24" /></label><label><span>{t("Comment")}</span><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder={t("Office network")} /></label><Button variant="primary" type="submit" disabled={add.isPending}>{add.isPending ? t("Adding...") : t("Add")}</Button></form> : null}
           <div className="table-wrap"><table><thead><tr><th>CIDR</th><th>{t("Comment")}</th><th>{t("State")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{cidrItems.length ? cidrItems.map((entry) => <tr key={entry.id}><td className="mono">{entry.cidr}</td><td>{entry.comment || "-"}</td><td><StatusBadge status={entry.enabled ? "enabled" : "disabled"} /></td><td><button className="row-icon-button row-icon-danger" aria-label={t("Remove {value}", { value: entry.cidr })} title={t("Remove CIDR")} onClick={() => setRemoveTarget(entry)}><Trash2 size={16} /></button></td></tr>) : <tr><td colSpan={4}><div className="table-empty">{t("No site CIDRs configured.")}</div></td></tr>}</tbody></table></div>
-          {changes.length ? <div className="change-summary"><FileDiff size={16} /><span>{t("{count} local policy changes included in the next draft.", { count: changes.length })}</span></div> : null}
+          {changes.length ? <div className="change-summary"><FileDiff size={16} /><span>{t("{count} local policy changes included in the next draft.", { count: formatNumber(changes.length) })}</span></div> : null}
         </Panel>
         <Panel>
           <div className="panel-heading"><div><span className="panel-kicker">{t("POLICY TEST")}</span><h2>{t("Source IP preview")}</h2></div><Network size={18} /></div>

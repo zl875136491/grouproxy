@@ -10,23 +10,27 @@ import (
 )
 
 type Config struct {
-	BackendURL               string `yaml:"backend_url"`
-	NodeID                   string `yaml:"node_id"`
-	TokenFile                string `yaml:"token_file"`
-	StateDir                 string `yaml:"state_dir"`
-	SingboxBin               string `yaml:"singbox_bin"`
-	SingboxConfig            string `yaml:"singbox_config"`
-	ListenPort               int    `yaml:"listen_port"`
-	ListenPortOverride       int    `yaml:"listen_port_override"`
-	FirewallMode             string `yaml:"firewall_mode"` // dry-run or apply
-	PollIntervalSeconds      int    `yaml:"poll_interval_seconds"`
-	HeartbeatIntervalSeconds int    `yaml:"heartbeat_interval_seconds"`
-	RunSingbox               bool   `yaml:"run_singbox"`
-	HMACSecret               string `yaml:"hmac_secret"`
-	AllowInsecureHTTP        bool   `yaml:"allow_insecure_http"`
-	ClashAPIListen           string `yaml:"clash_api_listen"`
-	HealthWindowSeconds      int    `yaml:"health_window_seconds"`
-	HealthSampleSeconds      int    `yaml:"health_sample_seconds"`
+	BackendURL                 string `yaml:"backend_url"`
+	NodeID                     string `yaml:"node_id"`
+	TokenFile                  string `yaml:"token_file"`
+	StateDir                   string `yaml:"state_dir"`
+	SingboxBin                 string `yaml:"singbox_bin"`
+	SingboxConfig              string `yaml:"singbox_config"`
+	ListenPort                 int    `yaml:"listen_port"`
+	ListenPortOverride         int    `yaml:"listen_port_override"`
+	FirewallMode               string `yaml:"firewall_mode"` // dry-run or apply
+	PollIntervalSeconds        int    `yaml:"poll_interval_seconds"`
+	HeartbeatIntervalSeconds   int    `yaml:"heartbeat_interval_seconds"`
+	RunSingbox                 bool   `yaml:"run_singbox"`
+	HMACSecret                 string `yaml:"hmac_secret"`
+	AllowInsecureHTTP          bool   `yaml:"allow_insecure_http"`
+	ClashAPIListen             string `yaml:"clash_api_listen"`
+	HealthWindowSeconds        int    `yaml:"health_window_seconds"`
+	HealthSampleSeconds        int    `yaml:"health_sample_seconds"`
+	SpoolMaxBytes              int64  `yaml:"spool_max_bytes"`
+	TelemetryBatchMax          int    `yaml:"telemetry_batch_max"`
+	ProbeMaxOutbounds          int    `yaml:"probe_max_outbounds"`
+	ProxyConfigIntervalSeconds int    `yaml:"proxy_config_interval_seconds"`
 }
 
 func (c *Config) Defaults() {
@@ -62,6 +66,18 @@ func (c *Config) Defaults() {
 	}
 	if c.HealthSampleSeconds <= 0 {
 		c.HealthSampleSeconds = 2
+	}
+	if c.SpoolMaxBytes <= 0 {
+		c.SpoolMaxBytes = 50 << 20
+	}
+	if c.TelemetryBatchMax <= 0 || c.TelemetryBatchMax > 500 {
+		c.TelemetryBatchMax = 200
+	}
+	if c.ProbeMaxOutbounds <= 0 || c.ProbeMaxOutbounds > 20 {
+		c.ProbeMaxOutbounds = 3
+	}
+	if c.ProxyConfigIntervalSeconds <= 0 {
+		c.ProxyConfigIntervalSeconds = 15
 	}
 }
 

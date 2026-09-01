@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -78,7 +81,50 @@ func waitAddress(address string, timeout time.Duration) bool {
 }
 
 func waitPort(port int, timeout time.Duration) bool {
+	if _, known := linuxTCPListener(port); known {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if listening, _ := linuxTCPListener(port); listening {
+				return true
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return false
+	}
 	return waitAddress(fmt.Sprintf("127.0.0.1:%d", port), timeout)
+}
+
+// linuxTCPListener avoids creating an empty HTTP connection every time the
+// monitor samples health. sing-box correctly logs such a connection as an EOF,
+// but frequent health checks would otherwise flood the access log and obscure
+// real authentication and routing events. Non-Linux builds retain the portable
+// TCP fallback above.
+func linuxTCPListener(port int) (listening, known bool) {
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		known = true
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) < 4 || fields[3] != "0A" {
+				continue
+			}
+			parts := strings.Split(fields[1], ":")
+			if len(parts) != 2 {
+				continue
+			}
+			parsed, parseErr := strconv.ParseInt(parts[1], 16, 32)
+			if parseErr == nil && int(parsed) == port {
+				_ = file.Close()
+				return true, true
+			}
+		}
+		_ = file.Close()
+	}
+	return false, known
 }
 
 func (m *Manager) Apply(candidatePath string) (bool, error) {

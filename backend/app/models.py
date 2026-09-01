@@ -1,5 +1,5 @@
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 from uuid import uuid4
 
 from beanie import Document, Indexed
@@ -22,6 +22,7 @@ class AdminUser(Document):
     itcode: str = ""
     password_hash: str
     is_active: bool = True
+    role: Literal["admin", "employee"] = "employee"
     auth_source: str = "local"
     password_changed_at: datetime | None = None
     last_login_at: datetime | None = None
@@ -54,7 +55,7 @@ class AuthVerificationChallenge(Document):
     source_ip: str = ""
     delivery_error: str = ""
     created_at: datetime = Field(default_factory=utcnow)
-    expires_at: datetime
+    expires_at: datetime = Field(default_factory=utcnow)
     resend_available_at: datetime
     delivered_at: datetime | None = None
     consumed_at: datetime | None = None
@@ -81,7 +82,7 @@ class ManagementSession(Document):
     user_id: str
     itcode: str
     created_at: datetime = Field(default_factory=utcnow)
-    expires_at: datetime
+    expires_at: datetime = Field(default_factory=utcnow)
     revoked_at: datetime | None = None
     last_seen_at: datetime | None = None
 
@@ -106,6 +107,36 @@ class Site(Document):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ProxyCredential(Document):
+    """One derived HTTP Basic credential for an employee at one site.
+
+    ``password_hash`` proves that the configured control-plane secret still
+    derives the expected value. The clear-text password is never stored here.
+    """
+
+    credential_id: Indexed(str, unique=True)
+    site_id: str
+    itcode: str
+    username: str
+    password_hash: str
+    active: bool = True
+    created_at: datetime = Field(default_factory=utcnow)
+    rotated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("site_id", ASCENDING), ("itcode", ASCENDING)],
+                name="unique_proxy_credential_user_site",
+                unique=True,
+            ),
+            IndexModel(
+                [("site_id", ASCENDING), ("active", ASCENDING)],
+                name="proxy_credential_site_active",
+            ),
+        ]
+
+
 class Node(Document):
     site_id: str
     name: str
@@ -122,6 +153,7 @@ class Node(Document):
     config_status: str = "unknown"
     service_status: str = "unknown"
     subscription_status: str = "not_configured"
+    probe_status: str = "unknown"
     last_error: str = ""
     last_error_at: datetime | None = None
     last_successful_reload_at: datetime | None = None
@@ -281,6 +313,14 @@ class ConfigRelease(Document):
     created_by: str = "system"
     created_at: datetime = Field(default_factory=utcnow)
 
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("site_id", ASCENDING), ("status", ASCENDING)],
+                name="config_release_site_status",
+            )
+        ]
+
 
 class Task(Document):
     task_id: Indexed(str, unique=True)
@@ -313,6 +353,10 @@ class Task(Document):
     class Settings:
         indexes = [
             IndexModel(
+                [("status", ASCENDING), ("next_run_at", ASCENDING)],
+                name="task_status_next_run",
+            ),
+            IndexModel(
                 [("target_id", ASCENDING)],
                 name="unique_active_subscription_refresh",
                 unique=True,
@@ -320,7 +364,25 @@ class Task(Document):
                     "task_type": "subscription.refresh",
                     "active": True,
                 },
-            )
+            ),
+            IndexModel(
+                [("task_type", ASCENDING), ("target_id", ASCENDING)],
+                name="unique_active_probe_task",
+                unique=True,
+                partialFilterExpression={
+                    "task_type": "node.probe",
+                    "active": True,
+                },
+            ),
+            IndexModel(
+                [("task_type", ASCENDING), ("target_id", ASCENDING)],
+                name="unique_active_backup_restore",
+                unique=True,
+                partialFilterExpression={
+                    "task_type": "backup.restore",
+                    "active": True,
+                },
+            ),
         ]
 
 
@@ -334,6 +396,16 @@ class HeartbeatSample(Document):
     node_id: str
     payload: dict[str, Any]
     received_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=lambda: utcnow() + timedelta(days=7))
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="heartbeat_sample_ttl",
+                expireAfterSeconds=0,
+            )
+        ]
 
 
 class AuditEvent(Document):
@@ -352,38 +424,235 @@ class AuditEvent(Document):
     previous_hash: str = ""
     immutable_hash: Indexed(str, unique=True)
     at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=lambda: utcnow() + timedelta(days=180))
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="audit_event_ttl",
+                expireAfterSeconds=0,
+            )
+        ]
 
 
 class AccessLog(Document):
     ts: Indexed(datetime)
     site_id: str
     node_id: str
-    policy_version: int
-    src_ip: str
+    batch_id: str = ""
+    policy_version: int = 0
+    src_ip: str = ""
     src_cidr_match: str = ""
     username: str = ""
     cert_fp: str = ""
     dst_host: str = ""
     dst_port: int = 0
-    action: str
+    action: str = "deny"
     deny_reason: str = ""
     bytes_up: int = 0
     bytes_down: int = 0
     duration_ms: int = 0
+    expires_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel([("site_id", ASCENDING), ("ts", -1)], name="access_log_site_ts"),
+            IndexModel([("action", ASCENDING), ("ts", -1)], name="access_log_action_ts"),
+            IndexModel([("src_ip", ASCENDING)], name="access_log_src_ip"),
+            IndexModel([("node_id", ASCENDING), ("ts", -1)], name="access_log_node_ts"),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="access_log_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
 
 
 class ConnectionSnapshot(Document):
     node_id: str
     site_id: str
-    payload: dict[str, Any]
+    batch_id: str = ""
+    sampled_at: datetime = Field(default_factory=utcnow)
+    active_connections: int = 0
+    bytes_up: int = 0
+    bytes_down: int = 0
+    top_sources: list[dict[str, Any]] = Field(default_factory=list)
+    top_destinations: list[dict[str, Any]] = Field(default_factory=list)
+    top_users: list[dict[str, Any]] = Field(default_factory=list)
+    api_available: bool = True
     received_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel([("node_id", ASCENDING), ("sampled_at", -1)], name="connection_node_ts"),
+            IndexModel([("site_id", ASCENDING), ("sampled_at", -1)], name="connection_site_ts"),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="connection_snapshot_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
+
+
+class ProxyConfigSnapshot(Document):
+    """The latest safe-to-display view of a node's local Clash API.
+
+    Monitor intentionally sends a projection of ``/proxies`` rather than the
+    raw response.  The raw response can contain endpoint credentials and
+    server details; this collection is therefore limited to group/health
+    metadata that an operator needs to choose and troubleshoot an outbound.
+    """
+
+    node_id: str
+    site_id: str
+    batch_id: str = ""
+    sampled_at: datetime = Field(default_factory=utcnow)
+    api_available: bool = False
+    groups: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    received_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=lambda: utcnow() + timedelta(days=7))
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING)],
+                name="unique_proxy_config_node_latest",
+                unique=True,
+            ),
+            IndexModel([("site_id", ASCENDING)], name="proxy_config_site"),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="proxy_config_snapshot_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
+
+
+class ProbeHistory(Document):
+    node_id: str
+    site_id: str
+    batch_id: str = ""
+    outbound_tag: str
+    target_url: str
+    success: bool
+    latency_ms: int = 0
+    error_class: str = ""
+    sampled_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING), ("outbound_tag", ASCENDING), ("sampled_at", -1)],
+                name="probe_history_node_outbound_ts",
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="probe_history_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
+
+
+class ProbeCircuit(Document):
+    node_id: str
+    site_id: str
+    outbound_tag: str
+    state: str = "closed"
+    consecutive_failures: int = 0
+    consecutive_successes: int = 0
+    opened_at: datetime | None = None
+    half_open_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_latency_ms: int = 0
+    last_error_class: str = ""
+    reason: str = ""
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING), ("outbound_tag", ASCENDING)],
+                name="unique_probe_circuit",
+                unique=True,
+            ),
+            IndexModel(
+                [("site_id", ASCENDING), ("state", ASCENDING)],
+                name="probe_circuit_site_state",
+            ),
+        ]
+
+
+class TelemetryBatch(Document):
+    node_id: str
+    kind: str
+    batch_id: str
+    sequence: int
+    item_count: int
+    received_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING), ("kind", ASCENDING), ("batch_id", ASCENDING)],
+                name="unique_telemetry_batch",
+                unique=True,
+            ),
+            IndexModel(
+                [("node_id", ASCENDING), ("kind", ASCENDING), ("sequence", -1)],
+                name="telemetry_batch_sequence",
+            ),
+            IndexModel(
+                [("node_id", ASCENDING), ("kind", ASCENDING), ("sequence", ASCENDING)],
+                name="unique_telemetry_sequence",
+                unique=True,
+            ),
+        ]
+
+
+class TelemetryCursor(Document):
+    """Per-node monotonic cursor used to reject stale telemetry atomically."""
+
+    node_id: str
+    kind: str
+    last_sequence: int = 0
+    last_batch_id: str = ""
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING), ("kind", ASCENDING)],
+                name="unique_telemetry_cursor",
+                unique=True,
+            )
+        ]
+
+
+class Alert(Document):
+    fingerprint: Indexed(str, unique=True)
+    category: str
+    severity: str = "warning"
+    site_id: str = ""
+    node_id: str = ""
+    title: str
+    detail: str = ""
+    status: str = "open"
+    first_seen_at: datetime = Field(default_factory=utcnow)
+    last_seen_at: datetime = Field(default_factory=utcnow)
+    resolved_at: datetime | None = None
 
 
 class BackupRecord(Document):
     backup_id: Indexed(str, unique=True)
     scope: str
+    origin: Literal["manual", "scheduled"] = "manual"
     artifact_paths: list[str] = Field(default_factory=list)
-    format: str = "tar.zst"
+    format: str = "tar.gz"
     checksum: str = ""
     encrypted: bool = False
     storage_ref: str = ""
@@ -391,8 +660,19 @@ class BackupRecord(Document):
     created_by: str = "system"
     created_at: datetime = Field(default_factory=utcnow)
     verified_at: datetime | None = None
+    last_rehearsed_at: datetime | None = None
     restore_task_id: str | None = None
     error: str = ""
+    size_bytes: int = 0
+    manifest: dict[str, Any] = Field(default_factory=dict)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("origin", ASCENDING), ("created_at", -1)],
+                name="backup_origin_created",
+            )
+        ]
 
 
 DOCUMENT_MODELS: list[type[Document]] = [
@@ -400,6 +680,7 @@ DOCUMENT_MODELS: list[type[Document]] = [
     AuthVerificationChallenge,
     ManagementSession,
     Site,
+    ProxyCredential,
     Node,
     SiteCIDR,
     TravelException,
@@ -418,5 +699,11 @@ DOCUMENT_MODELS: list[type[Document]] = [
     AuditEvent,
     AccessLog,
     ConnectionSnapshot,
+    ProxyConfigSnapshot,
+    ProbeHistory,
+    ProbeCircuit,
+    TelemetryBatch,
+    TelemetryCursor,
+    Alert,
     BackupRecord,
 ]

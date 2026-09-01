@@ -9,23 +9,33 @@ changes; this service only computes and records desired state.
 import asyncio
 import hashlib
 import hmac
+import ipaddress
+import json
 import secrets
+import socket
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
+from pymongo.errors import DuplicateKeyError
 
 from app.config import Settings, get_settings
 from app.db import Database
 from app.models import (
+    AccessLog,
     AdminUser,
+    Alert,
     AuditEvent,
+    BackupRecord,
     ConfigDraft,
     ConfigRelease,
+    ConnectionSnapshot,
     CrossSiteAllow,
     DesiredRelease,
     DestinationBlacklist,
@@ -33,12 +43,18 @@ from app.models import (
     HeartbeatSample,
     ManagementSession,
     Node,
+    ProbeCircuit,
+    ProbeHistory,
+    ProxyConfigSnapshot,
+    ProxyCredential,
     Site,
     SiteCIDR,
     SiteSubscription,
     SubscriptionSource,
     SubscriptionVersion,
     Task,
+    TelemetryBatch,
+    TelemetryCursor,
     TravelException,
     utcnow,
 )
@@ -46,15 +62,29 @@ from app.models import (
     AgentAck as AgentAckDocument,
 )
 from app.schemas import (
+    AccessConfigOut,
+    AccessLogOut,
     AgentAck,
     AgentAckOut,
+    AgentConnectionBatch,
     AgentHeartbeat,
+    AgentHeartbeatResponse,
+    AgentLogBatch,
+    AgentProbeBatch,
+    AgentProxyConfigBatch,
+    AlertOut,
     AuditEventOut,
     AuthActionResponse,
+    BackupCreateRequest,
+    BackupCreateResponse,
+    BackupRecordOut,
+    BackupRestoreRequest,
+    BackupRestoreResponse,
     CIDRCreate,
     CIDROut,
     CIDRPreviewRequest,
     CIDRPreviewResponse,
+    ConnectionSnapshotOut,
     CrossSiteAllowOut,
     CrossSiteAllowUpdate,
     DesiredResponse,
@@ -62,17 +92,31 @@ from app.schemas import (
     DestinationBlacklistOut,
     DraftCreate,
     DraftOut,
+    EmployeeAccessSiteOut,
+    EmployeeOut,
+    EmployeeProxyAccessOut,
     GQuanLoginRequest,
     LoginRequest,
     LoginResponse,
     NodeCreate,
     NodeCreateResponse,
+    NodeNameUpdate,
     NodeOut,
     PasswordChangeRequest,
+    ProbeCircuitOut,
+    ProbeHistoryOut,
+    ProbeRequestForAgent,
+    ProbeTaskRequest,
+    ProxyConfigSnapshotOut,
+    ProxyCredentialOut,
+    ProxyCredentialReveal,
+    ProxyEndpointSnapshot,
+    ProxyGroupSnapshot,
     RegistrationRequest,
     ReleaseCreate,
     ReleaseOut,
     SiteOut,
+    SiteProxyAuthUpdate,
     SiteSubscriptionOut,
     SubscriptionCatalogOut,
     SubscriptionPublishOut,
@@ -83,12 +127,15 @@ from app.schemas import (
     SubscriptionUploadResponse,
     SubscriptionVersionOut,
     TaskOut,
+    TelemetryBatchResponse,
     TravelExceptionCreate,
     TravelExceptionOut,
     VerificationCodeRequest,
     VerificationCodeResponse,
 )
-from app.services.audit import append_audit, verify_audit_chain
+from app.services.access import render_linux_setup_script
+from app.services.alerts import refresh_deny_spike_alerts, refresh_liveness, sync_node_alerts
+from app.services.audit import append_audit, redact, verify_audit_chain
 from app.services.auth import (
     AuthError,
     consume_verification_code,
@@ -104,8 +151,19 @@ from app.services.auth import (
     validate_password,
     verify_password,
 )
+from app.services.backup_worker import BackupWorker
 from app.services.bundles import create_desired_release, latest_release
 from app.services.cidr import effective_cidrs, match_source_ip, normalize_cidr, normalize_source_ip
+from app.services.probes import record_probe_result
+from app.services.proxy_credentials import (
+    ProxyCredentialError,
+    ProxyCredentialRotation,
+    active_proxy_credential_count,
+    credential_secret,
+    proxy_auth_bundle,
+    restore_proxy_credential,
+    rotate_proxy_credential,
+)
 from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
 from app.services.subscriptions import (
     SubscriptionError,
@@ -113,7 +171,13 @@ from app.services.subscriptions import (
     record_uploaded_subscription,
     source_url_hint,
 )
-from app.services.tasks import create_task
+from app.services.tasks import (
+    claim_probe_task_for_node,
+    complete_task,
+    create_task,
+    fail_task,
+    reclaim_expired_tasks,
+)
 
 DEFAULT_SITES = [
     ("north", "North Region"),
@@ -124,6 +188,12 @@ DEFAULT_SITES = [
 ]
 
 _management_actor: ContextVar[str] = ContextVar("management_actor", default="")
+
+
+@dataclass(frozen=True)
+class AuthenticatedPrincipal:
+    itcode: str
+    role: str
 
 
 def _settings() -> Settings:
@@ -161,6 +231,26 @@ def _site_out(site: Site) -> SiteOut:
     )
 
 
+def _proxy_credential_out(item: ProxyCredential) -> ProxyCredentialOut:
+    return ProxyCredentialOut(
+        site_id=item.site_id,
+        username=item.username,
+        active=item.active,
+        rotated_at=item.rotated_at,
+    )
+
+
+def _employee_out(user: AdminUser) -> EmployeeOut:
+    return EmployeeOut(
+        itcode=user.itcode or user.username,
+        auth_source=user.auth_source,
+        is_active=user.is_active,
+        created_at=user.created_at,
+        password_changed_at=user.password_changed_at,
+        last_login_at=user.last_login_at,
+    )
+
+
 def _node_out(node: Node) -> NodeOut:
     return NodeOut(
         id=_model_id(node),
@@ -178,6 +268,7 @@ def _node_out(node: Node) -> NodeOut:
         config_status=node.config_status,
         service_status=node.service_status,
         subscription_status=node.subscription_status,
+        probe_status=node.probe_status,
         last_error=node.last_error,
     )
 
@@ -362,6 +453,400 @@ def _audit_out(item: AuditEvent) -> AuditEventOut:
     )
 
 
+def _backup_out(item: BackupRecord) -> BackupRecordOut:
+    return BackupRecordOut(
+        backup_id=item.backup_id,
+        scope=item.scope,
+        origin=item.origin,
+        artifact_paths=item.artifact_paths,
+        format=item.format,
+        checksum=item.checksum,
+        encrypted=item.encrypted,
+        storage_ref=item.storage_ref,
+        status=item.status,
+        created_by=item.created_by,
+        created_at=item.created_at,
+        verified_at=item.verified_at,
+        last_rehearsed_at=item.last_rehearsed_at,
+        restore_task_id=item.restore_task_id,
+        error=item.error,
+        size_bytes=item.size_bytes,
+        manifest=item.manifest,
+    )
+
+
+def _access_log_out(item: AccessLog) -> AccessLogOut:
+    return AccessLogOut(
+        id=_model_id(item),
+        ts=item.ts,
+        site_id=item.site_id,
+        node_id=item.node_id,
+        policy_version=item.policy_version,
+        src_ip=item.src_ip,
+        src_cidr_match=item.src_cidr_match,
+        username=item.username,
+        cert_fp=item.cert_fp,
+        dst_host=item.dst_host,
+        dst_port=item.dst_port,
+        action=item.action,
+        deny_reason=item.deny_reason,
+        bytes_up=item.bytes_up,
+        bytes_down=item.bytes_down,
+        duration_ms=item.duration_ms,
+    )
+
+
+def _connection_out(item: ConnectionSnapshot) -> ConnectionSnapshotOut:
+    return ConnectionSnapshotOut(
+        id=_model_id(item),
+        node_id=item.node_id,
+        site_id=item.site_id,
+        sampled_at=item.sampled_at,
+        active_connections=item.active_connections,
+        bytes_up=item.bytes_up,
+        bytes_down=item.bytes_down,
+        top_sources=item.top_sources,
+        top_destinations=item.top_destinations,
+        top_users=item.top_users,
+        api_available=item.api_available,
+        received_at=item.received_at,
+    )
+
+
+def _safe_proxy_label(value: Any, limit: int = 255) -> str:
+    """Normalize operator-visible labels without retaining arbitrary payloads."""
+
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _sanitize_proxy_group(group: ProxyGroupSnapshot) -> ProxyGroupSnapshot | None:
+    """Keep only the bounded, non-sensitive projection sent by a monitor."""
+
+    group_name = _safe_proxy_label(group.name)
+    if not group_name:
+        return None
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_name in group.all:
+        name = _safe_proxy_label(raw_name)
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+        if len(names) >= 500:
+            break
+
+    endpoints: dict[str, ProxyEndpointSnapshot] = {}
+    for endpoint in group.nodes:
+        name = _safe_proxy_label(endpoint.name)
+        if not name or name in endpoints:
+            continue
+        history = endpoint.history[:20]
+        endpoints[name] = ProxyEndpointSnapshot(
+            name=name,
+            type=_safe_proxy_label(endpoint.type, 64) or "unknown",
+            udp=endpoint.udp,
+            alive=endpoint.alive,
+            delay_ms=endpoint.delay_ms,
+            history=history,
+        )
+        if name not in seen and len(names) < 500:
+            names.append(name)
+            seen.add(name)
+
+    # A selector can list a node before its individual metadata is available.
+    # Preserve that name so the UI still shows the complete selection pool.
+    for name in names:
+        endpoints.setdefault(name, ProxyEndpointSnapshot(name=name))
+
+    return ProxyGroupSnapshot(
+        name=group_name,
+        type=_safe_proxy_label(group.type, 64) or "unknown",
+        now=_safe_proxy_label(group.now),
+        all=names,
+        nodes=list(endpoints.values())[:500],
+        udp=group.udp,
+        delay_ms=group.delay_ms,
+        history=group.history[:20],
+    )
+
+
+def _proxy_config_out(item: ProxyConfigSnapshot) -> ProxyConfigSnapshotOut:
+    groups: list[ProxyGroupSnapshot] = []
+    for raw_group in item.groups[:100]:
+        try:
+            parsed = ProxyGroupSnapshot.model_validate(raw_group)
+        except Exception:
+            continue
+        sanitized = _sanitize_proxy_group(parsed)
+        if sanitized is not None:
+            groups.append(sanitized)
+    return ProxyConfigSnapshotOut(
+        id=_model_id(item),
+        node_id=item.node_id,
+        site_id=item.site_id,
+        sampled_at=item.sampled_at,
+        api_available=item.api_available,
+        groups=groups,
+        error=_safe_error(item.error, 256),
+        received_at=item.received_at,
+    )
+
+
+def _probe_history_out(item: ProbeHistory) -> ProbeHistoryOut:
+    return ProbeHistoryOut(
+        id=_model_id(item),
+        node_id=item.node_id,
+        site_id=item.site_id,
+        outbound_tag=item.outbound_tag,
+        target_url=item.target_url,
+        success=item.success,
+        latency_ms=item.latency_ms,
+        error_class=item.error_class,
+        sampled_at=item.sampled_at,
+    )
+
+
+def _probe_circuit_out(item: ProbeCircuit) -> ProbeCircuitOut:
+    return ProbeCircuitOut(
+        node_id=item.node_id,
+        site_id=item.site_id,
+        outbound_tag=item.outbound_tag,
+        state=item.state,
+        consecutive_failures=item.consecutive_failures,
+        consecutive_successes=item.consecutive_successes,
+        opened_at=item.opened_at,
+        half_open_at=item.half_open_at,
+        last_success_at=item.last_success_at,
+        last_failure_at=item.last_failure_at,
+        last_latency_ms=item.last_latency_ms,
+        last_error_class=item.last_error_class,
+        reason=item.reason,
+        updated_at=item.updated_at,
+    )
+
+
+def _alert_out(item: Alert) -> AlertOut:
+    return AlertOut(
+        id=_model_id(item),
+        fingerprint=item.fingerprint,
+        category=item.category,
+        severity=item.severity,
+        site_id=item.site_id,
+        node_id=item.node_id,
+        title=item.title,
+        detail=item.detail,
+        status=item.status,
+        first_seen_at=item.first_seen_at,
+        last_seen_at=item.last_seen_at,
+        resolved_at=item.resolved_at,
+    )
+
+
+def _safe_log_text(value: str, limit: int) -> str:
+    return " ".join(value.split())[:limit]
+
+
+def _safe_probe_target(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        raise HTTPException(422, "invalid_probe_target")
+    if parsed.query or parsed.fragment:
+        raise HTTPException(422, "probe_target_query_not_allowed")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_probe_target") from exc
+    hostname = parsed.hostname.rstrip(".").casefold()
+    blocked_names = {"localhost", "localhost.localdomain", "metadata.google.internal"}
+    if hostname in blocked_names or hostname.endswith((".local", ".internal")):
+        raise HTTPException(422, "probe_target_private_network")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(
+                hostname,
+                port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except socket.gaierror as exc:
+        raise HTTPException(422, "probe_target_unresolvable") from exc
+    if not addresses:
+        raise HTTPException(422, "probe_target_unresolvable")
+    for address in addresses:
+        try:
+            parsed_ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if (
+            not parsed_ip.is_global
+            or parsed_ip.is_private
+            or parsed_ip.is_loopback
+            or parsed_ip.is_link_local
+            or parsed_ip.is_reserved
+            or parsed_ip.is_multicast
+        ):
+            raise HTTPException(422, "probe_target_private_network")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path or "/", "", ""))
+
+
+async def _accept_telemetry_batch(
+    *, node: Node, kind: str, batch_id: str, sequence: int, item_count: int
+) -> bool:
+    """Reserve and persist one monotonic telemetry batch.
+
+    A read-then-insert check is racy when two monitor retries arrive together.
+    The cursor update below is conditional in MongoDB, so only the request with
+    the highest sequence can advance it; the unique batch/sequence indexes then
+    make replayed payloads idempotent.
+    """
+
+    existing = await TelemetryBatch.find_one(
+        TelemetryBatch.node_id == node.agent_id,
+        TelemetryBatch.kind == kind,
+        TelemetryBatch.batch_id == batch_id,
+    )
+    if existing is not None:
+        return False
+
+    cursor_collection = TelemetryCursor.get_motor_collection()
+    current = utcnow()
+    cursor_filter = {"node_id": node.agent_id, "kind": kind}
+    advanced = await cursor_collection.update_one(
+        {**cursor_filter, "last_sequence": {"$lt": sequence}},
+        {
+            "$set": {
+                "last_sequence": sequence,
+                "last_batch_id": batch_id,
+                "updated_at": current,
+            }
+        },
+    )
+    if advanced.matched_count == 0:
+        try:
+            await TelemetryCursor(
+                node_id=node.agent_id,
+                kind=kind,
+                last_sequence=sequence,
+                last_batch_id=batch_id,
+                updated_at=current,
+            ).insert()
+        except DuplicateKeyError:
+            # Another request created the cursor between the conditional update
+            # and insert. Retry the same atomic comparison once.
+            advanced = await cursor_collection.update_one(
+                {**cursor_filter, "last_sequence": {"$lt": sequence}},
+                {
+                    "$set": {
+                        "last_sequence": sequence,
+                        "last_batch_id": batch_id,
+                        "updated_at": current,
+                    }
+                },
+            )
+            if advanced.matched_count == 0:
+                return False
+
+    try:
+        await TelemetryBatch(
+            node_id=node.agent_id,
+            kind=kind,
+            batch_id=batch_id,
+            sequence=sequence,
+            item_count=item_count,
+        ).insert()
+    except DuplicateKeyError:
+        return False
+    return True
+
+
+async def _claim_probe_requests(node: Node) -> list[ProbeRequestForAgent]:
+    await reclaim_expired_tasks(task_type="node.probe")
+    settings = _settings()
+    if settings.probe_auto_enabled:
+        await _schedule_automatic_probe(node, settings)
+    task = await claim_probe_task_for_node(
+        node_id=node.agent_id,
+        worker_id=f"monitor:{node.agent_id}",
+    )
+    if task is None:
+        return []
+    try:
+        target_url = _safe_probe_target(
+            str(task.payload.get("target_url", settings.probe_target_url))
+        )
+    except HTTPException as exc:
+        # A task payload is persisted before it reaches a monitor. Do not leave
+        # an invalid or stale task leased forever if policy changes later.
+        await fail_task(task, error=str(exc.detail), retryable=False)
+        return []
+    tags = [
+        _safe_log_text(str(tag), 128)
+        for tag in task.payload.get("outbound_tags", [])
+        if _safe_log_text(str(tag), 128)
+    ]
+    tags = tags[: settings.probe_max_outbounds]
+    return [ProbeRequestForAgent(task_id=task.task_id, target_url=target_url, outbound_tags=tags)]
+
+
+async def _schedule_automatic_probe(node: Node, settings: Settings) -> None:
+    """Create at most one low-volume probe task per configured time slot."""
+
+    try:
+        target_url = _safe_probe_target(settings.probe_target_url)
+    except HTTPException:
+        # A bad operator setting must not enqueue a task that can never be
+        # delivered to a monitor. The configuration error remains visible in
+        # deployment logs and can be corrected without draining a queue.
+        return
+    active = await Task.find_one(
+        {
+            "task_type": "node.probe",
+            "target_id": node.agent_id,
+            "active": True,
+        }
+    )
+    if active is not None:
+        return
+    interval = settings.probe_interval_seconds
+    slot = int(utcnow().timestamp() // interval)
+    key = f"node.probe:auto:{node.agent_id}:{slot}"
+    try:
+        await create_task(
+            task_type="node.probe",
+            target_type="node",
+            target_id=node.agent_id,
+            payload={"target_url": target_url, "outbound_tags": []},
+            idempotency_key=key,
+            created_by="scheduler",
+            request_id=f"probe-scheduler:{slot}",
+        )
+    except DuplicateKeyError:
+        # A concurrent heartbeat may have created the same active probe. The
+        # unique partial index is the final arbiter; no request should fail.
+        return
+
+
+async def _find_node_reference(node_id: str) -> Node | None:
+    try:
+        node = await Node.get(node_id)
+    except Exception:
+        # Agent IDs are stable strings; only document IDs are ObjectIds.
+        node = None
+    if node is not None:
+        return node
+    return await Node.find_one(Node.agent_id == node_id)
+
+
 async def _increment_site_revisions(site_ids: list[str]) -> None:
     for site_id in dict.fromkeys(site_ids):
         site = await Site.get(site_id)
@@ -389,12 +874,23 @@ async def seed_defaults(settings: Settings) -> None:
             username=settings.admin_username,
             itcode=admin_itcode,
             password_hash=hash_password(settings.admin_password),
+            role="admin",
             auth_source="local",
             password_changed_at=utcnow(),
         ).insert()
-    elif not admin.itcode:
-        admin.itcode = admin_itcode
-        await admin.save()
+    else:
+        changed = False
+        if not admin.itcode:
+            admin.itcode = admin_itcode
+            changed = True
+        # Existing installations predate roles. Only the configured bootstrap
+        # account is migrated to admin; self-registered accounts remain least
+        # privileged even if they held an older browser session.
+        if admin.role != "admin":
+            admin.role = "admin"
+            changed = True
+        if changed:
+            await admin.save()
 
 
 @asynccontextmanager
@@ -406,14 +902,40 @@ async def lifespan(app: FastAPI):
     app.state.database = database
     worker = SubscriptionWorker(settings)
     worker_task = asyncio.create_task(worker.run())
+    backup_worker = BackupWorker(settings)
+    backup_worker_task = asyncio.create_task(backup_worker.run())
+
+    async def observe() -> None:
+        while True:
+            try:
+                await refresh_liveness()
+                await refresh_deny_spike_alerts()
+            except Exception:
+                # Observability must never take down the control plane.
+                pass
+            await asyncio.sleep(15)
+
+    observe_task = asyncio.create_task(observe())
     app.state.subscription_worker = worker
+    app.state.backup_worker = backup_worker
     try:
         yield
     finally:
         await worker.stop()
+        await backup_worker.stop()
         worker_task.cancel()
+        backup_worker_task.cancel()
+        observe_task.cancel()
         try:
             await worker_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await backup_worker_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await observe_task
         except asyncio.CancelledError:
             pass
         await database.close()
@@ -447,25 +969,35 @@ async def readyz(request: Request) -> dict[str, str]:
     return {"status": "ready"}
 
 
-async def require_management(request: Request) -> str:
+async def require_authenticated(request: Request) -> AuthenticatedPrincipal:
     settings = _settings()
     authorization = request.headers.get("authorization", "")
     token = authorization.removeprefix("Bearer ").strip()
     if token and hmac.compare_digest(token, settings.management_token):
-        actor = normalize_itcode(settings.admin_username)
-        _management_actor.set(actor)
-        return actor
+        return AuthenticatedPrincipal(
+            itcode=normalize_itcode(settings.admin_username), role="admin"
+        )
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
         )
-    session = await resolve_session(token)
-    if session is None:
+    resolved = await resolve_session(token)
+    if resolved is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
         )
-    _management_actor.set(session.itcode)
-    return session.itcode
+    session, user = resolved
+    return AuthenticatedPrincipal(itcode=session.itcode, role=user.role)
+
+
+async def require_management(request: Request) -> str:
+    principal = await require_authenticated(request)
+    if principal.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="management_admin_required"
+        )
+    _management_actor.set(principal.itcode)
+    return principal.itcode
 
 
 async def require_agent(request: Request) -> Node:
@@ -505,9 +1037,7 @@ def _auth_http_error(error: AuthError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=error.code)
 
 
-async def _audit_auth_failure(
-    *, request: Request, action: str, itcode: str, error: str
-) -> None:
+async def _audit_auth_failure(*, request: Request, action: str, itcode: str, error: str) -> None:
     await append_audit(
         action=action,
         target_type="admin_user",
@@ -521,8 +1051,13 @@ async def _audit_auth_failure(
     )
 
 
-def _session_response(token: str, session: ManagementSession) -> LoginResponse:
-    return LoginResponse(access_token=token, itcode=session.itcode, expires_at=session.expires_at)
+def _session_response(token: str, session: ManagementSession, user: AdminUser) -> LoginResponse:
+    return LoginResponse(
+        access_token=token,
+        itcode=session.itcode,
+        role=user.role,
+        expires_at=session.expires_at,
+    )
 
 
 @app.post(
@@ -679,7 +1214,7 @@ async def login(payload: LoginRequest, request: Request) -> LoginResponse:
         request_id=_request_id(request),
         source_ip=_request_source_ip(request),
     )
-    return _session_response(token, session)
+    return _session_response(token, session, user)
 
 
 @app.post("/api/v1/auth/gquan/login", response_model=LoginResponse)
@@ -716,23 +1251,64 @@ async def gquan_login(payload: GQuanLoginRequest, request: Request) -> LoginResp
         request_id=_request_id(request),
         source_ip=_request_source_ip(request),
     )
-    return _session_response(token, session)
+    return _session_response(token, session, user)
 
 
 @app.post("/api/v1/auth/logout", response_model=AuthActionResponse)
-async def logout(request: Request, actor: str = Depends(require_management)) -> AuthActionResponse:
+async def logout(
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(  # noqa: B008 - FastAPI dependency declaration
+        require_authenticated
+    ),
+) -> AuthActionResponse:
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     await revoke_session_token(token)
     await append_audit(
         action="auth.logout",
         target_type="admin_user",
-        target_id=actor,
-        actor=actor,
-        actor_role="admin",
+        target_id=principal.itcode,
+        actor=principal.itcode,
+        actor_role=principal.role,
         request_id=_request_id(request),
         source_ip=_request_source_ip(request),
     )
     return AuthActionResponse()
+
+
+@app.get("/api/v1/employees", response_model=list[EmployeeOut])
+async def list_employees(_: str = Depends(require_management)) -> list[EmployeeOut]:
+    """List employee identities without exposing password or session material."""
+
+    employees = (
+        await AdminUser.find({"role": "employee"})
+        .sort("+itcode")
+        .to_list()
+    )
+    return [_employee_out(employee) for employee in employees]
+
+
+@app.get(
+    "/api/v1/employees/{itcode}/proxy-credentials",
+    response_model=list[ProxyCredentialOut],
+)
+async def list_employee_proxy_credentials(
+    itcode: str, _: str = Depends(require_management)
+) -> list[ProxyCredentialOut]:
+    """Return credential metadata for the selected employee, never a secret."""
+
+    try:
+        subject_itcode = normalize_itcode(itcode)
+    except AuthError as exc:
+        raise _auth_http_error(exc) from exc
+    employee = await find_user_by_itcode(subject_itcode)
+    if employee is None or employee.role != "employee":
+        raise HTTPException(404, "employee_not_found")
+    credentials = (
+        await ProxyCredential.find(ProxyCredential.itcode == subject_itcode)
+        .sort(+ProxyCredential.site_id)
+        .to_list()
+    )
+    return [_proxy_credential_out(credential) for credential in credentials]
 
 
 @app.get("/api/v1/sites", response_model=list[SiteOut])
@@ -759,6 +1335,48 @@ async def set_shutdown(
         actor=_actor(),
         before=before,
         after={"shutdown": site.shutdown},
+    )
+    return _site_out(site)
+
+
+@app.put("/api/v1/sites/{site_id}/proxy-auth", response_model=SiteOut)
+async def set_site_proxy_auth(
+    site_id: str,
+    payload: SiteProxyAuthUpdate,
+    request: Request,
+    _: str = Depends(require_management),
+) -> SiteOut:
+    """Enable or disable HTTP Basic at one site for the next normal release."""
+
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    if site.proxy_auth_required == payload.required:
+        return _site_out(site)
+    if payload.required:
+        try:
+            # This validates both the backend-only derivation secret and every
+            # current credential before a policy can require authentication.
+            credential_secret(_settings())
+            if await active_proxy_credential_count(site_id) < 1:
+                raise ProxyCredentialError("proxy_auth_requires_credential")
+            await proxy_auth_bundle(site_id=site_id, required=True, settings=_settings())
+        except ProxyCredentialError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    before = {"proxy_auth_required": site.proxy_auth_required}
+    site.proxy_auth_required = payload.required
+    site.config_revision += 1
+    await site.save()
+    await append_audit(
+        action="site.proxy_auth.update",
+        target_type="site",
+        target_id=site_id,
+        actor=_actor(),
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        before=before,
+        after={"proxy_auth_required": site.proxy_auth_required},
     )
     return _site_out(site)
 
@@ -798,6 +1416,41 @@ async def create_node(
         },
     )
     return NodeCreateResponse(**_node_out(node).model_dump(), agent_token=token)
+
+
+@app.patch("/api/v1/nodes/{node_id}", response_model=NodeOut)
+async def update_node(
+    node_id: str,
+    payload: NodeNameUpdate,
+    request: Request,
+    _: str = Depends(require_management),
+) -> NodeOut:
+    """Update only a node's display label; agent identity and site stay fixed."""
+
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    name = " ".join(payload.name.split())
+    if not name:
+        raise HTTPException(422, "node_name_required")
+    if len(name) > 128:
+        raise HTTPException(422, "node_name_too_long")
+    before = {"name": node.name}
+    if node.name != name:
+        node.name = name
+        await node.save()
+        await append_audit(
+            action="node.rename",
+            target_type="node",
+            target_id=node.agent_id,
+            actor=_actor(),
+            actor_role="admin",
+            request_id=_request_id(request),
+            source_ip=_request_source_ip(request),
+            before=before,
+            after={"name": node.name},
+        )
+    return _node_out(node)
 
 
 @app.get("/api/v1/sites/{site_id}/cidrs", response_model=list[CIDROut])
@@ -940,9 +1593,7 @@ async def create_exception(
 
 
 @app.delete("/api/v1/exceptions/{exception_id}", status_code=204)
-async def delete_exception(
-    exception_id: str, _: str = Depends(require_management)
-) -> None:
+async def delete_exception(exception_id: str, _: str = Depends(require_management)) -> None:
     item = await TravelException.get(exception_id)
     if item is None:
         raise HTTPException(404, "exception_not_found")
@@ -1007,10 +1658,7 @@ async def set_cross_site(
 @app.get("/api/v1/blacklist", response_model=list[DestinationBlacklistOut])
 async def list_blacklist(_: str = Depends(require_management)) -> list[DestinationBlacklistOut]:
     entries = await DestinationBlacklist.find_all().sort(+DestinationBlacklist.pattern).to_list()
-    return [
-        _blacklist_out(item)
-        for item in entries
-    ]
+    return [_blacklist_out(item) for item in entries]
 
 
 @app.post("/api/v1/blacklist", response_model=DestinationBlacklistOut, status_code=201)
@@ -1082,9 +1730,12 @@ async def _read_subscription_upload(upload: UploadFile, max_body_bytes: int) -> 
 @app.get("/api/v1/subscriptions", response_model=SubscriptionCatalogOut)
 async def list_subscriptions(_: str = Depends(require_management)) -> SubscriptionCatalogOut:
     sources = await SubscriptionSource.find_all().sort(+SubscriptionSource.name).to_list()
-    versions = await SubscriptionVersion.find_all().sort(
-        -SubscriptionVersion.created_at
-    ).limit(500).to_list()
+    versions = (
+        await SubscriptionVersion.find_all()
+        .sort(-SubscriptionVersion.created_at)
+        .limit(500)
+        .to_list()
+    )
     bindings = await SiteSubscription.find_all().sort(+SiteSubscription.site_id).to_list()
     return SubscriptionCatalogOut(
         sources=[_subscription_source_out(item) for item in sources],
@@ -1290,9 +1941,9 @@ async def _create_release_from_draft(
     if str(site.id) != draft.site_id:
         raise HTTPException(409, "site_mismatch")
     nodes = await Node.find(Node.site_id == draft.site_id).to_list()
-    selected_document_ids = requested_node_ids or draft.node_ids or [
-        _model_id(node) for node in nodes
-    ]
+    selected_document_ids = (
+        requested_node_ids or draft.node_ids or [_model_id(node) for node in nodes]
+    )
     selected = [node for node in nodes if _model_id(node) in set(selected_document_ids)]
     if len(selected) != len(selected_document_ids) or not selected:
         raise HTTPException(409, "invalid_release_nodes")
@@ -1360,6 +2011,150 @@ async def _create_release_from_draft(
         },
     )
     return release, False
+
+
+async def _publish_proxy_credential_change(
+    *,
+    site: Site,
+    rotation: ProxyCredentialRotation,
+    actor: str,
+    request_id: str,
+) -> ConfigRelease | None:
+    """Create the traceable release that delivers a rotated active password."""
+
+    nodes = await Node.find(Node.site_id == _model_id(site)).to_list()
+    if not nodes:
+        # A credential can be prepared before a site receives its first node.
+        # The normal first release will include it later.
+        return None
+    agent_ids = [node.agent_id for node in nodes]
+    active_release = await ConfigRelease.find_one(
+        {
+            "node_ids": {"$in": agent_ids},
+            "status": {"$in": ["queued", "applying", "health_check", "rolling_back"]},
+        }
+    )
+    if active_release is not None:
+        raise HTTPException(409, "release_in_progress")
+    cidrs, sources = await effective_cidrs(_model_id(site))
+    draft = ConfigDraft(
+        site_id=_model_id(site),
+        node_ids=[_model_id(node) for node in nodes],
+        source_revision=site.config_revision,
+        diff={
+            "proxy_auth": {
+                "required": True,
+                "credential_change": {
+                    "itcode": rotation.credential.itcode,
+                    "username": rotation.credential.username,
+                    "action": "created" if rotation.created else "rotated",
+                },
+            }
+        },
+        validation={
+            "valid": True,
+            "errors": [],
+            "effective_cidrs": cidrs,
+            "acl_sources": sources,
+            "proxy_auth": {
+                "required": True,
+                "credential_count": await active_proxy_credential_count(_model_id(site)),
+            },
+        },
+        risk_level="medium",
+        created_by=actor,
+        expires_at=utcnow() + timedelta(hours=24),
+    )
+    await draft.insert()
+    try:
+        release, _ = await _create_release_from_draft(
+            draft=draft,
+            site=site,
+            requested_node_ids=draft.node_ids,
+            expected_current_version=None,
+            idempotency_key=(
+                f"proxy_credential.rotate:{_model_id(site)}:{rotation.credential.credential_id}"
+            ),
+            request_id=request_id,
+            actor=actor,
+        )
+    except Exception:
+        # Do not leave a user-facing draft behind when its automatic deployment
+        # was rejected before any Desired Bundle was created.
+        draft.status = "expired"
+        draft.updated_at = utcnow()
+        await draft.save()
+        raise
+    return release
+
+
+async def _rotate_proxy_credential_for_subject(
+    *,
+    site: Site,
+    itcode: str,
+    actor: str,
+    actor_role: str,
+    request: Request,
+) -> ProxyCredentialReveal:
+    """Rotate a credential and start delivery when its site requires auth."""
+
+    settings = _settings()
+    try:
+        rotation = await rotate_proxy_credential(
+            site_id=_model_id(site), itcode=itcode, settings=settings
+        )
+    except ProxyCredentialError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    original_revision = site.config_revision
+    release: ConfigRelease | None = None
+    try:
+        site.config_revision += 1
+        await site.save()
+        if site.proxy_auth_required:
+            release = await _publish_proxy_credential_change(
+                site=site,
+                rotation=rotation,
+                actor=actor,
+                request_id=_request_id(request),
+            )
+    except Exception:
+        await restore_proxy_credential(rotation)
+        # A rejected automatic release must not make an unrelated policy
+        # revision appear pending. Preserve a later revision if one exists.
+        current_site = await Site.get(_model_id(site))
+        if current_site is not None and current_site.config_revision == original_revision + 1:
+            current_site.config_revision = original_revision
+            await current_site.save()
+        raise
+
+    await append_audit(
+        action="proxy_credential.rotate",
+        target_type="proxy_credential",
+        target_id=rotation.credential.credential_id,
+        actor=actor,
+        actor_role=actor_role,
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        before={
+            "site_id": _model_id(site),
+            "itcode": itcode,
+            "credential_configured": rotation.previous is not None,
+            "active": rotation.previous.active if rotation.previous is not None else False,
+        },
+        after={
+            "site_id": _model_id(site),
+            "itcode": itcode,
+            "username": rotation.credential.username,
+            "active": rotation.credential.active,
+            "release_id": release.release_id if release is not None else None,
+        },
+    )
+    return ProxyCredentialReveal(
+        **_proxy_credential_out(rotation.credential).model_dump(),
+        password=rotation.password,
+        release_id=release.release_id if release is not None else None,
+    )
 
 
 @app.post("/api/v1/config/releases", response_model=ReleaseOut, status_code=202)
@@ -1469,10 +2264,7 @@ async def _publish_subscription_version(
             )
             await binding.insert()
             binding_changed = True
-        elif (
-            previous_version_id != _model_id(version)
-            or binding.source_id != version.source_id
-        ):
+        elif previous_version_id != _model_id(version) or binding.source_id != version.source_id:
             if previous_version_id != _model_id(version):
                 binding.previous_subscription_version_id = previous_version_id
             binding.subscription_version_id = _model_id(version)
@@ -1668,16 +2460,16 @@ async def list_release_acks(
     release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
     if release is None:
         raise HTTPException(404, "release_not_found")
-    acks = await AgentAckDocument.find(
-        AgentAckDocument.release_id == release_id
-    ).sort(+AgentAckDocument.node_id).to_list()
+    acks = (
+        await AgentAckDocument.find(AgentAckDocument.release_id == release_id)
+        .sort(+AgentAckDocument.node_id)
+        .to_list()
+    )
     return [_ack_out(item) for item in acks]
 
 
 @app.get("/api/v1/tasks", response_model=list[TaskOut])
-async def list_tasks(
-    limit: int = 100, _: str = Depends(require_management)
-) -> list[TaskOut]:
+async def list_tasks(limit: int = 100, _: str = Depends(require_management)) -> list[TaskOut]:
     safe_limit = min(max(limit, 1), 250)
     tasks = await Task.find_all().sort(-Task.created_at).limit(safe_limit).to_list()
     return [_task_out(item) for item in tasks]
@@ -1716,6 +2508,206 @@ async def cancel_task(task_id: str, _: str = Depends(require_management)) -> Tas
         after={"status": task.status},
     )
     return _task_out(task)
+
+
+@app.get("/api/v1/logs", response_model=list[AccessLogOut])
+async def list_logs(
+    site_id: str | None = None,
+    node_id: str | None = None,
+    action: str | None = None,
+    since: datetime | None = None,
+    limit: int = 200,
+    _: str = Depends(require_management),
+) -> list[AccessLogOut]:
+    safe_limit = min(max(limit, 1), 500)
+    query: dict[str, Any] = {}
+    if site_id:
+        query["site_id"] = site_id
+    if node_id:
+        query["node_id"] = node_id
+    if action in {"allow", "deny"}:
+        query["action"] = action
+    if since is not None:
+        query["ts"] = {"$gte": since}
+    entries = await AccessLog.find(query).sort(-AccessLog.ts).limit(safe_limit).to_list()
+    return [_access_log_out(item) for item in entries]
+
+
+@app.get("/api/v1/connections", response_model=list[ConnectionSnapshotOut])
+async def list_connections(
+    site_id: str | None = None,
+    node_id: str | None = None,
+    limit: int = 100,
+    _: str = Depends(require_management),
+) -> list[ConnectionSnapshotOut]:
+    safe_limit = min(max(limit, 1), 250)
+    query: dict[str, Any] = {}
+    if site_id:
+        query["site_id"] = site_id
+    if node_id:
+        query["node_id"] = node_id
+    entries = await (
+        ConnectionSnapshot.find(query)
+        .sort(-ConnectionSnapshot.sampled_at)
+        .limit(safe_limit)
+        .to_list()
+    )
+    return [_connection_out(item) for item in entries]
+
+
+@app.get("/api/v1/proxy-configs", response_model=list[ProxyConfigSnapshotOut])
+@app.get("/api/v1/proxies", response_model=list[ProxyConfigSnapshotOut])
+async def list_proxy_configs(
+    site_id: str | None = None,
+    node_id: str | None = None,
+    limit: int = 100,
+    _: str = Depends(require_management),
+) -> list[ProxyConfigSnapshotOut]:
+    """Return one recent, safe proxy projection per enrolled node."""
+
+    safe_limit = min(max(limit, 1), 100)
+    query: dict[str, Any] = {}
+    if site_id:
+        query["site_id"] = site_id
+    if node_id:
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        query["node_id"] = node.agent_id
+    # A bounded recent window keeps this read cheap even when a node has been
+    # reporting for months. The final map guarantees one snapshot per node.
+    entries = await (
+        ProxyConfigSnapshot.find(query)
+        .sort(-ProxyConfigSnapshot.sampled_at)
+        .limit(min(safe_limit * 20, 2_000))
+        .to_list()
+    )
+    latest: dict[str, ProxyConfigSnapshot] = {}
+    for entry in entries:
+        latest.setdefault(entry.node_id, entry)
+    selected = list(latest.values())[:safe_limit]
+    selected.sort(key=lambda item: (item.site_id, item.node_id))
+    return [_proxy_config_out(item) for item in selected]
+
+
+@app.get("/api/v1/nodes/{node_id}/proxy-config", response_model=ProxyConfigSnapshotOut)
+async def get_node_proxy_config(
+    node_id: str, _: str = Depends(require_management)
+) -> ProxyConfigSnapshotOut:
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    snapshot = await (
+        ProxyConfigSnapshot.find(ProxyConfigSnapshot.node_id == node.agent_id)
+        .sort(-ProxyConfigSnapshot.sampled_at)
+        .first_or_none()
+    )
+    if snapshot is None:
+        raise HTTPException(404, "proxy_config_not_found")
+    return _proxy_config_out(snapshot)
+
+
+@app.get("/api/v1/nodes/{node_id}/probes")
+async def list_node_probes(
+    node_id: str,
+    limit: int = 100,
+    _: str = Depends(require_management),
+) -> dict[str, Any]:
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    safe_limit = min(max(limit, 1), 250)
+    history = await (
+        ProbeHistory.find(ProbeHistory.node_id == node.agent_id)
+        .sort(-ProbeHistory.sampled_at)
+        .limit(safe_limit)
+        .to_list()
+    )
+    circuits = await (
+        ProbeCircuit.find(ProbeCircuit.node_id == node.agent_id)
+        .sort(+ProbeCircuit.outbound_tag)
+        .to_list()
+    )
+    return {
+        "node_id": node.agent_id,
+        "history": [_probe_history_out(item) for item in history],
+        "circuits": [_probe_circuit_out(item) for item in circuits],
+    }
+
+
+@app.post("/api/v1/nodes/{node_id}/probes", response_model=TaskOut, status_code=202)
+async def create_node_probe(
+    node_id: str,
+    payload: ProbeTaskRequest,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> TaskOut:
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    target_url = _safe_probe_target(payload.target_url)
+    tags = [_safe_log_text(tag, 128) for tag in payload.outbound_tags if _safe_log_text(tag, 128)]
+    settings = _settings()
+    if len(tags) > settings.probe_max_outbounds:
+        raise HTTPException(422, "probe_outbound_limit_exceeded")
+    request_id = _request_id(request)
+    key = idempotency_key_header or (
+        f"node.probe:{node.agent_id}:{target_url}:{','.join(sorted(tags))}"
+    )
+    existing_active = await Task.find_one(
+        {
+            "task_type": "node.probe",
+            "target_id": node.agent_id,
+            "active": True,
+        }
+    )
+    if existing_active is not None:
+        task = existing_active
+    else:
+        try:
+            task, _ = await create_task(
+                task_type="node.probe",
+                target_type="node",
+                target_id=node.agent_id,
+                payload={"target_url": target_url, "outbound_tags": tags},
+                idempotency_key=key,
+                created_by=_actor(),
+                request_id=request_id,
+            )
+        except DuplicateKeyError:
+            # Another request won the active-probe race. Return that task so a
+            # burst of clicks cannot turn into a long probe backlog.
+            task = await Task.find_one(
+                {
+                    "task_type": "node.probe",
+                    "target_id": node.agent_id,
+                    "active": True,
+                }
+            )
+            if task is None:
+                raise
+    await append_audit(
+        action="node.probe.create",
+        target_type="node",
+        target_id=node.agent_id,
+        actor=_actor(),
+        request_id=request_id,
+        after={"task_id": task.task_id, "target_url": target_url, "outbound_count": len(tags)},
+    )
+    return _task_out(task)
+
+
+@app.get("/api/v1/alerts", response_model=list[AlertOut])
+async def list_alerts(
+    status_filter: str | None = None,
+    limit: int = 200,
+    _: str = Depends(require_management),
+) -> list[AlertOut]:
+    safe_limit = min(max(limit, 1), 500)
+    query = {"status": status_filter} if status_filter in {"open", "resolved"} else {}
+    alerts = await Alert.find(query).sort(-Alert.last_seen_at).limit(safe_limit).to_list()
+    return [_alert_out(item) for item in alerts]
 
 
 @app.get("/agent/v1/desired", response_model=DesiredResponse)
@@ -1761,7 +2753,7 @@ async def agent_subscription_blob(
     )
 
 
-@app.post("/agent/v1/heartbeat")
+@app.post("/agent/v1/heartbeat", response_model=AgentHeartbeatResponse)
 async def agent_heartbeat(
     payload: AgentHeartbeat,
     node: Node = Depends(require_agent),  # noqa: B008 - FastAPI dependency declaration
@@ -1770,7 +2762,7 @@ async def agent_heartbeat(
         raise HTTPException(409, "node_id_mismatch")
     previous = await HeartbeatLatest.find_one(HeartbeatLatest.node_id == node.agent_id)
     if previous and payload.sequence <= int(previous.payload.get("sequence", -1)):
-        return {"accepted": False, "duplicate": True}
+        return AgentHeartbeatResponse(accepted=False, duplicate=True)
     received = utcnow()
     heartbeat_payload = payload.model_dump(mode="json")
     desired = await latest_release(node.site_id, node.agent_id)
@@ -1784,7 +2776,10 @@ async def agent_heartbeat(
         previous.received_at = received
         await previous.save()
     await HeartbeatSample(
-        node_id=node.agent_id, payload=heartbeat_payload, received_at=received
+        node_id=node.agent_id,
+        payload=heartbeat_payload,
+        received_at=received,
+        expires_at=received + timedelta(days=7),
     ).insert()
     node.monitor_version = payload.monitor_version
     node.singbox_version = payload.singbox_version
@@ -1801,6 +2796,8 @@ async def agent_heartbeat(
     node.last_error = _safe_error(payload.last_error)
     node.last_error_at = received if node.last_error else node.last_error_at
     await node.save()
+    await sync_node_alerts(node)
+    probe_requests = await _claim_probe_requests(node)
     return {
         "accepted": True,
         "desired_stale": bool(
@@ -1810,7 +2807,218 @@ async def agent_heartbeat(
                 or desired.bundle_hash != payload.applied_hash
             )
         ),
+        "probe_requests": probe_requests,
     }
+
+
+@app.post("/agent/v1/logs", response_model=TelemetryBatchResponse)
+async def agent_logs(
+    payload: AgentLogBatch,
+    node: Node = Depends(require_agent),  # noqa: B008
+) -> TelemetryBatchResponse:
+    if payload.node_id != node.agent_id:
+        raise HTTPException(409, "node_id_mismatch")
+    accepted = await _accept_telemetry_batch(
+        node=node,
+        kind="access_log",
+        batch_id=payload.batch_id,
+        sequence=payload.sequence,
+        item_count=len(payload.entries),
+    )
+    if not accepted:
+        return TelemetryBatchResponse(accepted=False, duplicate=True)
+    desired = await latest_release(node.site_id, node.agent_id)
+    policy_version = desired.desired_version if desired else 0
+    documents = []
+    for entry in payload.entries:
+        # Keep only the fields needed for operations; never persist URL query,
+        # cookies, or authorization material from a monitor log line.
+        expires = entry.ts + (timedelta(days=90) if entry.action == "deny" else timedelta(days=14))
+        documents.append(
+            AccessLog(
+                ts=entry.ts,
+                site_id=node.site_id,
+                node_id=node.agent_id,
+                batch_id=payload.batch_id,
+                policy_version=entry.policy_version or policy_version,
+                src_ip=_safe_log_text(entry.src_ip, 64),
+                src_cidr_match=_safe_log_text(entry.src_cidr_match, 64),
+                username=_safe_log_text(entry.username, 128),
+                cert_fp=_safe_log_text(entry.cert_fp, 256),
+                dst_host=_safe_log_text(entry.dst_host, 255),
+                dst_port=entry.dst_port,
+                action=entry.action,
+                deny_reason=_safe_log_text(entry.deny_reason, 64),
+                bytes_up=entry.bytes_up,
+                bytes_down=entry.bytes_down,
+                duration_ms=entry.duration_ms,
+                expires_at=expires,
+            )
+        )
+    if documents:
+        await AccessLog.insert_many(documents)
+    await append_audit(
+        action="agent.logs.ingest",
+        target_type="node",
+        target_id=node.agent_id,
+        actor="agent",
+        actor_role="agent",
+        after={"batch_id": payload.batch_id, "item_count": len(documents)},
+    )
+    return TelemetryBatchResponse(accepted=True)
+
+
+@app.post("/agent/v1/connections", response_model=TelemetryBatchResponse)
+async def agent_connections(
+    payload: AgentConnectionBatch,
+    node: Node = Depends(require_agent),  # noqa: B008
+) -> TelemetryBatchResponse:
+    if payload.node_id != node.agent_id:
+        raise HTTPException(409, "node_id_mismatch")
+    accepted = await _accept_telemetry_batch(
+        node=node,
+        kind="connection_snapshot",
+        batch_id=payload.batch_id,
+        sequence=payload.sequence,
+        item_count=len(payload.snapshots),
+    )
+    if not accepted:
+        return TelemetryBatchResponse(accepted=False, duplicate=True)
+    documents = [
+        ConnectionSnapshot(
+            node_id=node.agent_id,
+            site_id=node.site_id,
+            batch_id=payload.batch_id,
+            sampled_at=snapshot.sampled_at,
+            active_connections=snapshot.active_connections,
+            bytes_up=snapshot.bytes_up,
+            bytes_down=snapshot.bytes_down,
+            top_sources=[item.model_dump() for item in snapshot.top_sources],
+            top_destinations=[item.model_dump() for item in snapshot.top_destinations],
+            top_users=[item.model_dump() for item in snapshot.top_users],
+            api_available=snapshot.api_available,
+            expires_at=snapshot.sampled_at + timedelta(days=7),
+        )
+        for snapshot in payload.snapshots
+    ]
+    if documents:
+        await ConnectionSnapshot.insert_many(documents)
+    return TelemetryBatchResponse(accepted=True)
+
+
+@app.post("/agent/v1/proxy-config", response_model=TelemetryBatchResponse)
+@app.post("/agent/v1/proxy-configs", response_model=TelemetryBatchResponse)
+async def agent_proxy_config(
+    payload: AgentProxyConfigBatch,
+    node: Node = Depends(require_agent),  # noqa: B008
+) -> TelemetryBatchResponse:
+    if payload.node_id != node.agent_id:
+        raise HTTPException(409, "node_id_mismatch")
+    accepted = await _accept_telemetry_batch(
+        node=node,
+        kind="proxy_config",
+        batch_id=payload.batch_id,
+        sequence=payload.sequence,
+        item_count=len(payload.groups),
+    )
+    if not accepted:
+        return TelemetryBatchResponse(accepted=False, duplicate=True)
+    groups: list[dict[str, Any]] = []
+    for group in payload.groups:
+        sanitized = _sanitize_proxy_group(group)
+        if sanitized is not None:
+            groups.append(sanitized.model_dump(mode="json"))
+    received = utcnow()
+    snapshot = await ProxyConfigSnapshot.find_one(ProxyConfigSnapshot.node_id == node.agent_id)
+    is_new_snapshot = snapshot is None
+    if snapshot is None:
+        snapshot = ProxyConfigSnapshot(node_id=node.agent_id, site_id=node.site_id)
+    snapshot.site_id = node.site_id
+    snapshot.batch_id = payload.batch_id
+    snapshot.sampled_at = payload.sampled_at
+    snapshot.api_available = payload.api_available
+    # Keep the last known selectable groups when the loopback API is
+    # temporarily unavailable.  The availability/error fields describe the
+    # latest attempt, while the retained projection lets operators continue
+    # comparing the node's configuration during a short outage.
+    if payload.api_available:
+        snapshot.groups = groups
+    snapshot.error = _safe_error(payload.error, 256)
+    snapshot.received_at = received
+    snapshot.expires_at = payload.sampled_at + timedelta(days=7)
+    if is_new_snapshot:
+        await snapshot.insert()
+    else:
+        await snapshot.save()
+    return TelemetryBatchResponse(accepted=True)
+
+
+@app.post("/agent/v1/probes", response_model=TelemetryBatchResponse)
+async def agent_probes(
+    payload: AgentProbeBatch,
+    node: Node = Depends(require_agent),  # noqa: B008
+) -> TelemetryBatchResponse:
+    if payload.node_id != node.agent_id:
+        raise HTTPException(409, "node_id_mismatch")
+
+    # Validate every result before reserving the batch sequence. Otherwise a
+    # malformed item late in the list would consume the sequence and make the
+    # monitor drop the whole batch on retry.
+    settings = _settings()
+    sanitized_results: list[tuple[str, str, bool, int, str, datetime]] = []
+    for result in payload.results:
+        target_url = _safe_probe_target(result.target_url)
+        outbound_tag = _safe_log_text(result.outbound_tag, 128)
+        if not outbound_tag:
+            raise HTTPException(422, "invalid_probe_outbound_tag")
+        if len(sanitized_results) >= settings.probe_max_outbounds:
+            raise HTTPException(422, "probe_outbound_limit_exceeded")
+        sanitized_results.append(
+            (
+                outbound_tag,
+                target_url,
+                result.success,
+                result.latency_ms,
+                _safe_log_text(result.error_class, 64),
+                result.sampled_at,
+            )
+        )
+    accepted = await _accept_telemetry_batch(
+        node=node,
+        kind="probe_result",
+        batch_id=payload.batch_id,
+        sequence=payload.sequence,
+        item_count=len(payload.results),
+    )
+    if not accepted:
+        return TelemetryBatchResponse(accepted=False, duplicate=True)
+    for (
+        outbound_tag,
+        target_url,
+        success,
+        latency_ms,
+        error_class,
+        sampled_at,
+    ) in sanitized_results:
+        await record_probe_result(
+            node=node,
+            batch_id=payload.batch_id,
+            outbound_tag=outbound_tag,
+            target_url=target_url,
+            success=success,
+            latency_ms=latency_ms,
+            error_class=error_class,
+            sampled_at=sampled_at,
+        )
+    if payload.task_id:
+        task = await Task.find_one(Task.task_id == payload.task_id)
+        if task is not None and task.target_id == node.agent_id and task.task_type == "node.probe":
+            await complete_task(
+                task,
+                result={"result_count": len(payload.results)},
+                message="Probe results received",
+            )
+    return TelemetryBatchResponse(accepted=True)
 
 
 @app.post("/agent/v1/ack")
@@ -1867,6 +3075,7 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
         utcnow() if payload.ok and payload.health_ok else node.last_successful_reload_at
     )
     await node.save()
+    await sync_node_alerts(node)
     all_acks = await AgentAckDocument.find(
         AgentAckDocument.release_id == payload.release_id
     ).to_list()
@@ -1914,17 +3123,239 @@ async def audit_verify(_: str = Depends(require_management)) -> dict[str, Any]:
 
 
 @app.get("/api/v1/audit", response_model=list[AuditEventOut])
-async def list_audit(
-    limit: int = 200, _: str = Depends(require_management)
-) -> list[AuditEventOut]:
+async def list_audit(limit: int = 200, _: str = Depends(require_management)) -> list[AuditEventOut]:
     safe_limit = min(max(limit, 1), 500)
     events = await AuditEvent.find_all().sort(-AuditEvent.at).limit(safe_limit).to_list()
     return [_audit_out(item) for item in events]
 
 
+@app.get("/api/v1/audit/export")
+async def export_audit(
+    request: Request,
+    export_format: str = "json",
+    limit: int = 5_000,
+    actor: str = Depends(require_management),
+) -> Response:
+    """Download a bounded, recursively redacted audit export.
+
+    The query parameter is named ``export_format`` so it cannot collide with
+    Python's built-in formatter names in generated OpenAPI clients.
+    """
+
+    if export_format not in {"json", "ndjson"}:
+        raise HTTPException(422, "audit_export_format_invalid")
+    safe_limit = min(max(limit, 1), 5_000)
+    events = await AuditEvent.find_all().sort(+AuditEvent.at).limit(safe_limit).to_list()
+    rows = [redact(_audit_out(item).model_dump(mode="json")) for item in events]
+    request_id = _request_id(request)
+    await append_audit(
+        action="audit.export",
+        target_type="audit",
+        target_id="audit_event",
+        actor=actor,
+        actor_role="admin",
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        after={"format": export_format, "event_count": len(rows)},
+    )
+    if export_format == "ndjson":
+        body = "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        )
+        media_type = "application/x-ndjson"
+        extension = "ndjson"
+    else:
+        body = json.dumps(rows, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        media_type = "application/json"
+        extension = "json"
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="grouproxy-audit.{extension}"',
+        },
+    )
+
+
+@app.get("/api/v1/backups", response_model=list[BackupRecordOut])
+async def list_backups(
+    limit: int = 100, _: str = Depends(require_management)
+) -> list[BackupRecordOut]:
+    safe_limit = min(max(limit, 1), 250)
+    records = (
+        await BackupRecord.find_all().sort(-BackupRecord.created_at).limit(safe_limit).to_list()
+    )
+    return [_backup_out(item) for item in records]
+
+
+@app.post(
+    "/api/v1/backups",
+    response_model=BackupCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_backup(
+    payload: BackupCreateRequest,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    actor: str = Depends(require_management),
+) -> BackupCreateResponse:
+    request_id = _request_id(request)
+    idempotency_key = idempotency_key_header or (
+        f"backup.create:{payload.scope}:{secrets.token_hex(16)}"
+    )
+    existing_task = await Task.find_one(Task.idempotency_key == idempotency_key)
+    if existing_task is not None:
+        existing_record = await BackupRecord.find_one(
+            BackupRecord.backup_id == str(existing_task.payload.get("backup_id", ""))
+        )
+        if existing_record is not None:
+            return BackupCreateResponse(
+                backup=_backup_out(existing_record), task=_task_out(existing_task)
+            )
+    # Derive the record id from the idempotency key so two simultaneous callers
+    # cannot leave an orphaned backup record when only one task wins the unique
+    # key race.
+    idempotency_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    backup_id = f"bkp_{idempotency_digest[:32]}"
+    record = await BackupRecord.find_one(BackupRecord.backup_id == backup_id)
+    if record is not None:
+        task = await Task.find_one(Task.idempotency_key == idempotency_key)
+        if task is not None:
+            return BackupCreateResponse(backup=_backup_out(record), task=_task_out(task))
+    if record is None:
+        record = BackupRecord(
+            backup_id=backup_id,
+            scope=payload.scope,
+            origin="manual",
+            status="queued",
+            created_by=actor,
+        )
+        try:
+            await record.insert()
+        except DuplicateKeyError:
+            record = await BackupRecord.find_one(BackupRecord.backup_id == backup_id)
+            if record is None:
+                raise
+    try:
+        task, created = await create_task(
+            task_type="backup.create",
+            target_type="backup",
+            target_id=record.backup_id,
+            payload={"backup_id": record.backup_id, "scope": record.scope},
+            idempotency_key=idempotency_key,
+            created_by=actor,
+            request_id=request_id,
+        )
+    except Exception:
+        if record.status == "queued" and not record.storage_ref:
+            await record.delete()
+        raise
+    if not created:
+        return BackupCreateResponse(backup=_backup_out(record), task=_task_out(task))
+    await append_audit(
+        action="backup.create.request",
+        target_type="backup",
+        target_id=record.backup_id,
+        actor=actor,
+        actor_role="admin",
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        after={"scope": record.scope, "task_id": task.task_id},
+    )
+    return BackupCreateResponse(backup=_backup_out(record), task=_task_out(task))
+
+
+@app.post(
+    "/api/v1/backups/{backup_id}/restore",
+    response_model=BackupRestoreResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def restore_backup_task(
+    backup_id: str,
+    payload: BackupRestoreRequest,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    actor: str = Depends(require_management),
+) -> BackupRestoreResponse:
+    record = await BackupRecord.find_one(BackupRecord.backup_id == backup_id)
+    if record is None:
+        raise HTTPException(404, "backup_not_found")
+    if record.status in {"planned", "queued", "running", "failed"} or not record.storage_ref:
+        raise HTTPException(409, "backup_not_verified")
+    active_restore = await Task.find_one(
+        {
+            "task_type": "backup.restore",
+            "target_id": backup_id,
+            "active": True,
+        }
+    )
+    if active_restore is not None:
+        return BackupRestoreResponse(backup=_backup_out(record), task=_task_out(active_restore))
+    request_id = _request_id(request)
+    idempotency_key = idempotency_key_header or (
+        "backup.restore:"
+        f"{backup_id}:{'apply' if payload.confirm else 'rehearsal'}:"
+        f"{secrets.token_hex(12)}"
+    )
+    existing_task = await Task.find_one(Task.idempotency_key == idempotency_key)
+    if existing_task is not None:
+        return BackupRestoreResponse(backup=_backup_out(record), task=_task_out(existing_task))
+    try:
+        task, created = await create_task(
+            task_type="backup.restore",
+            target_type="backup",
+            target_id=backup_id,
+            payload={"backup_id": backup_id, "confirm": payload.confirm},
+            idempotency_key=idempotency_key,
+            created_by=actor,
+            request_id=request_id,
+        )
+    except DuplicateKeyError:
+        task = await Task.find_one(
+            {
+                "task_type": "backup.restore",
+                "target_id": backup_id,
+                "active": True,
+            }
+        )
+        if task is None:
+            raise
+        created = False
+    if not created:
+        return BackupRestoreResponse(backup=_backup_out(record), task=_task_out(task))
+    record.restore_task_id = task.task_id
+    record.status = "restore_queued"
+    await record.save()
+    await append_audit(
+        action="backup.restore.request",
+        target_type="backup",
+        target_id=backup_id,
+        actor=actor,
+        actor_role="admin",
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        after={"task_id": task.task_id, "confirmed": payload.confirm},
+    )
+    return BackupRestoreResponse(backup=_backup_out(record), task=_task_out(task))
+
+
 @app.get("/api/v1/overview")
 async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
     nodes = await Node.find_all().to_list()
+    latest_connections = await (
+        ConnectionSnapshot.find_all().sort(-ConnectionSnapshot.sampled_at).limit(500).to_list()
+    )
+    seen_nodes: set[str] = set()
+    connection_count = 0
+    for snapshot in latest_connections:
+        if snapshot.node_id in seen_nodes:
+            continue
+        seen_nodes.add(snapshot.node_id)
+        connection_count += snapshot.active_connections
+    open_circuits = await ProbeCircuit.find(ProbeCircuit.state == "open").count()
+    open_alerts = await Alert.find(Alert.status == "open").count()
     return {
         "sites": len(await Site.find_all().to_list()),
         "nodes": len(nodes),
@@ -1933,22 +3364,134 @@ async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
         "drifted_nodes": sum(
             node.config_status in {"drift", "failed", "rollback_failed"} for node in nodes
         ),
-        "connections": 0,
+        "connections": connection_count,
+        "open_circuits": open_circuits,
+        "open_alerts": open_alerts,
         "http_only": True,
     }
 
 
 @app.get("/api/v1/access/linux-setup.sh", response_class=PlainTextResponse)
-async def linux_setup(_: str = Depends(require_management)) -> str:
-    return """#!/usr/bin/env bash
-set -euo pipefail
-PROXY_HOST=proxy.corp.internal
-PROXY_PORT=80
-export http_proxy=\"http://${PROXY_HOST}:${PROXY_PORT}\"
-export https_proxy=\"http://${PROXY_HOST}:${PROXY_PORT}\"
-export no_proxy=\"localhost,127.0.0.1,.corp.internal\"
-printf 'Proxy configured for %s:%s (HTTP CONNECT only).\\n' \"$PROXY_HOST\" \"$PROXY_PORT\"
-printf '%s\\n' 'HTTPS transport is intentionally disabled.'
+async def linux_setup(
+    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
+) -> str:
+    return render_linux_setup_script(_settings())
+
+
+@app.get("/api/v1/access/config", response_model=AccessConfigOut)
+async def access_config(
+    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
+) -> AccessConfigOut:
+    settings = _settings()
+    return AccessConfigOut(fqdn=settings.proxy_access_fqdn, port=settings.proxy_access_port)
+
+
+@app.get("/api/v1/access/proxy-credentials", response_model=EmployeeProxyAccessOut)
+async def employee_proxy_access(
+    principal: AuthenticatedPrincipal = Depends(  # noqa: B008 - FastAPI dependency declaration
+        require_authenticated
+    ),
+) -> EmployeeProxyAccessOut:
+    credentials = await ProxyCredential.find(ProxyCredential.itcode == principal.itcode).to_list()
+    credentials_by_site = {item.site_id: item for item in credentials}
+    sites = await Site.find_all().sort(+Site.slug).to_list()
+    return EmployeeProxyAccessOut(
+        itcode=principal.itcode,
+        sites=[
+            EmployeeAccessSiteOut(
+                id=_model_id(site),
+                slug=site.slug,
+                name=site.name,
+                proxy_auth_required=site.proxy_auth_required,
+                credential_configured=bool(
+                    credentials_by_site.get(_model_id(site))
+                    and credentials_by_site[_model_id(site)].active
+                ),
+                username=(
+                    credentials_by_site[_model_id(site)].username
+                    if credentials_by_site.get(_model_id(site))
+                    and credentials_by_site[_model_id(site)].active
+                    else None
+                ),
+            )
+            for site in sites
+        ],
+    )
+
+
+@app.post(
+    "/api/v1/access/proxy-credentials/{site_id}/rotate",
+    response_model=ProxyCredentialReveal,
+)
+async def rotate_own_proxy_credential(
+    site_id: str,
+    request: Request,
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(  # noqa: B008 - FastAPI dependency declaration
+        require_authenticated
+    ),
+) -> ProxyCredentialReveal:
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return await _rotate_proxy_credential_for_subject(
+        site=site,
+        itcode=principal.itcode,
+        actor=principal.itcode,
+        actor_role=principal.role,
+        request=request,
+    )
+
+
+@app.post(
+    "/api/v1/sites/{site_id}/proxy-credentials/{itcode}/rotate",
+    response_model=ProxyCredentialReveal,
+)
+async def admin_rotate_proxy_credential(
+    site_id: str,
+    itcode: str,
+    request: Request,
+    response: Response,
+    _: str = Depends(require_management),
+) -> ProxyCredentialReveal:
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    try:
+        subject_itcode = normalize_itcode(itcode)
+    except AuthError as exc:
+        raise _auth_http_error(exc) from exc
+    subject = await find_user_by_itcode(subject_itcode)
+    if subject is None or not subject.is_active:
+        raise HTTPException(404, "employee_not_found")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return await _rotate_proxy_credential_for_subject(
+        site=site,
+        itcode=subject_itcode,
+        actor=_actor(),
+        actor_role="admin",
+        request=request,
+    )
+
+
+@app.get("/api/v1/access/proxy.pac", response_class=PlainTextResponse)
+async def proxy_pac(
+    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
+) -> str:
+    settings = _settings()
+    # PAC only chooses the single HTTP listener. It is not an authorization
+    # layer and never embeds regional IP addresses.
+    return f"""function FindProxyForURL(url, host) {{
+  if (isPlainHostName(host) ||
+      shExpMatch(host, \"localhost\") ||
+      isInNet(host, \"10.0.0.0\", \"255.0.0.0\") ||
+      isInNet(host, \"172.16.0.0\", \"255.240.0.0\") ||
+      isInNet(host, \"192.168.0.0\", \"255.255.0.0\")) return \"DIRECT\";
+  return \"PROXY {settings.proxy_access_fqdn}:{settings.proxy_access_port}\";
+}}
 """
 
 

@@ -5,6 +5,8 @@ export type Overview = {
   in_sync_nodes: number;
   drifted_nodes: number;
   connections: number;
+  open_circuits: number;
+  open_alerts: number;
   http_only: boolean;
 };
 
@@ -14,6 +16,7 @@ export type AuthSession = {
   access_token: string;
   token_type: "bearer";
   itcode: string;
+  role: "admin" | "employee";
   expires_at: string;
 };
 
@@ -50,7 +53,44 @@ export type Node = {
   config_status: string;
   service_status: string;
   subscription_status: string;
+  probe_status: string;
   last_error: string;
+};
+
+export type ProxyHistoryPoint = {
+  at: string | null;
+  delay_ms: number | null;
+};
+
+export type ProxyEndpoint = {
+  name: string;
+  type: string;
+  udp: boolean;
+  alive: boolean | null;
+  delay_ms: number | null;
+  history: ProxyHistoryPoint[];
+};
+
+export type ProxyGroup = {
+  name: string;
+  type: string;
+  now: string;
+  all: string[];
+  nodes: ProxyEndpoint[];
+  udp: boolean;
+  delay_ms: number | null;
+  history: ProxyHistoryPoint[];
+};
+
+export type ProxyConfigSnapshot = {
+  id: string;
+  node_id: string;
+  site_id: string;
+  sampled_at: string;
+  api_available: boolean;
+  groups: ProxyGroup[];
+  error: string;
+  received_at: string;
 };
 
 export type CIDREntry = {
@@ -254,6 +294,162 @@ export type AuditEvent = {
   at: string;
 };
 
+export type AccessLog = {
+  id: string;
+  ts: string;
+  site_id: string;
+  node_id: string;
+  policy_version: number;
+  src_ip: string;
+  src_cidr_match: string;
+  username: string;
+  cert_fp: string;
+  dst_host: string;
+  dst_port: number;
+  action: "allow" | "deny";
+  deny_reason: string;
+  bytes_up: number;
+  bytes_down: number;
+  duration_ms: number;
+};
+
+export type ConnectionTopItem = {
+  label: string;
+  connections: number;
+  bytes_up: number;
+  bytes_down: number;
+};
+
+export type ConnectionSnapshot = {
+  id: string;
+  node_id: string;
+  site_id: string;
+  sampled_at: string;
+  active_connections: number;
+  bytes_up: number;
+  bytes_down: number;
+  top_sources: ConnectionTopItem[];
+  top_destinations: ConnectionTopItem[];
+  top_users: ConnectionTopItem[];
+  api_available: boolean;
+  received_at: string;
+};
+
+export type ProbeHistory = {
+  id: string;
+  node_id: string;
+  site_id: string;
+  outbound_tag: string;
+  target_url: string;
+  success: boolean;
+  latency_ms: number;
+  error_class: string;
+  sampled_at: string;
+};
+
+export type ProbeCircuit = {
+  node_id: string;
+  site_id: string;
+  outbound_tag: string;
+  state: "closed" | "open" | "half_open" | string;
+  consecutive_failures: number;
+  consecutive_successes: number;
+  opened_at: string | null;
+  half_open_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_latency_ms: number;
+  last_error_class: string;
+  reason: string;
+  updated_at: string;
+};
+
+export type ProbeOverview = { node_id: string; history: ProbeHistory[]; circuits: ProbeCircuit[] };
+
+export type Alert = {
+  id: string;
+  fingerprint: string;
+  category: string;
+  severity: string;
+  site_id: string;
+  node_id: string;
+  title: string;
+  detail: string;
+  status: "open" | "resolved" | string;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+};
+
+export type AccessConfig = {
+  fqdn: string;
+  port: number;
+  protocol: "http-connect";
+  https_proxy_enabled: boolean;
+};
+
+export type EmployeeAccessSite = {
+  id: string;
+  slug: string;
+  name: string;
+  proxy_auth_required: boolean;
+  credential_configured: boolean;
+  username: string | null;
+};
+
+export type EmployeeProxyAccess = {
+  itcode: string;
+  sites: EmployeeAccessSite[];
+};
+
+export type Employee = {
+  itcode: string;
+  auth_source: string;
+  is_active: boolean;
+  created_at: string;
+  password_changed_at: string | null;
+  last_login_at: string | null;
+};
+
+export type ProxyCredential = {
+  site_id: string;
+  username: string;
+  active: boolean;
+  rotated_at: string;
+};
+
+export type ProxyCredentialReveal = {
+  site_id: ProxyCredential["site_id"];
+  username: ProxyCredential["username"];
+  active: ProxyCredential["active"];
+  rotated_at: ProxyCredential["rotated_at"];
+  password: string;
+  release_id: string | null;
+};
+
+export type BackupRecord = {
+  backup_id: string;
+  scope: string;
+  origin: "manual" | "scheduled";
+  artifact_paths: string[];
+  format: string;
+  checksum: string;
+  encrypted: boolean;
+  storage_ref: string;
+  status: string;
+  created_by: string;
+  created_at: string;
+  verified_at: string | null;
+  last_rehearsed_at: string | null;
+  restore_task_id: string | null;
+  error: string;
+  size_bytes: number;
+  manifest: Record<string, unknown>;
+};
+
+export type BackupCreateResponse = { backup: BackupRecord; task: Task };
+export type BackupRestoreResponse = { backup: BackupRecord; task: Task };
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -269,6 +465,9 @@ const baseURL = (process.env.NEXT_PUBLIC_API_BASE_URL || "/backend-api").replace
   "",
 );
 const tokenKey = "grouproxy.management_token";
+const roleKey = "grouproxy.session_role";
+
+export type SessionRole = AuthSession["role"];
 
 export function managementToken() {
   if (typeof window !== "undefined") {
@@ -278,18 +477,30 @@ export function managementToken() {
 }
 
 export function hasManagementSession() {
+  return Boolean(managementToken()) && managementSessionRole() !== "employee";
+}
+
+export function hasAuthenticatedSession() {
   return Boolean(managementToken());
+}
+
+export function managementSessionRole(): SessionRole | null {
+  if (typeof window === "undefined") return null;
+  const role = window.localStorage.getItem(roleKey);
+  return role === "admin" || role === "employee" ? role : null;
 }
 
 export function clearManagementSession() {
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(tokenKey);
+    window.localStorage.removeItem(roleKey);
   }
 }
 
-export function saveManagementSession(token: string) {
+export function saveManagementSession(token: string, role: SessionRole) {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(tokenKey, token);
+    window.localStorage.setItem(roleKey, role);
   }
 }
 
@@ -399,7 +610,7 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
   return (await response.json()) as T;
 }
 
-function jsonRequest(method: "POST" | "PUT" | "DELETE", body?: unknown): RequestInit {
+function jsonRequest(method: "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): RequestInit {
   return {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -422,12 +633,47 @@ export function getSites() {
   return request<Site[]>("/api/v1/sites");
 }
 
+export function getEmployees() {
+  return request<Employee[]>("/api/v1/employees");
+}
+
+export function getEmployeeProxyCredentials(itcode: string) {
+  return request<ProxyCredential[]>(
+    `/api/v1/employees/${encodeURIComponent(itcode)}/proxy-credentials`,
+  );
+}
+
 export function getNodes() {
   return request<Node[]>("/api/v1/nodes");
 }
 
+export function updateNodeName(nodeId: string, name: string) {
+  return request<Node>(
+    `/api/v1/nodes/${encodeURIComponent(nodeId)}`,
+    jsonRequest("PATCH", { name }),
+  );
+}
+
+export function getProxyConfigs(filters: { siteId?: string; nodeId?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<ProxyConfigSnapshot[]>(`/api/v1/proxy-configs${suffix}`);
+}
+
+export function getNodeProxyConfig(nodeId: string) {
+  return request<ProxyConfigSnapshot>(
+    `/api/v1/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
+  );
+}
+
 export function setSiteShutdown(siteId: string, shutdown: boolean) {
   return request<Site>(`/api/v1/sites/${siteId}/shutdown`, jsonRequest("POST", { shutdown }));
+}
+
+export function setSiteProxyAuth(siteId: string, required: boolean) {
+  return request<Site>(`/api/v1/sites/${siteId}/proxy-auth`, jsonRequest("PUT", { required }));
 }
 
 export function getSiteCIDRs(siteId: string) {
@@ -599,6 +845,40 @@ export function getTasks() {
   return request<Task[]>("/api/v1/tasks");
 }
 
+export function getLogs(filters: { siteId?: string; nodeId?: string; action?: "allow" | "deny" } = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  if (filters.action) query.set("action", filters.action);
+  return request<AccessLog[]>(`/api/v1/logs${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function getConnections(filters: { siteId?: string; nodeId?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  return request<ConnectionSnapshot[]>(`/api/v1/connections${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function getNodeProbes(nodeId: string) {
+  return request<ProbeOverview>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/probes`);
+}
+
+export function createNodeProbe(nodeId: string, value: { target_url?: string; outbound_tags?: string[] } = {}) {
+  return request<Task>(`/api/v1/nodes/${encodeURIComponent(nodeId)}/probes`, {
+    ...jsonRequest("POST", value),
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": createIdempotencyKey(`node.probe:${nodeId}`),
+    },
+  });
+}
+
+export function getAlerts(status?: "open" | "resolved") {
+  const query = status ? `?status_filter=${status}` : "";
+  return request<Alert[]>(`/api/v1/alerts${query}`);
+}
+
 export function cancelTask(taskId: string) {
   return request<Task>(`/api/v1/tasks/${taskId}/cancel`, jsonRequest("POST", {}));
 }
@@ -611,6 +891,60 @@ export function verifyAudit() {
   return request<{ valid: boolean; error: string; event_count: number }>("/api/v1/audit/verify");
 }
 
+export function getAuditExport(exportFormat: "json" | "ndjson" = "json") {
+  return requestText(`/api/v1/audit/export?export_format=${exportFormat}`);
+}
+
+export function getBackups() {
+  return request<BackupRecord[]>("/api/v1/backups");
+}
+
+export function createBackup() {
+  return request<BackupCreateResponse>("/api/v1/backups", {
+    ...jsonRequest("POST", { scope: "control_plane" }),
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": createIdempotencyKey("backup.create"),
+    },
+  });
+}
+
+export function restoreBackup(backupId: string, confirm = false) {
+  return request<BackupRestoreResponse>(`/api/v1/backups/${encodeURIComponent(backupId)}/restore`, {
+    ...jsonRequest("POST", { confirm }),
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": createIdempotencyKey(`backup.restore:${backupId}:${confirm ? "apply" : "rehearsal"}`),
+    },
+  });
+}
+
 export function getLinuxSetupScript() {
   return requestText("/api/v1/access/linux-setup.sh");
+}
+
+export function getAccessConfig() {
+  return request<AccessConfig>("/api/v1/access/config");
+}
+
+export function getEmployeeProxyAccess() {
+  return request<EmployeeProxyAccess>("/api/v1/access/proxy-credentials");
+}
+
+export function rotateOwnProxyCredential(siteId: string) {
+  return request<ProxyCredentialReveal>(
+    `/api/v1/access/proxy-credentials/${encodeURIComponent(siteId)}/rotate`,
+    jsonRequest("POST", {}),
+  );
+}
+
+export function rotateEmployeeProxyCredential(siteId: string, itcode: string) {
+  return request<ProxyCredentialReveal>(
+    `/api/v1/sites/${encodeURIComponent(siteId)}/proxy-credentials/${encodeURIComponent(itcode)}/rotate`,
+    jsonRequest("POST", {}),
+  );
+}
+
+export function getProxyPAC() {
+  return requestText("/api/v1/access/proxy.pac");
 }
