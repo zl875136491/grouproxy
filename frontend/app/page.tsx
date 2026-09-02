@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowRight, FileClock, Network, ServerCog, ShieldCheck } from "lucide-react";
+import { Activity, ArrowRight, FileClock, Network, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import {
   getNodes,
@@ -15,6 +15,7 @@ import {
 import { usePreferences } from "../lib/preferences";
 import { label } from "../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../components/data-state";
+import { ControlPlaneTopology } from "../components/control-plane-topology";
 import { PageHeader } from "../components/page-header";
 import { SessionGate, useManagementSession } from "../components/session-gate";
 import { Panel, StatusBadge } from "../components/ui";
@@ -61,6 +62,10 @@ export default function OverviewPage() {
   const activeTasks = taskItems.filter((item) => ["queued", "running", "cancel_requested"].includes(item.status));
   const nodesBySite = new Map(siteItems.map((site) => [site.id, nodeItems.filter((node) => node.site_id === site.id)]));
   const siteNames = new Map(siteItems.map((site) => [site.id, site.name]));
+  const topologySites = siteItems.map((site) => {
+    const siteNodes = nodesBySite.get(site.id) || [];
+    return { site, state: siteState(site, siteNodes), nodeCount: siteNodes.length };
+  });
 
   return (
     <div className="page-stack">
@@ -95,22 +100,7 @@ export default function OverviewPage() {
       <section className="dashboard-grid dashboard-grid-primary">
         <Panel className="topology-panel">
           <div className="panel-heading"><div><span className="panel-kicker">{t("REGIONAL TOPOLOGY")}</span><h2>{t("Control plane to edge sites")}</h2></div><Link href="/nodes">{t("Node inventory")} <ArrowRight size={15} /></Link></div>
-          <div className="topology-canvas">
-            <div className="topology-control"><span className="topology-control-icon"><ServerCog size={19} /></span><div><strong>codedev</strong><span>{t("Control plane")}</span></div></div>
-            <div className="topology-branches" aria-label={t("Site topology")}>
-              {siteItems.map((site) => {
-                const siteNodes = nodesBySite.get(site.id) || [];
-                const state = siteState(site, siteNodes);
-                return (
-                  <Link className="topology-site" href={`/sites/${site.slug}/cidrs`} key={site.id}>
-                    <span className={`topology-dot topology-${state.replaceAll(" ", "-")}`} />
-                    <div><strong>{t(site.name)}</strong><span>{siteNodes.length ? `${formatNumber(siteNodes.length)} ${t(siteNodes.length === 1 ? "node" : "nodes")}` : t("No node enrolled")}</span></div>
-                    <StatusBadge status={state} />
-                  </Link>
-                );
-              })}
-            </div>
-          </div>
+          <ControlPlaneTopology sites={topologySites} onlineNodes={overviewData.online_nodes} totalNodes={overviewData.nodes} formatNumber={formatNumber} t={t} />
         </Panel>
 
         <Panel className="activity-panel">
