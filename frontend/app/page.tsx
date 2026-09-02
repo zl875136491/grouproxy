@@ -40,7 +40,7 @@ export default function OverviewPage() {
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, refetchInterval: 10_000 });
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, refetchInterval: 10_000 });
   const releases = useQuery({ queryKey: ["releases"], queryFn: () => getReleases(), enabled: session === true, refetchInterval: 5_000 });
-  const tasks = useQuery({ queryKey: ["tasks"], queryFn: getTasks, enabled: session === true, refetchInterval: 5_000 });
+  const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => getTasks(), enabled: session === true, refetchInterval: 5_000 });
 
   if (session === null) return <LoadingState rows={8} />;
   if (!session) return <SessionGate />;

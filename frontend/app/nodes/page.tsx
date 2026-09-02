@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Filter, Pencil, ServerCog } from "lucide-react";
 import { useMemo, useState } from "react";
-import { getNodes, getSites, updateNodeName, type Node } from "../../lib/api";
+import { getNodes, getSites, updateNodeName, updateSiteName, type Node, type Site } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { shortHash } from "../../lib/utils";
 import { ErrorState, LoadingState } from "../../components/data-state";
@@ -19,6 +19,8 @@ export default function NodesPage() {
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [editNode, setEditNode] = useState<Node | null>(null);
   const [editName, setEditName] = useState("");
+  const [editSite, setEditSite] = useState<Site | null>(null);
+  const [editSiteName, setEditSiteName] = useState("");
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, refetchInterval: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, staleTime: 30_000 });
   const rename = useMutation({
@@ -27,6 +29,18 @@ export default function NodesPage() {
       setEditNode(null);
       setSelectedNode((current) => current?.id === updated.id ? updated : current);
       await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["nodes"] }),
+        queryClient.invalidateQueries({ queryKey: ["proxy-configs"] }),
+        queryClient.invalidateQueries({ queryKey: ["overview"] }),
+      ]);
+    },
+  });
+  const renameSite = useMutation({
+    mutationFn: () => updateSiteName(editSite!.id, editSiteName.trim()),
+    onSuccess: async () => {
+      setEditSite(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["sites"] }),
         queryClient.invalidateQueries({ queryKey: ["nodes"] }),
         queryClient.invalidateQueries({ queryKey: ["proxy-configs"] }),
         queryClient.invalidateQueries({ queryKey: ["overview"] }),
@@ -60,7 +74,7 @@ export default function NodesPage() {
           <div className="toolbar-title"><ServerCog size={18} /><span>{t("{count} nodes", { count: formatNumber(rows.length) })}</span></div>
           <label className="select-control"><Filter size={15} /><span className="sr-only">{t("Filter node status")}</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">{t("All states")}</option><option value="online">{t("Online")}</option><option value="offline">{t("Offline")}</option><option value="attention">{t("Needs attention")}</option></select></label>
         </div>
-        <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Site")}</th><th>{t("Heartbeat")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Version")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{rows.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary mono">{node.agent_id}</span></td><td>{t(siteNames.get(node.site_id) || node.site_id)}</td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td><span className="version-pair">{formatNumber(node.applied_version)} <span>/</span> {formatNumber(node.desired_version)}</span></td><td><div className="row-actions"><Button size="sm" variant="ghost" onClick={() => setSelectedNode(node)}>{t("Inspect")}</Button><IconButton label={t("Rename node {name}", { name: node.name })} onClick={() => { setEditNode(node); setEditName(node.name); rename.reset(); }}><Pencil size={15} /></IconButton></div></td></tr>)}</tbody></table></div>
+        <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Site")}</th><th>{t("Heartbeat")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Version")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{rows.map((node) => { const site = (sites.data || []).find((item) => item.id === node.site_id); const firstSiteRow = rows.find((item) => item.site_id === node.site_id)?.id === node.id; return <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary mono">{node.agent_id}</span></td><td><div className="cell-with-action"><span>{t(site?.name || node.site_id)}</span>{site && firstSiteRow ? <IconButton label={t("Rename site {name}", { name: site.name })} tooltip={false} onClick={() => { setEditSite(site); setEditSiteName(site.name); renameSite.reset(); }}><Pencil size={14} /></IconButton> : null}</div><span className="cell-secondary mono">{site?.slug || node.site_id}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td><span className="version-pair">{formatNumber(node.applied_version)} <span>/</span> {formatNumber(node.desired_version)}</span></td><td><div className="row-actions"><Button size="sm" variant="ghost" onClick={() => setSelectedNode(node)}>{t("Inspect")}</Button><IconButton label={t("Rename node {name}", { name: node.name })} onClick={() => { setEditNode(node); setEditName(node.name); rename.reset(); }}><Pencil size={15} /></IconButton></div></td></tr>; })}</tbody></table></div>
       </Panel>
       <DetailDialog open={Boolean(selectedNode)} onOpenChange={(open) => !open && setSelectedNode(null)} title={selectedNode?.name || "Node"} description={selectedNode ? `${t(siteNames.get(selectedNode.site_id) || selectedNode.site_id)} · ${selectedNode.agent_id}` : undefined}>
         {selectedNode ? <div className="detail-stack"><div className="status-grid"><div><span>{t("Liveness")}</span><StatusBadge status={selectedNode.liveness_status} /></div><div><span>{t("Configuration")}</span><StatusBadge status={selectedNode.config_status} /></div><div><span>{t("Service")}</span><StatusBadge status={selectedNode.service_status} /></div><div><span>{t("Subscription")}</span><StatusBadge status={selectedNode.subscription_status} /></div></div><dl className="detail-list"><div><dt>{t("Applied / desired")}</dt><dd>{formatNumber(selectedNode.applied_version)} / {formatNumber(selectedNode.desired_version)}</dd></div><div><dt>{t("Applied hash")}</dt><dd className="mono">{shortHash(selectedNode.applied_hash, 18)}</dd></div><div><dt>{t("Last heartbeat")}</dt><dd>{formatDate(selectedNode.last_seen_at)}</dd></div><div><dt>{t("Monitor")}</dt><dd>{selectedNode.monitor_version}</dd></div><div><dt>sing-box</dt><dd>{selectedNode.singbox_version}</dd></div><div><dt>{t("Advertise IP")}</dt><dd>{selectedNode.advertise_ip || "-"}</dd></div></dl>{selectedNode.last_error ? <div className="detail-error"><strong>{t("Last error")}</strong><code>{selectedNode.last_error}</code></div> : null}</div> : null}
@@ -70,6 +84,13 @@ export default function NodesPage() {
           <label><span>{t("Display name")}</span><input autoFocus value={editName} maxLength={128} onChange={(event) => setEditName(event.target.value)} /></label>
           {rename.error ? <div className="inline-error" role="alert">{rename.error instanceof Error ? t(rename.error.message) : t("The node name could not be updated.")}</div> : null}
           <div className="form-actions"><Button type="button" onClick={() => setEditNode(null)} disabled={rename.isPending}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={!editName.trim() || rename.isPending}><Pencil size={15} />{rename.isPending ? t("Saving...") : t("Save changes")}</Button></div>
+        </form>
+      </DetailDialog>
+      <DetailDialog open={Boolean(editSite)} onOpenChange={(open) => { if (!open && !renameSite.isPending) setEditSite(null); }} title="Rename site" description={editSite ? t("Change the display name for {name}. The site slug, policy, and node bindings remain unchanged.", { name: editSite.name }) : undefined} contentClassName="node-edit-dialog-content">
+        <form className="node-edit-form" onSubmit={(event) => { event.preventDefault(); if (editSiteName.trim() && !renameSite.isPending) renameSite.mutate(); }}>
+          <label><span>{t("Site display name")}</span><input autoFocus value={editSiteName} maxLength={128} onChange={(event) => setEditSiteName(event.target.value)} /></label>
+          {renameSite.error ? <div className="inline-error" role="alert">{renameSite.error instanceof Error ? t(renameSite.error.message) : t("The site name could not be updated.")}</div> : null}
+          <div className="form-actions"><Button type="button" onClick={() => setEditSite(null)} disabled={renameSite.isPending}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={!editSiteName.trim() || renameSite.isPending}><Pencil size={15} />{renameSite.isPending ? t("Saving...") : t("Save changes")}</Button></div>
         </form>
       </DetailDialog>
     </div>

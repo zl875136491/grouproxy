@@ -14,17 +14,68 @@ const screenshotPath = process.env.GROUPROXY_BROWSER_SCREENSHOT;
 const viewport = process.env.GROUPROXY_BROWSER_VIEWPORT || "1440x900";
 const readySelector = process.env.GROUPROXY_BROWSER_READY_SELECTOR || "tbody tr";
 const smokeOnly = process.env.GROUPROXY_BROWSER_SMOKE_ONLY === "1";
+const debugBrowser = process.env.GROUPROXY_BROWSER_DEBUG === "1";
+const requestedTheme = process.env.GROUPROXY_BROWSER_THEME;
 
 if (!itcode || !password) {
   throw new Error("GROUPROXY_BROWSER_ITCODE and GROUPROXY_BROWSER_PASSWORD are required");
 }
 if (!chromeBin) throw new Error("CHROME_BIN is required");
+if (requestedTheme && requestedTheme !== "light" && requestedTheme !== "dark") {
+  throw new Error("GROUPROXY_BROWSER_THEME must be light or dark");
+}
 const viewportMatch = viewport.match(/^(\d{2,4})x(\d{2,4})$/);
 if (!viewportMatch) throw new Error("GROUPROXY_BROWSER_VIEWPORT must use WIDTHxHEIGHT");
 const viewportWidth = Number(viewportMatch[1]);
 const viewportHeight = Number(viewportMatch[2]);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function assertDarkThemeIconContrast(evaluate) {
+  return evaluate(`(() => {
+    const parseColor = (value) => {
+      const match = value.match(/^rgba?\\(([^)]+)\\)$/);
+      if (!match) return null;
+      const parts = match[1].split(",").map((part) => Number(part.trim()));
+      if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
+      return [parts[0], parts[1], parts[2], parts[3] ?? 1];
+    };
+    const linear = (value) => {
+      const normalized = value / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    const contrast = (foreground, background) => {
+      const alpha = foreground[3];
+      const composited = [0, 1, 2].map((index) => foreground[index] * alpha + background[index] * (1 - alpha));
+      const luminance = (color) => 0.2126 * linear(color[0]) + 0.7152 * linear(color[1]) + 0.0722 * linear(color[2]);
+      const lighter = Math.max(luminance(composited), luminance(background));
+      const darker = Math.min(luminance(composited), luminance(background));
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+    const backgroundFor = (element) => {
+      for (let current = element; current; current = current.parentElement) {
+        const color = parseColor(getComputedStyle(current).backgroundColor);
+        if (color && color[3] > 0) return { color, source: current.className || current.tagName };
+      }
+      return { color: [0, 30, 43, 1], source: "fallback" };
+    };
+    return [...document.querySelectorAll("svg")].flatMap((icon, index) => {
+      const rect = icon.getBoundingClientRect();
+      if (!rect.width || !rect.height || getComputedStyle(icon).visibility === "hidden") return [];
+      const foreground = parseColor(getComputedStyle(icon).color);
+      const background = backgroundFor(icon);
+      if (!foreground || contrast(foreground, background.color) >= 3) return [];
+      return [{
+        index,
+        className: icon.getAttribute("class") || "svg",
+        foreground,
+        background: background.color,
+        backgroundSource: background.source,
+        ratio: Number(contrast(foreground, background.color).toFixed(2)),
+      }];
+    });
+  })()`);
+}
 
 async function stopChrome(chrome) {
   if (!chrome || chrome.exitCode !== null || chrome.signalCode !== null) return;
@@ -159,11 +210,16 @@ try {
 
   client = new CdpClient(page.webSocketDebuggerUrl);
   const apiRequests = [];
+  const browserErrors = [];
   client.on("Network.requestWillBeSent", ({ request }) => {
     if (request.url.includes("/backend-api/")) apiRequests.push(request.url);
   });
+  client.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+    browserErrors.push(exceptionDetails.exception?.description || exceptionDetails.text || "Runtime exception");
+  });
   await client.send("Page.enable");
   await client.send("Network.enable");
+  await client.send("Runtime.enable");
   await client.send("Emulation.setDeviceMetricsOverride", {
     width: viewportWidth,
     height: viewportHeight,
@@ -171,7 +227,7 @@ try {
     mobile: viewportWidth < 600,
   });
   await client.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `localStorage.setItem("grouproxy.management_token", ${JSON.stringify(token)}); localStorage.setItem("grouproxy.session_role", "admin");`,
+    source: `localStorage.setItem("grouproxy.management_token", ${JSON.stringify(token)}); localStorage.setItem("grouproxy.session_role", "admin");${requestedTheme ? ` localStorage.setItem("grouproxy.theme", ${JSON.stringify(requestedTheme)});` : ""}`,
   });
   await client.send("Page.navigate", { url: `${frontendURL}${browserPath}` });
 
@@ -179,14 +235,26 @@ try {
     const result = await client.send("Runtime.evaluate", { expression, returnByValue: true });
     return readValue(result);
   };
-  await waitFor(
-    () => evaluate(`document.querySelector(${JSON.stringify(readySelector)}) !== null`),
-    `page element ${readySelector}`,
-  );
+  try {
+    await waitFor(
+      () => evaluate(`document.querySelector(${JSON.stringify(readySelector)}) !== null`),
+      `page element ${readySelector}`,
+    );
+  } catch (error) {
+    if (!debugBrowser) throw error;
+    const pageText = await evaluate("document.body.innerText.slice(0, 2000)");
+    throw new Error(`${error.message}\nBrowser errors: ${browserErrors.join(" | ") || "none"}\nPage text: ${pageText}`);
+  }
   await waitFor(
     () => evaluate("document.documentElement.lang === 'zh-CN'"),
     "initial Chinese locale",
   );
+  if (requestedTheme) {
+    await waitFor(
+      () => evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(requestedTheme)}`),
+      `${requestedTheme} theme`,
+    );
+  }
 
   if (smokeOnly) {
     const visualState = await evaluate(`(() => {
@@ -200,6 +268,10 @@ try {
     assert.ok(visualState.stylesheets > 0, "The page did not load a stylesheet");
     assert.notEqual(visualState.targetDisplay, "none", "The ready element is not visible");
     assert.match(visualState.bodyFont, /Euclid|Inter|Segoe UI/, "The application font stack is missing");
+    if (requestedTheme === "dark") {
+      const unreadableIcons = await assertDarkThemeIconContrast(evaluate);
+      assert.deepEqual(unreadableIcons, [], `Dark theme has low-contrast icons: ${JSON.stringify(unreadableIcons)}`);
+    }
     console.log(`Rendered ${browserPath} with ${visualState.stylesheets} stylesheet(s).`);
   } else {
     const before = await evaluate(

@@ -50,7 +50,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
     items: [
       { href: "/", label: "Overview", icon: Gauge },
       { href: "/nodes", label: "Nodes", icon: ServerCog },
-      { href: "/proxies", label: "Proxy configuration", icon: Waypoints },
+      { href: "/proxies", label: "Outbound services", icon: Waypoints },
     ],
   },
   {
@@ -165,7 +165,7 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="sidebar-brand">
           <Link href="/" onClick={closeMobile} className="brand-link">
             <span className="brand-mark" aria-hidden="true" />
-            <span>grouproxy</span>
+            <span className="brand-wordmark">Grouproxy</span>
           </Link>
           <IconButton label={t("Close navigation")} className="mobile-only" onClick={closeMobile}>
             <X size={18} />

@@ -93,6 +93,13 @@ export type ProxyConfigSnapshot = {
   received_at: string;
 };
 
+export type ProxySelectionRequest = {
+  group: string;
+  outbound: string;
+  expected_current_version?: number | null;
+  note?: string;
+};
+
 export type CIDREntry = {
   id: string;
   site_id: string;
@@ -633,6 +640,13 @@ export function getSites() {
   return request<Site[]>("/api/v1/sites");
 }
 
+export function updateSiteName(siteId: string, name: string) {
+  return request<Site>(
+    `/api/v1/sites/${encodeURIComponent(siteId)}`,
+    jsonRequest("PATCH", { name }),
+  );
+}
+
 export function getEmployees() {
   return request<Employee[]>("/api/v1/employees");
 }
@@ -665,6 +679,26 @@ export function getProxyConfigs(filters: { siteId?: string; nodeId?: string } = 
 export function getNodeProxyConfig(nodeId: string) {
   return request<ProxyConfigSnapshot>(
     `/api/v1/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
+  );
+}
+
+export function selectNodeProxy(nodeId: string, value: ProxySelectionRequest) {
+  const idempotencyKey = [
+    "proxy-selection",
+    nodeId,
+    value.group.trim(),
+    value.outbound.trim(),
+    value.expected_current_version ?? "latest",
+  ].join(":");
+  return request<Release>(
+    `/api/v1/nodes/${encodeURIComponent(nodeId)}/proxy-selection`,
+    {
+      ...jsonRequest("POST", value),
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    },
   );
 }
 
@@ -811,9 +845,13 @@ export function createDraft(value: {
   return request<Draft>("/api/v1/config/drafts", jsonRequest("POST", value));
 }
 
-export function getReleases(siteId?: string) {
-  const query = siteId ? `?site_id=${encodeURIComponent(siteId)}` : "";
-  return request<Release[]>(`/api/v1/config/releases${query}`);
+export function getReleases(filters: { siteId?: string; status?: string; since?: string; until?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.status) query.set("status", filters.status);
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
+  return request<Release[]>(`/api/v1/config/releases${query.size ? `?${query.toString()}` : ""}`);
 }
 
 export function getRelease(releaseId: string) {
@@ -841,22 +879,32 @@ export function publishRelease(value: {
   });
 }
 
-export function getTasks() {
-  return request<Task[]>("/api/v1/tasks");
+export function getTasks(filters: { status?: string; taskType?: string; since?: string; until?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.status) query.set("status", filters.status);
+  if (filters.taskType) query.set("task_type", filters.taskType);
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
+  return request<Task[]>(`/api/v1/tasks${query.size ? `?${query.toString()}` : ""}`);
 }
 
-export function getLogs(filters: { siteId?: string; nodeId?: string; action?: "allow" | "deny" } = {}) {
+export function getLogs(filters: { siteId?: string; nodeId?: string; action?: "allow" | "deny"; since?: string; until?: string; search?: string } = {}) {
   const query = new URLSearchParams();
   if (filters.siteId) query.set("site_id", filters.siteId);
   if (filters.nodeId) query.set("node_id", filters.nodeId);
   if (filters.action) query.set("action", filters.action);
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
+  if (filters.search) query.set("search", filters.search);
   return request<AccessLog[]>(`/api/v1/logs${query.size ? `?${query.toString()}` : ""}`);
 }
 
-export function getConnections(filters: { siteId?: string; nodeId?: string } = {}) {
+export function getConnections(filters: { siteId?: string; nodeId?: string; since?: string; until?: string } = {}) {
   const query = new URLSearchParams();
   if (filters.siteId) query.set("site_id", filters.siteId);
   if (filters.nodeId) query.set("node_id", filters.nodeId);
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
   return request<ConnectionSnapshot[]>(`/api/v1/connections${query.size ? `?${query.toString()}` : ""}`);
 }
 
@@ -883,8 +931,13 @@ export function cancelTask(taskId: string) {
   return request<Task>(`/api/v1/tasks/${taskId}/cancel`, jsonRequest("POST", {}));
 }
 
-export function getAudit() {
-  return request<AuditEvent[]>("/api/v1/audit");
+export function getAudit(filters: { since?: string; until?: string; action?: string; actor?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
+  if (filters.action) query.set("action", filters.action);
+  if (filters.actor) query.set("actor", filters.actor);
+  return request<AuditEvent[]>(`/api/v1/audit${query.size ? `?${query.toString()}` : ""}`);
 }
 
 export function verifyAudit() {
