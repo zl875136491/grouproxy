@@ -2,10 +2,11 @@
 
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { X } from "lucide-react";
-import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
+import { CircleCheck, RefreshCw, X } from "lucide-react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type PropsWithChildren, type ReactNode } from "react";
 import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
+import refreshStyles from "./refresh-button.module.css";
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 type ButtonSize = "sm" | "md";
@@ -48,6 +49,70 @@ export function IconButton({
         </Tooltip.Portal>
       </Tooltip.Root>
     </Tooltip.Provider>
+  );
+}
+
+type RefreshState = "idle" | "refreshing" | "succeeded";
+
+function refreshResultError(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => refreshResultError(item)).find(Boolean);
+  }
+  if (value && typeof value === "object" && "error" in value) {
+    return (value as { error?: unknown }).error;
+  }
+  return undefined;
+}
+
+export function RefreshButton({
+  label = "Refresh",
+  onRefresh,
+  successDurationMs = 2_500,
+  disabled = false,
+  ...props
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children" | "onClick"> & {
+  label?: string;
+  onRefresh: () => Promise<unknown> | unknown;
+  successDurationMs?: number;
+}) {
+  const [state, setState] = useState<RefreshState>("idle");
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshLock = useRef(false);
+
+  useEffect(() => () => {
+    if (resetTimer.current !== null) clearTimeout(resetTimer.current);
+  }, []);
+
+  async function refresh() {
+    if (disabled || refreshLock.current || state !== "idle") return;
+    refreshLock.current = true;
+    setState("refreshing");
+    try {
+      const result = await onRefresh();
+      const error = refreshResultError(result);
+      if (error) throw error;
+      setState("succeeded");
+      resetTimer.current = setTimeout(() => {
+        refreshLock.current = false;
+        setState("idle");
+      }, successDurationMs);
+    } catch {
+      refreshLock.current = false;
+      setState("idle");
+    }
+  }
+
+  const statusLabel = state === "refreshing" ? "Working..." : state === "succeeded" ? "succeeded" : label;
+  return (
+    <IconButton
+      {...props}
+      label={statusLabel}
+      disabled={disabled || state !== "idle"}
+      data-refresh-state={state}
+      onClick={() => void refresh()}
+    >
+      {state === "succeeded" ? <CircleCheck size={16} /> : <RefreshCw className={state === "refreshing" ? refreshStyles.spinning : undefined} size={16} />}
+    </IconButton>
   );
 }
 

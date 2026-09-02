@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { FileWarning, RefreshCw } from "lucide-react";
+import { FileWarning } from "lucide-react";
 import { useMemo, useState } from "react";
 import { getLogs, getNodes, getSites, type AccessLog } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
@@ -9,7 +9,7 @@ import { EmptyState, ErrorState, LoadingState } from "../../components/data-stat
 import { ListFilters, timeRangeStart, type TimeRange } from "../../components/list-filters";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { IconButton, Panel, StatusBadge } from "../../components/ui";
+import { Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 type ActionFilter = "" | "deny" | "allow";
 
@@ -43,7 +43,7 @@ export default function LogsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="OBSERVE" title="Access logs" description="Recent allow and deny decisions from edge monitors." actions={<IconButton label="Refresh" onClick={() => void logs.refetch()}><RefreshCw size={16} /></IconButton>} />
+      <PageHeader eyebrow="OBSERVE" title="Access logs" description="Recent allow and deny decisions from edge monitors." actions={<RefreshButton label="Refresh" onRefresh={() => logs.refetch()} />} />
       <Panel>
         <div className="table-toolbar">
           <div className="segmented-control" role="group" aria-label={t("Action")}>

@@ -1,14 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { getAlerts, getNodes, getSites, type Alert } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { IconButton, Panel, StatusBadge } from "../../components/ui";
+import { Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 type AlertFilter = "open" | "resolved" | "";
 
@@ -58,9 +57,7 @@ export default function AlertsPage() {
         title="Alerts"
         description="Recent active and resolved conditions from the control plane."
         actions={
-          <IconButton label="Refresh" onClick={() => void alerts.refetch()}>
-            <RefreshCw size={16} />
-          </IconButton>
+          <RefreshButton label="Refresh" onRefresh={() => alerts.refetch()} />
         }
       />
       <Panel>

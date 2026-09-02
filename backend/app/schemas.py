@@ -679,7 +679,7 @@ class AlertOut(BaseModel):
 
 
 class ProbeTaskRequest(BaseModel):
-    target_url: str = Field(default="https://www.google.com/ncr", min_length=1, max_length=2048)
+    target_url: str = Field(default="https://example.com/", min_length=1, max_length=2048)
     outbound_tags: list[str] = Field(default_factory=list, max_length=100)
 
 

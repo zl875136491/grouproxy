@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     proxy_access_port: int = Field(default=80, ge=1, le=65535)
     probe_auto_enabled: bool = True
     probe_interval_seconds: int = Field(default=300, ge=30, le=86_400)
-    probe_target_url: str = "https://www.google.com/ncr"
+    probe_target_url: str = "https://example.com/"
     probe_max_outbounds: int = Field(default=3, ge=1, le=20)
     deny_spike_window_seconds: int = Field(default=300, ge=60, le=3_600)
     deny_spike_baseline_seconds: int = Field(default=3_600, ge=300, le=86_400)

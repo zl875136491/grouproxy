@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +80,29 @@ func TestReadProxyGroupsProjectsOnlySafeFields(t *testing.T) {
 	nodes := group["nodes"].([]any)
 	if len(nodes) != 2 {
 		t.Fatalf("node count = %d, want 2", len(nodes))
+	}
+}
+
+func TestProbeProxyURLUsesCurrentLocalInboundCredentials(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sing-box.json")
+	if err := os.WriteFile(configPath, []byte(`{"inbounds":[{"type":"http","tag":"grouproxy-http","users":[{"username":"monitor","password":"local-secret"}]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyURL, err := (&agent{cfg: config.Config{ListenPort: 18080, SingboxConfig: configPath}}).probeProxyURL()
+	if err != nil {
+		t.Fatalf("probeProxyURL() error = %v", err)
+	}
+	if proxyURL.Host != "127.0.0.1:18080" {
+		t.Fatalf("proxy host = %q", proxyURL.Host)
+	}
+	if proxyURL.User == nil || proxyURL.User.Username() != "monitor" {
+		t.Fatalf("proxy credentials were not loaded")
+	}
+	password, present := proxyURL.User.Password()
+	if !present || password != "local-secret" {
+		t.Fatalf("proxy password was not loaded")
 	}
 }
 

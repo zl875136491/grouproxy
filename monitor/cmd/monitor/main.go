@@ -1086,9 +1086,9 @@ func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
 	started := time.Now()
 	success := false
 	errorClass := ""
-	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", a.cfg.ListenPort))
+	proxyURL, err := a.probeProxyURL()
 	if err != nil {
-		return false, "proxy_url_invalid", time.Since(started).Milliseconds()
+		return false, "proxy_config_unavailable", time.Since(started).Milliseconds()
 	}
 	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
 	httpClient := &http.Client{
@@ -1109,13 +1109,55 @@ func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
 		return false, "connect_error", time.Since(started).Milliseconds()
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		errorClass = "proxy_auth_required"
+	} else if resp.StatusCode >= 500 {
 		errorClass = fmt.Sprintf("http_%d", resp.StatusCode)
 	} else {
 		success = true
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
 	return success, errorClass, time.Since(started).Milliseconds()
+}
+
+// probeProxyURL reads only the local HTTP inbound credentials that sing-box is
+// currently using. This lets monitor-originated checks exercise the same
+// authenticated proxy path as users without sending credentials anywhere.
+func (a *agent) probeProxyURL() (*url.URL, error) {
+	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", a.cfg.ListenPort))
+	if err != nil {
+		return nil, err
+	}
+	configData, err := os.ReadFile(a.cfg.SingboxConfig)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return proxyURL, nil
+		}
+		return nil, err
+	}
+	var configValue struct {
+		Inbounds []struct {
+			Type  string `json:"type"`
+			Tag   string `json:"tag"`
+			Users []struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			} `json:"users"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(configData, &configValue); err != nil {
+		return nil, err
+	}
+	for _, inbound := range configValue.Inbounds {
+		if inbound.Type != "http" || (inbound.Tag != "" && inbound.Tag != "grouproxy-http") {
+			continue
+		}
+		if len(inbound.Users) > 0 && inbound.Users[0].Username != "" && inbound.Users[0].Password != "" {
+			proxyURL.User = url.UserPassword(inbound.Users[0].Username, inbound.Users[0].Password)
+		}
+		break
+	}
+	return proxyURL, nil
 }
 
 func (a *agent) executeProbe(request client.ProbeRequest) {

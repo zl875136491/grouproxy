@@ -6,7 +6,6 @@ import {
   CirclePlus,
   FileUp,
   Play,
-  RefreshCw,
   RotateCcw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -16,21 +15,38 @@ import {
   getNodes,
   getSites,
   getSubscriptions,
+  getTask,
   publishSubscriptionVersion,
   refreshSubscription,
   rollbackSiteSubscription,
   uploadSubscription,
   type SiteSubscription,
   type SubscriptionVersion,
+  type Task,
 } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { shortHash } from "../../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { Button, ConfirmDialog, IconButton, Panel, StatusBadge } from "../../components/ui";
+import { Button, ConfirmDialog, IconButton, Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 type FormMode = "source" | "upload" | null;
+
+function isFinishedRefreshTask(task: Task) {
+  return ["succeeded", "failed", "cancelled", "dead_letter"].includes(task.status);
+}
+
+async function waitForRefreshTask(taskId: string): Promise<Task> {
+  while (true) {
+    const task = await getTask(taskId);
+    if (isFinishedRefreshTask(task)) {
+      if (task.status !== "succeeded") throw new Error(task.error || "subscription_refresh_failed");
+      return task;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+  }
+}
 
 export default function SubscriptionsPage() {
   const { t, formatBytes, formatDate, formatNumber } = usePreferences();
@@ -203,7 +219,7 @@ export default function SubscriptionsPage() {
       <section className="subscription-layout">
         <Panel>
           <div className="panel-heading"><div><span className="panel-kicker">{t("UPSTREAMS")}</span><h2>{t("Sources")}</h2></div><span className="count-label">{formatNumber(sourceItems.length)}</span></div>
-          {sourceItems.length ? <div className="subscription-source-list">{sourceItems.map((source) => <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}><button onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}><span><strong>{source.name}</strong><small>{source.url_hint} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span><StatusBadge status={source.last_refresh_error ? "failed" : source.last_refresh_at ? "current" : "pending"} /></button>{source.refreshable ? <IconButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onClick={() => refresh.mutate(source.id)}><RefreshCw size={16} /></IconButton> : null}</div>)}</div> : <EmptyState title="No subscription sources" detail="Add an HTTP source or import a supported file." />}
+          {sourceItems.length ? <div className="subscription-source-list">{sourceItems.map((source) => <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}><button onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}><span><strong>{source.name}</strong><small>{source.url_hint} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span><StatusBadge status={source.last_refresh_error ? "failed" : source.last_refresh_at ? "current" : "pending"} /></button>{source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}</div>)}</div> : <EmptyState title="No subscription sources" detail="Add an HTTP source or import a supported file." />}
         </Panel>
         <Panel className="subscription-detail-panel">
           {currentVersion ? <VersionDetail version={currentVersion} siteItems={siteItems} deployableSiteIds={deployableSiteIds} selectedSiteIds={selectedSiteIds} onToggleSite={toggleSite} onPublish={() => setPublishTarget(currentVersion)} /> : <EmptyState title="Select a source version" detail="Parsed versions are available after a refresh or file import." />}

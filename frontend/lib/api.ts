@@ -888,6 +888,10 @@ export function getTasks(filters: { status?: string; taskType?: string; since?: 
   return request<Task[]>(`/api/v1/tasks${query.size ? `?${query.toString()}` : ""}`);
 }
 
+export function getTask(taskId: string) {
+  return request<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}`);
+}
+
 export function getLogs(filters: { siteId?: string; nodeId?: string; action?: "allow" | "deny"; since?: string; until?: string; search?: string } = {}) {
   const query = new URLSearchParams();
   if (filters.siteId) query.set("site_id", filters.siteId);

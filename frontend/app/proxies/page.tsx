@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, CircleAlert, Filter, Gauge, RefreshCw, Search, Server, Waypoints, X } from "lucide-react";
+import { ChevronDown, CircleAlert, Filter, Gauge, Search, Server, Waypoints, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   getNodes,
@@ -20,7 +20,7 @@ import { cn } from "../../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { Button, ConfirmDialog, IconButton, Panel, StatusBadge } from "../../components/ui";
+import { Button, ConfirmDialog, IconButton, Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 function endpointStatus(endpoint: ProxyEndpoint): string {
   if (endpoint.alive === false) return "offline";
@@ -433,7 +433,7 @@ export default function ProxiesPage() {
         eyebrow="OPERATE"
         title="Outbound services"
         description="Inspect a site and node, then choose the outbound service that its monitor should apply."
-        actions={<IconButton label={t("Refresh")} onClick={() => void Promise.all([configs.refetch(), nodes.refetch(), sites.refetch()])}><RefreshCw size={16} /></IconButton>}
+        actions={<RefreshButton label="Refresh" onRefresh={() => Promise.all([configs.refetch(), nodes.refetch(), sites.refetch()])} />}
       />
       <Panel className="proxy-toolbar-panel">
         <div className="proxy-switcher-block">

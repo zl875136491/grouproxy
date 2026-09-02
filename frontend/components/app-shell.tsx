@@ -19,7 +19,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Radio,
-  RefreshCw,
   ScrollText,
   ServerCog,
   UsersRound,
@@ -33,7 +32,7 @@ import { clearManagementSession, logoutManagementSession, managementSessionRole,
 import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
 import { PreferencesControls } from "./preferences-controls";
-import { ConfirmDialog, IconButton } from "./ui";
+import { ConfirmDialog, IconButton, RefreshButton } from "./ui";
 
 const sidebarCollapsedStorageKey = "grouproxy.sidebar.collapsed";
 
@@ -215,9 +214,7 @@ export function AppShell({ children }: PropsWithChildren) {
           </div>
           <div className="topbar-actions">
             <PreferencesControls />
-            <IconButton label={t("Refresh workspace")} onClick={() => queryClient.invalidateQueries()}>
-              <RefreshCw size={16} />
-            </IconButton>
+            <RefreshButton label="Refresh workspace" onRefresh={() => queryClient.invalidateQueries()} />
             <IconButton label={t("Sign out")} disabled={signingOut} onClick={() => setSignOutConfirmOpen(true)}>
               <LogOut size={16} />
             </IconButton>
