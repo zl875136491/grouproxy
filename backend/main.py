@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import re
 import secrets
 import socket
 from contextlib import asynccontextmanager
@@ -108,6 +109,7 @@ from app.schemas import (
     ProbeRequestForAgent,
     ProbeTaskRequest,
     ProxyConfigSnapshotOut,
+    ProxySelectionRequest,
     ProxyCredentialOut,
     ProxyCredentialReveal,
     ProxyEndpointSnapshot,
@@ -115,6 +117,7 @@ from app.schemas import (
     RegistrationRequest,
     ReleaseCreate,
     ReleaseOut,
+    SiteNameUpdate,
     SiteOut,
     SiteProxyAuthUpdate,
     SiteSubscriptionOut,
@@ -517,6 +520,20 @@ def _safe_proxy_label(value: Any, limit: int = 255) -> str:
     """Normalize operator-visible labels without retaining arbitrary payloads."""
 
     return " ".join(str(value or "").split())[:limit]
+
+
+def _proxy_selection_group(value: str) -> str:
+    """Allow manual selection only for the selector rendered by Grouproxy.
+
+    Proxy telemetry can contain arbitrary Clash groups such as ``GLOBAL``.
+    They are useful for observation, but the generated sing-box runtime has one
+    controllable selector: ``subscription``. Accepting another group would
+    create a release that cannot be applied as requested.
+    """
+
+    if _safe_proxy_label(value).casefold() != "subscription":
+        raise HTTPException(409, "proxy_group_not_selectable")
+    return "subscription"
 
 
 def _sanitize_proxy_group(group: ProxyGroupSnapshot) -> ProxyGroupSnapshot | None:
@@ -1316,6 +1333,46 @@ async def list_sites(_: str = Depends(require_management)) -> list[SiteOut]:
     return [_site_out(site) for site in await Site.find_all().sort(+Site.slug).to_list()]
 
 
+@app.patch("/api/v1/sites/{site_id}", response_model=SiteOut)
+async def update_site_name(
+    site_id: str,
+    payload: SiteNameUpdate,
+    request: Request,
+    _: str = Depends(require_management),
+) -> SiteOut:
+    """Change the display name of a site without changing its identity.
+
+    Site names are operator-facing metadata.  They must not alter the slug,
+    policy revision, node binding or desired release, so monitors do not need
+    to reload merely because a label was corrected in the console.
+    """
+
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    name = " ".join(payload.name.split())
+    if not name:
+        raise HTTPException(422, "site_name_required")
+    if len(name) > 128:
+        raise HTTPException(422, "site_name_too_long")
+    before = {"name": site.name}
+    if site.name != name:
+        site.name = name
+        await site.save()
+        await append_audit(
+            action="site.rename",
+            target_type="site",
+            target_id=site_id,
+            actor=_actor(),
+            actor_role="admin",
+            request_id=_request_id(request),
+            source_ip=_request_source_ip(request),
+            before=before,
+            after={"name": site.name},
+        )
+    return _site_out(site)
+
+
 @app.post("/api/v1/sites/{site_id}/shutdown", response_model=SiteOut)
 async def set_shutdown(
     site_id: str, request: Request, _: str = Depends(require_management)
@@ -1968,7 +2025,11 @@ async def _create_release_from_draft(
         )
     try:
         release_id, desired_items = await create_desired_release(
-            site=site, nodes=selected, settings=_settings(), created_by=actor
+            site=site,
+            nodes=selected,
+            settings=_settings(),
+            created_by=actor,
+            proxy_selection=(draft.diff.get("proxy_selection") if isinstance(draft.diff, dict) else None),
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -2443,10 +2504,22 @@ async def get_release(release_id: str, _: str = Depends(require_management)) -> 
 
 @app.get("/api/v1/config/releases", response_model=list[ReleaseOut])
 async def list_releases(
-    site_id: str | None = None, limit: int = 100, _: str = Depends(require_management)
+    site_id: str | None = None,
+    status: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 100,
+    _: str = Depends(require_management),
 ) -> list[ReleaseOut]:
     safe_limit = min(max(limit, 1), 250)
     query: dict[str, Any] = {"site_id": site_id} if site_id else {}
+    if status:
+        query["status"] = status
+    if since or until:
+        query["created_at"] = {
+            **({"$gte": since} if since else {}),
+            **({"$lte": until} if until else {}),
+        }
     releases = await (
         ConfigRelease.find(query).sort(-ConfigRelease.created_at).limit(safe_limit).to_list()
     )
@@ -2469,9 +2542,26 @@ async def list_release_acks(
 
 
 @app.get("/api/v1/tasks", response_model=list[TaskOut])
-async def list_tasks(limit: int = 100, _: str = Depends(require_management)) -> list[TaskOut]:
+async def list_tasks(
+    status: str | None = None,
+    task_type: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 100,
+    _: str = Depends(require_management),
+) -> list[TaskOut]:
     safe_limit = min(max(limit, 1), 250)
-    tasks = await Task.find_all().sort(-Task.created_at).limit(safe_limit).to_list()
+    query: dict[str, Any] = {}
+    if status:
+        query["status"] = status
+    if task_type:
+        query["task_type"] = task_type
+    if since or until:
+        query["created_at"] = {
+            **({"$gte": since} if since else {}),
+            **({"$lte": until} if until else {}),
+        }
+    tasks = await Task.find(query).sort(-Task.created_at).limit(safe_limit).to_list()
     return [_task_out(item) for item in tasks]
 
 
@@ -2516,6 +2606,8 @@ async def list_logs(
     node_id: str | None = None,
     action: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    search: str | None = None,
     limit: int = 200,
     _: str = Depends(require_management),
 ) -> list[AccessLogOut]:
@@ -2524,11 +2616,27 @@ async def list_logs(
     if site_id:
         query["site_id"] = site_id
     if node_id:
-        query["node_id"] = node_id
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        query["node_id"] = node.agent_id
     if action in {"allow", "deny"}:
         query["action"] = action
-    if since is not None:
-        query["ts"] = {"$gte": since}
+    if since is not None or until is not None:
+        query["ts"] = {
+            **({"$gte": since} if since is not None else {}),
+            **({"$lte": until} if until is not None else {}),
+        }
+    if search and search.strip():
+        # Search is a literal operator query. Escaping keeps names such as
+        # ``*.example`` from becoming an unbounded MongoDB regular expression.
+        pattern = re.escape(search.strip()[:128])
+        query["$or"] = [
+            {"dst_host": {"$regex": pattern, "$options": "i"}},
+            {"src_ip": {"$regex": pattern, "$options": "i"}},
+            {"username": {"$regex": pattern, "$options": "i"}},
+            {"deny_reason": {"$regex": pattern, "$options": "i"}},
+        ]
     entries = await AccessLog.find(query).sort(-AccessLog.ts).limit(safe_limit).to_list()
     return [_access_log_out(item) for item in entries]
 
@@ -2537,6 +2645,8 @@ async def list_logs(
 async def list_connections(
     site_id: str | None = None,
     node_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int = 100,
     _: str = Depends(require_management),
 ) -> list[ConnectionSnapshotOut]:
@@ -2545,7 +2655,15 @@ async def list_connections(
     if site_id:
         query["site_id"] = site_id
     if node_id:
-        query["node_id"] = node_id
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        query["node_id"] = node.agent_id
+    if since is not None or until is not None:
+        query["sampled_at"] = {
+            **({"$gte": since} if since is not None else {}),
+            **({"$lte": until} if until is not None else {}),
+        }
     entries = await (
         ConnectionSnapshot.find(query)
         .sort(-ConnectionSnapshot.sampled_at)
@@ -2597,14 +2715,147 @@ async def get_node_proxy_config(
     node = await _find_node_reference(node_id)
     if node is None:
         raise HTTPException(404, "node_not_found")
-    snapshot = await (
-        ProxyConfigSnapshot.find(ProxyConfigSnapshot.node_id == node.agent_id)
-        .sort(-ProxyConfigSnapshot.sampled_at)
-        .first_or_none()
-    )
+    snapshot = await _latest_proxy_config(node.agent_id)
     if snapshot is None:
         raise HTTPException(404, "proxy_config_not_found")
     return _proxy_config_out(snapshot)
+
+
+@app.post("/api/v1/nodes/{node_id}/proxy-selection", response_model=ReleaseOut, status_code=202)
+async def select_node_proxy(
+    node_id: str,
+    payload: ProxySelectionRequest,
+    request: Request,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    _: str = Depends(require_management),
+) -> ReleaseOut:
+    """Create a release that changes the selected outbound for one node.
+
+    The control plane only accepts names that the monitor recently reported in
+    its safe proxy projection. It records the choice in a normal draft/release
+    and never calls a node's loopback API itself.
+    """
+
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    group_name = _proxy_selection_group(payload.group)
+    outbound_name = " ".join(payload.outbound.split())
+    request_id = _request_id(request)
+    idempotency_key = (idempotency_key_header or "").strip() or (
+        "proxy-selection:"
+        f"{node.agent_id}:{group_name}:{outbound_name}:"
+        f"{payload.expected_current_version if payload.expected_current_version is not None else 'latest'}"
+    )
+    # Idempotency is checked before creating a draft. A browser retry should
+    # return the existing release and must not leave a second draft behind.
+    existing_task = await Task.find_one(Task.idempotency_key == idempotency_key)
+    if existing_task is not None:
+        existing_release = await ConfigRelease.find_one(
+            ConfigRelease.task_id == existing_task.task_id
+        )
+        if existing_release is not None:
+            return _release_out(existing_release)
+        raise HTTPException(409, "release_idempotency_incomplete")
+    snapshot = await _latest_proxy_config(node.agent_id)
+    if snapshot is None:
+        raise HTTPException(409, "proxy_snapshot_not_found")
+    selected_group: ProxyGroupSnapshot | None = None
+    for raw_group in snapshot.groups:
+        try:
+            group = ProxyGroupSnapshot.model_validate(raw_group)
+        except Exception:
+            continue
+        if group.name == group_name:
+            selected_group = group
+            break
+    if selected_group is None:
+        raise HTTPException(409, "proxy_group_not_found")
+    if outbound_name not in selected_group.all:
+        raise HTTPException(409, "proxy_outbound_not_found")
+    if not selected_group.all:
+        raise HTTPException(409, "proxy_group_not_selectable")
+    site = await Site.get(node.site_id)
+    if site is None:
+        raise HTTPException(409, "site_not_found")
+    cidrs, sources = await effective_cidrs(node.site_id)
+    draft = ConfigDraft(
+        site_id=node.site_id,
+        node_ids=[_model_id(node)],
+        source_revision=site.config_revision,
+        diff={
+            "proxy_selection": {
+                "node_id": node.agent_id,
+                "group": group_name,
+                "outbound": outbound_name,
+                "from": selected_group.now or None,
+            },
+            "note": payload.note,
+        },
+        validation={
+            "valid": True,
+            "errors": [],
+            "effective_cidrs": cidrs,
+            "acl_sources": sources,
+            "proxy_selection": {
+                "group": group_name,
+                "outbound": outbound_name,
+                "snapshot_at": snapshot.sampled_at.isoformat(),
+            },
+        },
+        risk_level="medium",
+        created_by=_actor(),
+        expires_at=utcnow() + timedelta(hours=24),
+    )
+    await draft.insert()
+    try:
+        release, reused = await _create_release_from_draft(
+            draft=draft,
+            site=site,
+            requested_node_ids=[_model_id(node)],
+            expected_current_version=payload.expected_current_version,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+            actor=_actor(),
+        )
+    except Exception:
+        draft.status = "expired"
+        draft.updated_at = utcnow()
+        await draft.save()
+        raise
+    if reused:
+        # A concurrent request won the idempotency race after the pre-check.
+        # Retire this temporary draft so the operator only sees the real one.
+        draft.status = "expired"
+        draft.updated_at = utcnow()
+        await draft.save()
+        return _release_out(release)
+    await append_audit(
+        action="proxy_selection.update",
+        target_type="node",
+        target_id=node.agent_id,
+        actor=_actor(),
+        actor_role="admin",
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        after={
+            "site_id": node.site_id,
+            "group": group_name,
+            "outbound": outbound_name,
+            "release_id": release.release_id,
+        },
+    )
+    return _release_out(release)
+
+
+async def _latest_proxy_config(node_id: str) -> ProxyConfigSnapshot | None:
+    """Read the most recent safe proxy snapshot for a monitor identity."""
+
+    return await (
+        ProxyConfigSnapshot.find(ProxyConfigSnapshot.node_id == node_id)
+        .sort(-ProxyConfigSnapshot.sampled_at)
+        .first_or_none()
+    )
 
 
 @app.get("/api/v1/nodes/{node_id}/probes")
@@ -3123,9 +3374,26 @@ async def audit_verify(_: str = Depends(require_management)) -> dict[str, Any]:
 
 
 @app.get("/api/v1/audit", response_model=list[AuditEventOut])
-async def list_audit(limit: int = 200, _: str = Depends(require_management)) -> list[AuditEventOut]:
+async def list_audit(
+    action: str | None = None,
+    actor: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 200,
+    _: str = Depends(require_management),
+) -> list[AuditEventOut]:
     safe_limit = min(max(limit, 1), 500)
-    events = await AuditEvent.find_all().sort(-AuditEvent.at).limit(safe_limit).to_list()
+    query: dict[str, Any] = {}
+    if action:
+        query["action"] = action[:128]
+    if actor:
+        query["actor"] = actor[:128]
+    if since is not None or until is not None:
+        query["at"] = {
+            **({"$gte": since} if since is not None else {}),
+            **({"$lte": until} if until is not None else {}),
+        }
+    events = await AuditEvent.find(query).sort(-AuditEvent.at).limit(safe_limit).to_list()
     return [_audit_out(item) for item in events]
 
 

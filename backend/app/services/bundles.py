@@ -67,6 +67,7 @@ async def build_signed_bundle(
     desired_version: int,
     release_id: str,
     settings: Settings,
+    proxy_selection: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     allow_cidrs, sources = await effective_cidrs(str(site.id))
     blacklist = await DestinationBlacklist.find(
@@ -96,6 +97,13 @@ async def build_signed_bundle(
         "issued_at": iso(now),
         "expires_at": iso(now + timedelta(days=settings.bundle_ttl_days)),
     }
+    if proxy_selection:
+        # The selection is metadata for the monitor's generated selector. It
+        # never contains endpoint credentials or a user supplied URL.
+        bundle["proxy_selection"] = {
+            "group": str(proxy_selection.get("group", "subscription"))[:255],
+            "outbound": str(proxy_selection.get("outbound", ""))[:255],
+        }
     return sign_bundle(bundle, settings.bundle_hmac_secret)
 
 
@@ -106,6 +114,7 @@ async def create_desired_release(
     settings: Settings,
     created_by: str,
     previous_release_id: str | None = None,
+    proxy_selection: dict[str, str] | None = None,
 ) -> tuple[str, list[DesiredRelease]]:
     release_id = str(uuid4())
     previous = await latest_release(str(site.id))
@@ -120,6 +129,11 @@ async def create_desired_release(
             desired_version=desired_version,
             release_id=release_id,
             settings=settings,
+            proxy_selection=(
+                proxy_selection
+                if proxy_selection and proxy_selection.get("node_id") in {None, node.agent_id}
+                else None
+            ),
         )
         item = DesiredRelease(
             release_id=release_id,

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -67,6 +67,17 @@ class SiteOut(BaseModel):
 
 class SiteProxyAuthUpdate(BaseModel):
     required: bool
+
+
+class SiteNameUpdate(BaseModel):
+    """Update only the operator-facing site label.
+
+    The slug, network policy, listener and release revision are intentionally
+    outside this payload.  Renaming a site is presentation metadata and does
+    not require a node rollout.
+    """
+
+    name: str = Field(min_length=1, max_length=128)
 
 
 class ProxyCredentialOut(BaseModel):
@@ -284,6 +295,15 @@ class DraftCreate(BaseModel):
     node_ids: list[str] = Field(default_factory=list)
     diff: dict[str, Any] = Field(default_factory=dict)
     note: str = ""
+
+
+class ProxySelectionRequest(BaseModel):
+    """Select an already reported outbound for one node's selector."""
+
+    group: str = Field(default="subscription", min_length=1, max_length=255)
+    outbound: str = Field(min_length=1, max_length=255)
+    expected_current_version: int | None = None
+    note: str = Field(default="", max_length=500)
 
 
 class DraftOut(BaseModel):
@@ -524,6 +544,14 @@ class AgentProxyConfigBatch(BaseModel):
     api_available: bool = False
     groups: list[ProxyGroupSnapshot] = Field(default_factory=list, max_length=100)
     error: str = Field(default="", max_length=256)
+
+    @field_validator("groups", mode="before")
+    @classmethod
+    def normalize_legacy_null_groups(cls, value: Any) -> Any:
+        # Older monitors encoded an unavailable local API as ``groups: null``.
+        # Keep the wire contract array-shaped internally while allowing their
+        # persisted telemetry spool to be replayed after an upgrade.
+        return [] if value is None else value
 
 
 class ProbeResultIn(BaseModel):

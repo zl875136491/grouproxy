@@ -55,6 +55,74 @@ def test_proxy_projection_contains_only_safe_group_metadata() -> None:
     assert "password" not in projected.model_dump()
 
 
+def test_proxy_config_batch_normalizes_legacy_null_groups() -> None:
+    payload = AgentProxyConfigBatch.model_validate(
+        {
+            "node_id": "codedev",
+            "batch_id": "proxy-config-legacy",
+            "sequence": 1,
+            "sampled_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+            "api_available": False,
+            "groups": None,
+            "error": "clash_api_unavailable",
+        }
+    )
+
+    assert payload.groups == []
+
+
+@pytest.mark.asyncio
+async def test_latest_proxy_config_queries_the_most_recent_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = SimpleNamespace(node_id="codedev")
+
+    class SnapshotField:
+        def __eq__(self, _: object) -> "SnapshotField":  # type: ignore[override]
+            return self
+
+        def __neg__(self) -> "SnapshotField":
+            return self
+
+    class Query:
+        def __init__(self) -> None:
+            self.sort_called = False
+
+        def sort(self, _: object) -> "Query":
+            self.sort_called = True
+            return self
+
+        async def first_or_none(self) -> object:
+            return snapshot
+
+    query = Query()
+
+    class SnapshotModel:
+        node_id = SnapshotField()
+        sampled_at = SnapshotField()
+
+        @classmethod
+        def find(cls, _: object) -> Query:
+            return query
+
+    monkeypatch.setattr(main_module, "ProxyConfigSnapshot", SnapshotModel)
+
+    result = await main_module._latest_proxy_config("codedev")
+
+    assert result is snapshot
+    assert query.sort_called is True
+
+
+def test_proxy_selection_allows_only_the_rendered_subscription_selector() -> None:
+    assert main_module._proxy_selection_group(" subscription ") == "subscription"
+
+    with pytest.raises(HTTPException) as exc_info:
+        main_module._proxy_selection_group("GLOBAL")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "proxy_group_not_selectable"
+
+
 def test_proxy_output_sanitizes_legacy_raw_snapshot() -> None:
     now = datetime(2026, 9, 1, tzinfo=timezone.utc)
     snapshot = SimpleNamespace(
