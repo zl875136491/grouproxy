@@ -38,7 +38,10 @@ curl -fsS -X POST "$BACKEND_URL/api/v1/auth/register" \
 password_login="$(curl -fsS -X POST "$BACKEND_URL/api/v1/auth/login" -H 'Content-Type: application/json' -d "$(jq -nc --arg itcode "$ITCODE" --arg password "$INITIAL_PASSWORD" '{itcode:$itcode,password:$password}')")"
 password_token="$(jq -r '.access_token' <<<"$password_login")"
 [[ -n "$password_token" && "$password_token" != "null" ]]
-curl -fsS -H "Authorization: Bearer $password_token" "$BACKEND_URL/api/v1/sites" | jq -e 'type == "array"' >/dev/null
+curl -fsS -H "Authorization: Bearer $password_token" "$BACKEND_URL/api/v1/access/config" \
+  | jq -e '.protocol == "http-connect"' >/dev/null
+employee_management_status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $password_token" "$BACKEND_URL/api/v1/sites")"
+[[ "$employee_management_status" == "403" ]]
 
 gquan_challenge="$(request_code gquan_login)"
 gquan_login="$(curl -fsS -X POST "$BACKEND_URL/api/v1/auth/gquan/login" -H 'Content-Type: application/json' -d "$(jq -nc --arg itcode "$ITCODE" --arg challenge "$gquan_challenge" --arg code "$AUTH_CODE" '{itcode:$itcode,challenge_id:$challenge,verification_code:$code}')")"

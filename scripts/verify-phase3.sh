@@ -79,5 +79,5 @@ grep -q -- '--uninstall' <<<"$linux_setup_script"
 grep -q 'gsettings set org.gnome.system.proxy mode manual' <<<"$linux_setup_script"
 grep -q 'kwriteconfig' <<<"$linux_setup_script"
 
-curl -fsS "$FRONTEND_URL${DASHBOARD_BASE_PATH}/alerts" | grep -q 'grouproxy'
+curl -fsS "$FRONTEND_URL${DASHBOARD_BASE_PATH}/alerts" | grep -qi 'grouproxy'
 printf 'Phase 3 local observability and access validation passed.\n'
