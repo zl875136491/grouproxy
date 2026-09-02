@@ -1,6 +1,6 @@
 "use client";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { keepPreviousData, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type PropsWithChildren } from "react";
 import { PreferencesProvider } from "../lib/preferences";
 
@@ -13,6 +13,7 @@ export function Providers({ children }: PropsWithChildren) {
             retry: 1,
             refetchOnWindowFocus: false,
             staleTime: 5_000,
+            placeholderData: keepPreviousData,
           },
         },
       }),
