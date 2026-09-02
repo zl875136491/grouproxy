@@ -21,11 +21,13 @@ fingerprint values. The control plane continues to own ACLs, routes, direct /
 block outbounds, and selectors.
 
 The monitor also samples its loopback Clash `/proxies` endpoint and posts a
-bounded proxy-group snapshot to `/agent/v1/proxy-config`. Only group names,
-selection state, protocol flags, and latency history are included; endpoint
-servers, credentials, and subscription bytes are never sent to the control
-plane. The snapshot is best-effort and uses the same local telemetry spool as
-logs and connection summaries.
+bounded proxy-group snapshot to `/agent/v1/proxy-config`. It actively measures
+the selectable upstreams through Clash's loopback `/delay` endpoint on a
+separate, rate-limited interval, without switching the operator's selected
+outbound. Only group names, selection state, protocol flags, and latency
+history are included; endpoint servers, credentials, and subscription bytes
+are never sent to the control plane. The snapshot is best-effort and uses the
+same local telemetry spool as logs and connection summaries.
 
 Health checks inspect Linux listener state through `/proc` before falling back
 to a TCP dial on other platforms. This avoids filling sing-box logs with empty

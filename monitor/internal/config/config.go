@@ -33,6 +33,7 @@ type Config struct {
 	TelemetryBatchMax          int    `yaml:"telemetry_batch_max"`
 	ProbeMaxOutbounds          int    `yaml:"probe_max_outbounds"`
 	ProxyConfigIntervalSeconds int    `yaml:"proxy_config_interval_seconds"`
+	ProxyDelayIntervalSeconds  int    `yaml:"proxy_delay_interval_seconds"`
 }
 
 func (c *Config) Defaults() {
@@ -83,6 +84,9 @@ func (c *Config) Defaults() {
 	}
 	if c.ProxyConfigIntervalSeconds <= 0 {
 		c.ProxyConfigIntervalSeconds = 15
+	}
+	if c.ProxyDelayIntervalSeconds <= 0 {
+		c.ProxyDelayIntervalSeconds = 60
 	}
 }
 

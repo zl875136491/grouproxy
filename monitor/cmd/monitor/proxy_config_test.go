@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,6 +78,63 @@ func TestReadProxyGroupsProjectsOnlySafeFields(t *testing.T) {
 	nodes := group["nodes"].([]any)
 	if len(nodes) != 2 {
 		t.Fatalf("node count = %d, want 2", len(nodes))
+	}
+}
+
+func TestReadProxyGroupsCollectsDelaysForSelectableEndpoints(t *testing.T) {
+	delayCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/proxies":
+			writeProxyResponse(t, writer, map[string]any{
+				"proxies": map[string]any{
+					"subscription": map[string]any{
+						"name": "subscription", "type": "Selector", "all": []string{"edge a", "edge b", "direct"},
+					},
+					"edge a": map[string]any{"type": "Trojan"},
+					"edge b": map[string]any{"type": "Trojan"},
+					"direct": map[string]any{"type": "Direct"},
+				},
+			})
+		case "/proxies/edge a/delay":
+			delayCalls++
+			if got := request.URL.Query().Get("url"); got != proxyDelayTargetURL {
+				t.Fatalf("delay URL = %q", got)
+			}
+			if got := request.URL.Query().Get("timeout"); got != strconv.Itoa(proxyDelayTimeoutMilliseconds) {
+				t.Fatalf("delay timeout = %q", got)
+			}
+			writeProxyResponse(t, writer, map[string]any{"delay": 47})
+		case "/proxies/edge b/delay":
+			delayCalls++
+			writer.WriteHeader(http.StatusGatewayTimeout)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	agent := proxyConfigTestAgent(server.URL)
+	agent.cfg.ProxyDelayIntervalSeconds = 60
+	groups, err := agent.readProxyGroups()
+	if err != nil {
+		t.Fatalf("readProxyGroups() error = %v", err)
+	}
+	if delayCalls != 2 {
+		t.Fatalf("delay calls = %d, want 2", delayCalls)
+	}
+	nodes := groups[0].(map[string]any)["nodes"].([]any)
+	endpoint := nodes[0].(map[string]any)
+	if endpoint["name"] != "edge a" || endpoint["delay_ms"] != 47 {
+		t.Fatalf("endpoint projection = %#v", endpoint)
+	}
+	history := endpoint["history"].([]any)
+	if len(history) != 1 || history[0].(map[string]any)["delay_ms"] != 47 {
+		t.Fatalf("endpoint history = %#v", history)
+	}
+	failed := nodes[1].(map[string]any)
+	if failed["name"] != "edge b" || failed["alive"] != false || failed["delay_ms"] != nil {
+		t.Fatalf("failed endpoint projection = %#v", failed)
 	}
 }
 

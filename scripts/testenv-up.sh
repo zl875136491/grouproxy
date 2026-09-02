@@ -254,6 +254,7 @@ firewall_mode: $firewall_mode
 poll_interval_seconds: 2
 heartbeat_interval_seconds: 2
 proxy_config_interval_seconds: 2
+proxy_delay_interval_seconds: 5
 run_singbox: true
 hmac_secret: "${GROUPROXY_BUNDLE_HMAC_SECRET}"
 allow_insecure_http: true

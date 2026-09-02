@@ -32,7 +32,13 @@ import (
 	"github.com/zl875136491/grouproxy/monitor/internal/subscription"
 )
 
-const monitorVersion = "0.3.0"
+const (
+	monitorVersion                = "0.3.0"
+	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
+	proxyDelayTimeoutMilliseconds = 5_000
+	proxyDelayConcurrency         = 6
+	maxProxyDelayTargets          = 500
+)
 
 type agent struct {
 	cfg               config.Config
@@ -45,6 +51,7 @@ type agent struct {
 	probeMu           sync.Mutex
 	proxyConfigMu     sync.Mutex
 	lastProxyConfigAt time.Time
+	lastProxyDelayAt  time.Time
 	// syncError only represents the latest inability to reach the control plane.
 	// Configuration failures are persisted in state.LastError and reported on the
 	// configuration dimension without making a healthy monitor look offline.
@@ -557,17 +564,19 @@ func (a *agent) collectConnections() {
 // Clash API. The API is deliberately loopback-only; the control plane never
 // reaches into a node or receives raw proxy endpoint credentials.
 func (a *agent) collectProxyConfig() {
+	if !a.proxyConfigMu.TryLock() {
+		return
+	}
+	defer a.proxyConfigMu.Unlock()
+
 	now := time.Now().UTC()
 	interval := time.Duration(a.cfg.ProxyConfigIntervalSeconds) * time.Second
-	a.proxyConfigMu.Lock()
 	if interval > 0 && !a.lastProxyConfigAt.IsZero() && now.Sub(a.lastProxyConfigAt) < interval {
-		a.proxyConfigMu.Unlock()
 		return
 	}
 	a.lastProxyConfigAt = now
-	a.proxyConfigMu.Unlock()
 
-	groups, err := a.readProxyGroups()
+	groups, err := a.readProxyGroupsAt(now)
 	// The control-plane contract expects an array even when the local API is
 	// unavailable. A nil slice would marshal as JSON null and be rejected
 	// before the monitor can record the availability failure.
@@ -599,6 +608,10 @@ func proxyConfigGroups(groups []any) []any {
 }
 
 func (a *agent) readProxyGroups() ([]any, error) {
+	return a.readProxyGroupsAt(time.Now().UTC())
+}
+
+func (a *agent) readProxyGroupsAt(now time.Time) ([]any, error) {
 	var response struct {
 		Proxies map[string]json.RawMessage `json:"proxies"`
 	}
@@ -631,6 +644,7 @@ func (a *agent) readProxyGroups() ([]any, error) {
 		keys = append(keys, key)
 		metadata[key] = value
 	}
+	a.collectProxyDelays(metadata, now)
 	sort.Strings(keys)
 	groups := make([]any, 0, len(keys))
 	hasSubscriptionSelector := false
@@ -669,6 +683,107 @@ func (a *agent) readProxyGroups() ([]any, error) {
 		return nil, errors.New("clash_api_invalid_response")
 	}
 	return groups, nil
+}
+
+type proxyDelayResult struct {
+	name  string
+	delay int
+	err   error
+}
+
+func (a *agent) collectProxyDelays(metadata map[string]map[string]any, now time.Time) {
+	interval := time.Duration(a.cfg.ProxyDelayIntervalSeconds) * time.Second
+	if interval <= 0 || (!a.lastProxyDelayAt.IsZero() && now.Sub(a.lastProxyDelayAt) < interval) {
+		return
+	}
+	a.lastProxyDelayAt = now
+	targets := proxyDelayTargets(metadata)
+	if len(targets) == 0 {
+		return
+	}
+
+	jobs := make(chan string)
+	results := make(chan proxyDelayResult, len(targets))
+	workers := minInt(len(targets), proxyDelayConcurrency)
+	var workersDone sync.WaitGroup
+	workersDone.Add(workers)
+	for range workers {
+		go func() {
+			defer workersDone.Done()
+			for name := range jobs {
+				delay, err := a.proxyDelay(name)
+				results <- proxyDelayResult{name: name, delay: delay, err: err}
+			}
+		}()
+	}
+	for _, name := range targets {
+		jobs <- name
+	}
+	close(jobs)
+	workersDone.Wait()
+	close(results)
+
+	for result := range results {
+		endpoint := metadata[result.name]
+		if endpoint == nil {
+			continue
+		}
+		if result.err != nil {
+			// A per-outbound /delay failure means this particular path could
+			// not reach the probe target. Keep any earlier latency evidence,
+			// but make the current failure visible instead of looking pending.
+			endpoint["alive"] = false
+			continue
+		}
+		recordProxyDelay(endpoint, result.delay, now)
+	}
+}
+
+func proxyDelayTargets(metadata map[string]map[string]any) []string {
+	candidates := make(map[string]struct{})
+	for _, value := range metadata {
+		for _, name := range append(stringSlice(value["all"]), stringSlice(value["outbounds"])...) {
+			endpoint := metadata[name]
+			if endpoint == nil || !isDelayProbeable(endpoint) {
+				continue
+			}
+			candidates[name] = struct{}{}
+		}
+	}
+	targets := make([]string, 0, minInt(len(candidates), maxProxyDelayTargets))
+	for name := range candidates {
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	if len(targets) > maxProxyDelayTargets {
+		return targets[:maxProxyDelayTargets]
+	}
+	return targets
+}
+
+func isDelayProbeable(value map[string]any) bool {
+	switch strings.ToLower(strings.ReplaceAll(safeProxyType(stringValue(value["type"])), "-", "")) {
+	case "", "direct", "reject", "block", "selector", "urltest", "fallback", "loadbalance", "relay", "dns":
+		return false
+	default:
+		return true
+	}
+}
+
+func recordProxyDelay(value map[string]any, delay int, at time.Time) {
+	if delay < 0 || delay > 300000 {
+		return
+	}
+	history, _ := value["history"].([]any)
+	history = append(history, map[string]any{
+		"delay": delay,
+		"time":  at.UTC().Format(time.RFC3339Nano),
+	})
+	if len(history) > 20 {
+		history = history[len(history)-20:]
+	}
+	value["delay"] = delay
+	value["history"] = history
 }
 
 func (a *agent) subscriptionSelectorProjection(metadata map[string]map[string]any) ([]any, error) {
@@ -829,6 +944,10 @@ func proxyConfigError(err error) string {
 }
 
 func (a *agent) clashAPIRequest(method, path string, body any, out any) error {
+	return a.clashAPIRequestWithTimeout(method, path, body, out, 800*time.Millisecond)
+}
+
+func (a *agent) clashAPIRequestWithTimeout(method, path string, body any, out any, timeout time.Duration) error {
 	endpoint := "http://" + a.cfg.ClashAPIListen + path
 	var reader io.Reader
 	if body != nil {
@@ -846,7 +965,7 @@ func (a *agent) clashAPIRequest(method, path string, body any, out any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Timeout: 800 * time.Millisecond}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -865,6 +984,29 @@ func (a *agent) clashAPIRequest(method, path string, body any, out any) error {
 		}
 	}
 	return nil
+}
+
+func (a *agent) proxyDelay(name string) (int, error) {
+	query := url.Values{}
+	query.Set("url", proxyDelayTargetURL)
+	query.Set("timeout", strconv.Itoa(proxyDelayTimeoutMilliseconds))
+	var response struct {
+		Delay int `json:"delay"`
+	}
+	err := a.clashAPIRequestWithTimeout(
+		http.MethodGet,
+		"/proxies/"+url.PathEscape(name)+"/delay?"+query.Encode(),
+		nil,
+		&response,
+		time.Duration(proxyDelayTimeoutMilliseconds+1_000)*time.Millisecond,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if response.Delay < 0 || response.Delay > 300000 {
+		return 0, errors.New("clash_api_invalid_delay")
+	}
+	return response.Delay, nil
 }
 
 func (a *agent) readSubscriptionSelector() (clashSelector, error) {

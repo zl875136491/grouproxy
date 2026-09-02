@@ -685,10 +685,10 @@ export function getNodeProxyConfig(nodeId: string) {
 export function selectNodeProxy(nodeId: string, value: ProxySelectionRequest) {
   const idempotencyKey = [
     "proxy-selection",
-    nodeId,
-    value.group.trim(),
-    value.outbound.trim(),
-    value.expected_current_version ?? "latest",
+    encodeURIComponent(nodeId),
+    encodeURIComponent(value.group.trim()),
+    encodeURIComponent(value.outbound.trim()),
+    encodeURIComponent(String(value.expected_current_version ?? "latest")),
   ].join(":");
   return request<Release>(
     `/api/v1/nodes/${encodeURIComponent(nodeId)}/proxy-selection`,
