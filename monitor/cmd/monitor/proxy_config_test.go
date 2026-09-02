@@ -108,6 +108,34 @@ func TestReadProxyGroupsFallsBackToSubscriptionSelector(t *testing.T) {
 	}
 }
 
+func TestReadProxyGroupsAddsSubscriptionSelectorBesideObservedGroups(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/proxies":
+			writeProxyResponse(t, writer, map[string]any{
+				"proxies": map[string]any{
+					"GLOBAL": map[string]any{"type": "Fallback", "name": "GLOBAL", "now": "edge-a", "all": []string{"edge-a"}},
+				},
+			})
+		case "/proxies/subscription":
+			writeProxyResponse(t, writer, map[string]any{
+				"type": "Selector", "name": "subscription", "now": "edge-a", "all": []string{"edge-a"},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	groups, err := proxyConfigTestAgent(server.URL).readProxyGroups()
+	if err != nil {
+		t.Fatalf("readProxyGroups() error = %v", err)
+	}
+	if len(groups) != 2 || groups[1].(map[string]any)["name"] != "subscription" {
+		t.Fatalf("groups = %#v, want observed group plus subscription selector", groups)
+	}
+}
+
 func TestReadProxyGroupsFallsBackWhenProxyCollectionEndpointIsMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -181,5 +209,52 @@ func TestProxyConfigErrorClassifiesAvailability(t *testing.T) {
 	}
 	if got := proxyConfigError(errors.New("connection refused")); got != "clash_api_unavailable" {
 		t.Fatalf("unavailable error = %q", got)
+	}
+}
+
+func TestProxyConfigGroupsMarshalAsArrayWhenUnavailable(t *testing.T) {
+	payload := map[string]any{"groups": proxyConfigGroups(nil)}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["groups"].([]any); !ok {
+		t.Fatalf("groups must marshal as an array, got %#v", decoded["groups"])
+	}
+}
+
+func TestSelectedSubscriptionOutboundUsesControlPlaneChoice(t *testing.T) {
+	value := map[string]any{
+		"proxy_selection": map[string]any{
+			"group":    "subscription",
+			"outbound": "edge-b",
+		},
+	}
+	if got := selectedSubscriptionOutbound(value, []string{"edge-a", "edge-b"}); got != "edge-b" {
+		t.Fatalf("selected outbound = %q, want edge-b", got)
+	}
+	if got := selectedSubscriptionOutbound(map[string]any{}, []string{"edge-a", "edge-b"}); got != "edge-a" {
+		t.Fatalf("fallback outbound = %q, want edge-a", got)
+	}
+}
+
+func TestValidateProxySelectionRejectsUnmappableChoice(t *testing.T) {
+	if err := validateProxySelection(map[string]any{
+		"proxy_selection": map[string]any{"group": "subscription", "outbound": "edge-b"},
+	}, []string{"edge-a", "edge-b"}); err != nil {
+		t.Fatalf("valid selection rejected: %v", err)
+	}
+
+	for _, value := range []map[string]any{
+		{"proxy_selection": map[string]any{"group": "GLOBAL", "outbound": "edge-a"}},
+		{"proxy_selection": map[string]any{"group": "subscription", "outbound": "missing"}},
+	} {
+		if err := validateProxySelection(value, []string{"edge-a"}); err == nil {
+			t.Fatalf("invalid selection accepted: %#v", value)
+		}
 	}
 }

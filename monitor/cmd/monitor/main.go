@@ -568,6 +568,10 @@ func (a *agent) collectProxyConfig() {
 	a.proxyConfigMu.Unlock()
 
 	groups, err := a.readProxyGroups()
+	// The control-plane contract expects an array even when the local API is
+	// unavailable. A nil slice would marshal as JSON null and be rejected
+	// before the monitor can record the availability failure.
+	groups = proxyConfigGroups(groups)
 	payload := map[string]any{
 		"node_id":       a.cfg.NodeID,
 		"batch_id":      "",
@@ -585,6 +589,13 @@ func (a *agent) collectProxyConfig() {
 			a.log.Printf("proxy config telemetry dropped: %v", spoolErr)
 		}
 	}
+}
+
+func proxyConfigGroups(groups []any) []any {
+	if groups == nil {
+		return []any{}
+	}
+	return groups
 }
 
 func (a *agent) readProxyGroups() ([]any, error) {
@@ -622,6 +633,7 @@ func (a *agent) readProxyGroups() ([]any, error) {
 	}
 	sort.Strings(keys)
 	groups := make([]any, 0, len(keys))
+	hasSubscriptionSelector := false
 	for _, key := range keys {
 		value := metadata[key]
 		all := safeProxyNames(stringSlice(value["all"]))
@@ -632,24 +644,29 @@ func (a *agent) readProxyGroups() ([]any, error) {
 		if len(all) == 0 {
 			continue
 		}
-		groups = append(groups, proxyGroupProjection(key, value, all, metadata))
+		projected := proxyGroupProjection(key, value, all, metadata)
+		if strings.EqualFold(stringValue(projected["name"]), "subscription") {
+			hasSubscriptionSelector = true
+		}
+		groups = append(groups, projected)
 	}
 
-	// The subscription selector endpoint is retained as a compatibility
-	// fallback for older experimental APIs that do not expose /proxies.
-	if len(groups) == 0 {
+	// Always project the Grouproxy selector when it is available. Other Clash
+	// groups are useful telemetry, but only this selector maps to a desired
+	// bundle choice and should therefore be visible to the operator as a real
+	// outbound service list.
+	if !hasSubscriptionSelector {
 		fallback, selectorErr := a.subscriptionSelectorProjection(metadata)
-		if len(response.Proxies) > 0 && len(metadata) == 0 {
-			return nil, errors.New("clash_api_invalid_response")
-		}
 		if selectorErr == nil && len(fallback) > 0 {
 			groups = append(groups, fallback...)
-		} else if len(metadata) == 0 {
-			// A non-empty but undecodable response is malformed.  A valid API
-			// response containing only direct/block entries, however, is a
-			// legitimate empty selectable-group view and should remain online.
-			return nil, errors.New("clash_api_invalid_response")
+			hasSubscriptionSelector = true
 		}
+	}
+	if len(groups) == 0 && len(response.Proxies) > 0 && len(metadata) == 0 {
+		// A non-empty but undecodable response is malformed. A valid API
+		// response containing only direct/block entries remains an online,
+		// non-selectable view.
+		return nil, errors.New("clash_api_invalid_response")
 	}
 	return groups, nil
 }
@@ -1100,6 +1117,9 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err != nil {
 		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
 	}
+	if err := validateProxySelection(value, subscriptionOutboundTags(subscriptionOutbounds)); err != nil {
+		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
+	}
 	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
 		return a.ackFailure(value, "routing_data_write_failed", err.Error(), false, false, false, false)
 	}
@@ -1372,6 +1392,9 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	}
 	outbounds, _, _, _, err := a.resolveSubscription(lastGood)
 	if err != nil {
+		return "", err
+	}
+	if err := validateProxySelection(lastGood, subscriptionOutboundTags(outbounds)); err != nil {
 		return "", err
 	}
 	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds, a.cfg.ListenAddressOverride)
@@ -1727,7 +1750,7 @@ func renderSingbox(
 				"type":      "selector",
 				"tag":       "subscription",
 				"outbounds": tags,
-				"default":   tags[0],
+				"default":   selectedSubscriptionOutbound(value, tags),
 			})
 			finalOutbound = "subscription"
 		}
@@ -1747,6 +1770,74 @@ func renderSingbox(
 			},
 		},
 	}
+}
+
+func subscriptionOutboundTags(outbounds []any) []string {
+	tags := make([]string, 0, len(outbounds))
+	seen := make(map[string]struct{}, len(outbounds))
+	for _, raw := range outbounds {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag := strings.TrimSpace(stringValue(entry["tag"]))
+		if tag == "" {
+			continue
+		}
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		seen[tag] = struct{}{}
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+func validateProxySelection(value map[string]any, tags []string) error {
+	raw, exists := value["proxy_selection"]
+	if !exists || raw == nil {
+		return nil
+	}
+	selection, ok := raw.(map[string]any)
+	if !ok {
+		return errors.New("invalid_proxy_selection")
+	}
+	if strings.TrimSpace(stringValue(selection["group"])) != "subscription" {
+		return errors.New("proxy_group_not_selectable")
+	}
+	wanted := strings.TrimSpace(stringValue(selection["outbound"]))
+	if wanted == "" {
+		return errors.New("proxy_outbound_not_found")
+	}
+	for _, tag := range tags {
+		if tag == wanted {
+			return nil
+		}
+	}
+	return errors.New("proxy_outbound_not_found")
+}
+
+// selectedSubscriptionOutbound converts the control-plane's safe selector
+// choice into the selector default. applyBundle validates a requested choice
+// against the current parsed subscription before this renderer is reached.
+func selectedSubscriptionOutbound(value map[string]any, tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	raw, ok := value["proxy_selection"].(map[string]any)
+	if !ok {
+		return tags[0]
+	}
+	if strings.TrimSpace(stringValue(raw["group"])) != "subscription" {
+		return tags[0]
+	}
+	wanted := strings.TrimSpace(stringValue(raw["outbound"]))
+	for _, tag := range tags {
+		if tag == wanted {
+			return tag
+		}
+	}
+	return tags[0]
 }
 
 func proxyAuthUsers(value map[string]any) []any {
