@@ -31,8 +31,8 @@ export function SessionGate() {
   const { t } = usePreferences();
   return (
     <div className="session-gate">
-      <LockKeyhole size={22} aria-hidden="true" />
-      <div>
+      <div className="session-gate-icon"><LockKeyhole size={25} aria-hidden="true" /></div>
+      <div className="session-gate-copy">
         <h1>{t("Sign in required")}</h1>
         <p>{t("Use a control-plane administrator account to load operational data.")}</p>
       </div>

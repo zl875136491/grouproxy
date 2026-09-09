@@ -416,10 +416,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .error-state strong, .empty-state strong { color: var(--gp-ink); }
 .error-state span, .empty-state span { color: var(--gp-steel); font-size: 13px; }
 .empty-state { min-height: 150px; align-content: center; justify-items: center; color: var(--gp-steel); text-align: center; box-shadow: none; }
-.session-gate { min-height: 300px; place-content: center; justify-items: start; box-shadow: none; }
-.session-gate svg { color: var(--gp-green-dark); }
-.session-gate h1 { margin: 0; font-size: 21px; }
-.session-gate p { max-width: 380px; margin: 3px 0 8px; color: var(--gp-steel); }
+.session-gate { display: grid; width: 100%; min-height: min(520px, calc(100dvh - 150px)); grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 20px; border: 1px solid var(--gp-line); border-radius: 10px; padding: clamp(28px, 6vw, 72px); background: var(--gp-canvas); box-shadow: var(--gp-shadow); }
+.session-gate-icon { display: grid; width: 58px; height: 58px; place-items: center; border: 1px solid var(--gp-success-line); border-radius: 12px; color: var(--gp-green-dark); background: var(--gp-green-soft); }
+.session-gate-copy { display: grid; min-width: 0; gap: 5px; }
+.session-gate h1 { margin: 0; color: var(--gp-ink); font-size: clamp(22px, 3vw, 30px); line-height: 1.2; }
+.session-gate p { max-width: 620px; margin: 0; color: var(--gp-steel); font-size: 14px; }
+.session-gate > a { justify-self: end; }
+.topbar-sign-in { min-height: 34px; }
 .policy-grid, .access-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(330px, 0.7fr); gap: 16px; }
 .inline-form, .preview-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; border-top: 1px solid var(--gp-line); padding: 16px 20px; background: var(--gp-surface); }
 .preview-form { grid-template-columns: minmax(0, 1fr) auto; }
@@ -1139,6 +1142,9 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
   .proxy-groups { padding: 12px; }
   .proxy-endpoint-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proxy-node-footer { align-items: flex-start; flex-direction: column; gap: 3px; padding-right: 14px; padding-left: 14px; }
+  .session-gate { min-height: 420px; grid-template-columns: 1fr; justify-items: start; gap: 14px; padding: 28px 22px; }
+  .session-gate > a { width: 100%; justify-self: stretch; }
+  .session-gate > a .button { width: 100%; }
   .release-workbench-detail { padding: 10px; }
   .release-workbench-header { align-items: flex-start; flex-direction: column; }
   .release-workbench-actions { width: 100%; overflow-x: auto; }

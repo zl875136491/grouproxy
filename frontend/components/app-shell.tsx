@@ -13,6 +13,7 @@ import {
   FileClock,
   Gauge,
   KeyRound,
+  LogIn,
   LogOut,
   Menu,
   Network,
@@ -28,7 +29,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ComponentType, type PropsWithChildren } from "react";
-import { clearManagementSession, logoutManagementSession, managementSessionRole, type SessionRole } from "../lib/api";
+import { clearManagementSession, hasAuthenticatedSession, logoutManagementSession, managementSessionRole, type SessionRole } from "../lib/api";
 import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
 import { PreferencesControls } from "./preferences-controls";
@@ -116,8 +117,10 @@ export function AppShell({ children }: PropsWithChildren) {
   const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [role, setRole] = useState<SessionRole | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
 
   useEffect(() => {
+    setAuthenticated(hasAuthenticatedSession());
     setRole(managementSessionRole());
   }, [pathname]);
 
@@ -215,10 +218,12 @@ export function AppShell({ children }: PropsWithChildren) {
           </div>
           <div className="topbar-actions">
             <PreferencesControls />
-            <RefreshButton label="Refresh workspace" onRefresh={() => queryClient.invalidateQueries()} />
-            <IconButton label={t("Sign out")} disabled={signingOut} onClick={() => setSignOutConfirmOpen(true)}>
-              <LogOut size={16} />
-            </IconButton>
+            {authenticated ? <>
+              <RefreshButton label="Refresh workspace" onRefresh={() => queryClient.invalidateQueries()} />
+              <IconButton label={t("Sign out")} disabled={signingOut} onClick={() => setSignOutConfirmOpen(true)}>
+                <LogOut size={16} />
+              </IconButton>
+            </> : <Link className="button button-primary button-sm topbar-sign-in" href="/login"><LogIn size={16} />{t("Sign in")}</Link>}
           </div>
         </header>
         <main className="app-main">{children}</main>
