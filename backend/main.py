@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
 from pymongo.errors import DuplicateKeyError
 
-from app.config import Settings, get_settings
+from app.config import PROXY_LISTEN_PORT, Settings, get_settings
 from app.db import Database
 from app.models import (
     AccessLog,
@@ -47,7 +47,6 @@ from app.models import (
     ProbeCircuit,
     ProbeHistory,
     ProxyConfigSnapshot,
-    ProxyCredential,
     Site,
     SiteCIDR,
     SiteSubscription,
@@ -93,9 +92,7 @@ from app.schemas import (
     DestinationBlacklistOut,
     DraftCreate,
     DraftOut,
-    EmployeeAccessSiteOut,
     EmployeeOut,
-    EmployeeProxyAccessOut,
     GQuanLoginRequest,
     LoginRequest,
     LoginResponse,
@@ -109,24 +106,23 @@ from app.schemas import (
     ProbeRequestForAgent,
     ProbeTaskRequest,
     ProxyConfigSnapshotOut,
-    ProxySelectionRequest,
-    ProxyCredentialOut,
-    ProxyCredentialReveal,
     ProxyEndpointSnapshot,
     ProxyGroupSnapshot,
+    ProxySelectionRequest,
     RegistrationRequest,
     ReleaseCreate,
     ReleaseOut,
     SiteNameUpdate,
     SiteOut,
-    SiteProxyAuthUpdate,
     SiteSubscriptionOut,
     SubscriptionCatalogOut,
     SubscriptionPublishOut,
     SubscriptionPublishRequest,
     SubscriptionRefreshResponse,
+    SubscriptionSingleNodeCreate,
     SubscriptionSourceCreate,
     SubscriptionSourceOut,
+    SubscriptionVersionContentOut,
     SubscriptionUploadResponse,
     SubscriptionVersionOut,
     TaskOut,
@@ -136,7 +132,7 @@ from app.schemas import (
     VerificationCodeRequest,
     VerificationCodeResponse,
 )
-from app.services.access import render_linux_setup_script
+from app.services.access import access_profile, load_linux_setup_script, load_windows_setup_script
 from app.services.alerts import refresh_deny_spike_alerts, refresh_liveness, sync_node_alerts
 from app.services.audit import append_audit, redact, verify_audit_chain
 from app.services.auth import (
@@ -155,23 +151,20 @@ from app.services.auth import (
     verify_password,
 )
 from app.services.backup_worker import BackupWorker
-from app.services.bundles import create_desired_release, latest_release
+from app.services.bundles import (
+    create_desired_release,
+    latest_release,
+    repair_stale_proxy_selection,
+)
 from app.services.cidr import effective_cidrs, match_source_ip, normalize_cidr, normalize_source_ip
 from app.services.probes import record_probe_result
-from app.services.proxy_credentials import (
-    ProxyCredentialError,
-    ProxyCredentialRotation,
-    active_proxy_credential_count,
-    credential_secret,
-    proxy_auth_bundle,
-    restore_proxy_credential,
-    rotate_proxy_credential,
-)
 from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
 from app.services.subscriptions import (
     SubscriptionError,
+    normalize_single_node,
     normalize_source_url,
     record_uploaded_subscription,
+    single_node_source_name,
     source_url_hint,
 )
 from app.services.tasks import (
@@ -227,21 +220,9 @@ def _site_out(site: Site) -> SiteOut:
         slug=site.slug,
         name=site.name,
         dns_note=site.dns_note,
-        proxy_auth_required=site.proxy_auth_required,
-        http_port=site.http_port,
         shutdown=site.shutdown,
         config_revision=site.config_revision,
     )
-
-
-def _proxy_credential_out(item: ProxyCredential) -> ProxyCredentialOut:
-    return ProxyCredentialOut(
-        site_id=item.site_id,
-        username=item.username,
-        active=item.active,
-        rotated_at=item.rotated_at,
-    )
-
 
 def _employee_out(user: AdminUser) -> EmployeeOut:
     return EmployeeOut(
@@ -371,6 +352,7 @@ def _subscription_source_out(item: SubscriptionSource) -> SubscriptionSourceOut:
     return SubscriptionSourceOut(
         id=_model_id(item),
         name=item.name,
+        source_type=item.source_type,
         url_hint=source_url_hint(item.url),
         fetch_interval_sec=item.fetch_interval_sec,
         max_body_bytes=item.max_body_bytes,
@@ -400,6 +382,21 @@ def _subscription_version_out(item: SubscriptionVersion) -> SubscriptionVersionO
         node_count=item.node_count,
         published=item.published,
         created_at=item.created_at,
+    )
+
+
+def _subscription_version_content_out(item: SubscriptionVersion) -> SubscriptionVersionContentOut:
+    """Render a text subscription payload for an authenticated inspector."""
+
+    try:
+        content = item.content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # Subscription parsers accept text documents. Keep a clear API error
+        # rather than silently replacing bytes and showing a misleading file.
+        raise HTTPException(422, "subscription_content_not_text") from exc
+    return SubscriptionVersionContentOut(
+        **_subscription_version_out(item).model_dump(),
+        content=content,
     )
 
 
@@ -434,6 +431,26 @@ def _ack_out(item: AgentAckDocument) -> AgentAckOut:
         sequence=item.sequence,
         received_at=item.received_at,
     )
+
+
+def _latest_ack_per_node(items: list[AgentAckDocument]) -> list[AgentAckDocument]:
+    """Keep only the newest ACK for each node in a release.
+
+    A monitor retries a rejected bundle and therefore legitimately emits more
+    than one ACK for the same release.  Release state must represent the
+    current attempt, not remain failed forever because an earlier attempt was
+    rejected.
+    """
+
+    latest: dict[str, AgentAckDocument] = {}
+    for item in items:
+        previous = latest.get(item.node_id)
+        if previous is None or (item.received_at, item.sequence) > (
+            previous.received_at,
+            previous.sequence,
+        ):
+            latest[item.node_id] = item
+    return sorted(latest.values(), key=lambda item: item.node_id)
 
 
 def _audit_out(item: AuditEvent) -> AuditEventOut:
@@ -958,7 +975,7 @@ async def lifespan(app: FastAPI):
         await database.close()
 
 
-app = FastAPI(title="Grouproxy Control Plane", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Grouproxy Control Plane", version="0.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -971,7 +988,10 @@ app.add_middleware(
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
-    return {"status": "ok", "service": "grouproxy-backend"}
+    # Keep the deployed API version visible without requiring management
+    # authentication.  This makes stale dashboard/backend processes obvious
+    # when a newly added route is reported as 404.
+    return {"status": "ok", "service": "grouproxy-backend", "version": "0.4.0"}
 
 
 @app.get("/readyz")
@@ -998,12 +1018,12 @@ async def require_authenticated(request: Request) -> AuthenticatedPrincipal:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
         )
-    resolved = await resolve_session(token)
-    if resolved is None:
+    try:
+        session, user = await resolve_session(token)
+    except AuthError as exc:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="management_auth_required"
-        )
-    session, user = resolved
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.code
+        ) from exc
     return AuthenticatedPrincipal(itcode=session.itcode, role=user.role)
 
 
@@ -1304,30 +1324,6 @@ async def list_employees(_: str = Depends(require_management)) -> list[EmployeeO
     return [_employee_out(employee) for employee in employees]
 
 
-@app.get(
-    "/api/v1/employees/{itcode}/proxy-credentials",
-    response_model=list[ProxyCredentialOut],
-)
-async def list_employee_proxy_credentials(
-    itcode: str, _: str = Depends(require_management)
-) -> list[ProxyCredentialOut]:
-    """Return credential metadata for the selected employee, never a secret."""
-
-    try:
-        subject_itcode = normalize_itcode(itcode)
-    except AuthError as exc:
-        raise _auth_http_error(exc) from exc
-    employee = await find_user_by_itcode(subject_itcode)
-    if employee is None or employee.role != "employee":
-        raise HTTPException(404, "employee_not_found")
-    credentials = (
-        await ProxyCredential.find(ProxyCredential.itcode == subject_itcode)
-        .sort(+ProxyCredential.site_id)
-        .to_list()
-    )
-    return [_proxy_credential_out(credential) for credential in credentials]
-
-
 @app.get("/api/v1/sites", response_model=list[SiteOut])
 async def list_sites(_: str = Depends(require_management)) -> list[SiteOut]:
     return [_site_out(site) for site in await Site.find_all().sort(+Site.slug).to_list()]
@@ -1392,48 +1388,6 @@ async def set_shutdown(
         actor=_actor(),
         before=before,
         after={"shutdown": site.shutdown},
-    )
-    return _site_out(site)
-
-
-@app.put("/api/v1/sites/{site_id}/proxy-auth", response_model=SiteOut)
-async def set_site_proxy_auth(
-    site_id: str,
-    payload: SiteProxyAuthUpdate,
-    request: Request,
-    _: str = Depends(require_management),
-) -> SiteOut:
-    """Enable or disable HTTP Basic at one site for the next normal release."""
-
-    site = await Site.get(site_id)
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    if site.proxy_auth_required == payload.required:
-        return _site_out(site)
-    if payload.required:
-        try:
-            # This validates both the backend-only derivation secret and every
-            # current credential before a policy can require authentication.
-            credential_secret(_settings())
-            if await active_proxy_credential_count(site_id) < 1:
-                raise ProxyCredentialError("proxy_auth_requires_credential")
-            await proxy_auth_bundle(site_id=site_id, required=True, settings=_settings())
-        except ProxyCredentialError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    before = {"proxy_auth_required": site.proxy_auth_required}
-    site.proxy_auth_required = payload.required
-    site.config_revision += 1
-    await site.save()
-    await append_audit(
-        action="site.proxy_auth.update",
-        target_type="site",
-        target_id=site_id,
-        actor=_actor(),
-        request_id=_request_id(request),
-        source_ip=_request_source_ip(request),
-        before=before,
-        after={"proxy_auth_required": site.proxy_auth_required},
     )
     return _site_out(site)
 
@@ -1605,7 +1559,6 @@ async def preview_cidr(
     return CIDRPreviewResponse(
         allowed=match is not None and not site.shutdown,
         matched_cidr=match,
-        requires_auth=site.proxy_auth_required,
         reason=reason,
         effective_cidrs=cidrs,
     )
@@ -1801,6 +1754,26 @@ async def list_subscriptions(_: str = Depends(require_management)) -> Subscripti
     )
 
 
+@app.get(
+    "/api/v1/subscriptions/{source_id}/versions/{version_id}/content",
+    response_model=SubscriptionVersionContentOut,
+)
+async def get_subscription_version_content(
+    source_id: str,
+    version_id: str,
+    _: str = Depends(require_management),
+) -> SubscriptionVersionContentOut:
+    """Return one immutable subscription document for the detail viewer."""
+
+    source = await SubscriptionSource.get(source_id)
+    if source is None:
+        raise HTTPException(404, "subscription_source_not_found")
+    version = await SubscriptionVersion.get(version_id)
+    if version is None or version.source_id != source_id:
+        raise HTTPException(404, "subscription_version_not_found")
+    return _subscription_version_content_out(version)
+
+
 @app.post(
     "/api/v1/subscriptions",
     response_model=SubscriptionRefreshResponse,
@@ -1821,6 +1794,7 @@ async def create_subscription_source(
     settings = _settings()
     source = SubscriptionSource(
         name=payload.name.strip(),
+        source_type="http",
         url=source_url,
         fetch_interval_sec=payload.fetch_interval_sec,
         max_body_bytes=min(payload.max_body_bytes, settings.subscription_max_body_bytes),
@@ -1870,6 +1844,7 @@ async def upload_subscription(
     settings = _settings()
     source = SubscriptionSource(
         name=clean_name,
+        source_type="upload",
         url="",
         max_body_bytes=settings.subscription_max_body_bytes,
         created_by=_actor(),
@@ -1892,6 +1867,53 @@ async def upload_subscription(
             "content_hash": version.content_hash,
             "parse_ok": version.parse_ok,
             "format": version.format,
+        },
+    )
+    return SubscriptionUploadResponse(
+        source=_subscription_source_out(source), version=_subscription_version_out(version)
+    )
+
+
+@app.post(
+    "/api/v1/subscriptions/single-node",
+    response_model=SubscriptionUploadResponse,
+    status_code=201,
+)
+async def create_single_node_subscription(
+    payload: SubscriptionSingleNodeCreate,
+    _: str = Depends(require_management),
+) -> SubscriptionUploadResponse:
+    try:
+        content = normalize_single_node(payload.uri)
+    except SubscriptionError as exc:
+        raise HTTPException(422, exc.code) from exc
+    clean_name = payload.name.strip() or single_node_source_name(payload.uri)
+    if await SubscriptionSource.find_one(SubscriptionSource.name == clean_name):
+        raise HTTPException(409, "subscription_source_name_exists")
+    settings = _settings()
+    source = SubscriptionSource(
+        name=clean_name,
+        source_type="single_node",
+        url="",
+        max_body_bytes=settings.subscription_max_body_bytes,
+        created_by=_actor(),
+    )
+    await source.insert()
+    try:
+        version, _ = await record_uploaded_subscription(source, content, settings)
+    except SubscriptionError as exc:  # pragma: no cover - normalized above
+        raise HTTPException(422, exc.code) from exc
+    await append_audit(
+        action="subscription.single_node.create",
+        target_type="subscription_version",
+        target_id=_model_id(version),
+        actor=_actor(),
+        after={
+            "source_id": _model_id(source),
+            "content_hash": version.content_hash,
+            "parse_ok": version.parse_ok,
+            "format": version.format,
+            "node_count": version.node_count,
         },
     )
     return SubscriptionUploadResponse(
@@ -2029,7 +2051,9 @@ async def _create_release_from_draft(
             nodes=selected,
             settings=_settings(),
             created_by=actor,
-            proxy_selection=(draft.diff.get("proxy_selection") if isinstance(draft.diff, dict) else None),
+            proxy_selection=(
+                draft.diff.get("proxy_selection") if isinstance(draft.diff, dict) else None
+            ),
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -2072,150 +2096,6 @@ async def _create_release_from_draft(
         },
     )
     return release, False
-
-
-async def _publish_proxy_credential_change(
-    *,
-    site: Site,
-    rotation: ProxyCredentialRotation,
-    actor: str,
-    request_id: str,
-) -> ConfigRelease | None:
-    """Create the traceable release that delivers a rotated active password."""
-
-    nodes = await Node.find(Node.site_id == _model_id(site)).to_list()
-    if not nodes:
-        # A credential can be prepared before a site receives its first node.
-        # The normal first release will include it later.
-        return None
-    agent_ids = [node.agent_id for node in nodes]
-    active_release = await ConfigRelease.find_one(
-        {
-            "node_ids": {"$in": agent_ids},
-            "status": {"$in": ["queued", "applying", "health_check", "rolling_back"]},
-        }
-    )
-    if active_release is not None:
-        raise HTTPException(409, "release_in_progress")
-    cidrs, sources = await effective_cidrs(_model_id(site))
-    draft = ConfigDraft(
-        site_id=_model_id(site),
-        node_ids=[_model_id(node) for node in nodes],
-        source_revision=site.config_revision,
-        diff={
-            "proxy_auth": {
-                "required": True,
-                "credential_change": {
-                    "itcode": rotation.credential.itcode,
-                    "username": rotation.credential.username,
-                    "action": "created" if rotation.created else "rotated",
-                },
-            }
-        },
-        validation={
-            "valid": True,
-            "errors": [],
-            "effective_cidrs": cidrs,
-            "acl_sources": sources,
-            "proxy_auth": {
-                "required": True,
-                "credential_count": await active_proxy_credential_count(_model_id(site)),
-            },
-        },
-        risk_level="medium",
-        created_by=actor,
-        expires_at=utcnow() + timedelta(hours=24),
-    )
-    await draft.insert()
-    try:
-        release, _ = await _create_release_from_draft(
-            draft=draft,
-            site=site,
-            requested_node_ids=draft.node_ids,
-            expected_current_version=None,
-            idempotency_key=(
-                f"proxy_credential.rotate:{_model_id(site)}:{rotation.credential.credential_id}"
-            ),
-            request_id=request_id,
-            actor=actor,
-        )
-    except Exception:
-        # Do not leave a user-facing draft behind when its automatic deployment
-        # was rejected before any Desired Bundle was created.
-        draft.status = "expired"
-        draft.updated_at = utcnow()
-        await draft.save()
-        raise
-    return release
-
-
-async def _rotate_proxy_credential_for_subject(
-    *,
-    site: Site,
-    itcode: str,
-    actor: str,
-    actor_role: str,
-    request: Request,
-) -> ProxyCredentialReveal:
-    """Rotate a credential and start delivery when its site requires auth."""
-
-    settings = _settings()
-    try:
-        rotation = await rotate_proxy_credential(
-            site_id=_model_id(site), itcode=itcode, settings=settings
-        )
-    except ProxyCredentialError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-    original_revision = site.config_revision
-    release: ConfigRelease | None = None
-    try:
-        site.config_revision += 1
-        await site.save()
-        if site.proxy_auth_required:
-            release = await _publish_proxy_credential_change(
-                site=site,
-                rotation=rotation,
-                actor=actor,
-                request_id=_request_id(request),
-            )
-    except Exception:
-        await restore_proxy_credential(rotation)
-        # A rejected automatic release must not make an unrelated policy
-        # revision appear pending. Preserve a later revision if one exists.
-        current_site = await Site.get(_model_id(site))
-        if current_site is not None and current_site.config_revision == original_revision + 1:
-            current_site.config_revision = original_revision
-            await current_site.save()
-        raise
-
-    await append_audit(
-        action="proxy_credential.rotate",
-        target_type="proxy_credential",
-        target_id=rotation.credential.credential_id,
-        actor=actor,
-        actor_role=actor_role,
-        request_id=_request_id(request),
-        source_ip=_request_source_ip(request),
-        before={
-            "site_id": _model_id(site),
-            "itcode": itcode,
-            "credential_configured": rotation.previous is not None,
-            "active": rotation.previous.active if rotation.previous is not None else False,
-        },
-        after={
-            "site_id": _model_id(site),
-            "itcode": itcode,
-            "username": rotation.credential.username,
-            "active": rotation.credential.active,
-            "release_id": release.release_id if release is not None else None,
-        },
-    )
-    return ProxyCredentialReveal(
-        **_proxy_credential_out(rotation.credential).model_dump(),
-        password=rotation.password,
-        release_id=release.release_id if release is not None else None,
-    )
 
 
 @app.post("/api/v1/config/releases", response_model=ReleaseOut, status_code=202)
@@ -2535,10 +2415,9 @@ async def list_release_acks(
         raise HTTPException(404, "release_not_found")
     acks = (
         await AgentAckDocument.find(AgentAckDocument.release_id == release_id)
-        .sort(+AgentAckDocument.node_id)
         .to_list()
     )
-    return [_ack_out(item) for item in acks]
+    return [_ack_out(item) for item in _latest_ack_per_node(acks)]
 
 
 @app.get("/api/v1/tasks", response_model=list[TaskOut])
@@ -2742,10 +2621,15 @@ async def select_node_proxy(
     group_name = _proxy_selection_group(payload.group)
     outbound_name = " ".join(payload.outbound.split())
     request_id = _request_id(request)
+    expected_version_key = (
+        str(payload.expected_current_version)
+        if payload.expected_current_version is not None
+        else "latest"
+    )
     idempotency_key = (idempotency_key_header or "").strip() or (
         "proxy-selection:"
         f"{node.agent_id}:{group_name}:{outbound_name}:"
-        f"{payload.expected_current_version if payload.expected_current_version is not None else 'latest'}"
+        f"{expected_version_key}"
     )
     # Idempotency is checked before creating a draft. A browser retry should
     # return the existing release and must not leave a second draft behind.
@@ -2974,6 +2858,10 @@ async def agent_desired(  # noqa: B008 - FastAPI dependency declaration
     desired = await latest_release(node.site_id, node.agent_id)
     if desired is None:
         return DesiredResponse(desired_stale=False, bundle=None)
+    # Repair bundles created before stale selector filtering was introduced.
+    # This is intentionally done at the agent boundary so an already queued
+    # release can recover without requiring an operator to recreate it.
+    await repair_stale_proxy_selection(desired, _settings())
     stale = desired.desired_version > supplied_version or desired.bundle_hash != supplied_hash
     return DesiredResponse(
         desired_stale=stale, release_id=desired.release_id, bundle=desired.bundle if stale else None
@@ -3327,9 +3215,9 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
     )
     await node.save()
     await sync_node_alerts(node)
-    all_acks = await AgentAckDocument.find(
-        AgentAckDocument.release_id == payload.release_id
-    ).to_list()
+    all_acks = _latest_ack_per_node(
+        await AgentAckDocument.find(AgentAckDocument.release_id == payload.release_id).to_list()
+    )
     expected = set(release.node_ids)
     received_nodes = {item.node_id for item in all_acks}
     if expected.issubset(received_nodes):
@@ -3341,7 +3229,26 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
         release.stage = "succeeded" if release.status == "succeeded" else "failed"
         release.progress = 100
         release.finished_at = utcnow()
-        release.error = "" if release.status == "succeeded" else "one_or_more_nodes_failed"
+        if release.status == "succeeded":
+            release.error = ""
+        else:
+            # Preserve an actionable monitor error in the release record. The
+            # old aggregate value hid the ACK code (for example a stale
+            # outbound selection) and made the dashboard failure impossible
+            # to diagnose without opening the node logs.
+            failed_ack = next(
+                (
+                    item
+                    for item in all_acks
+                    if item.node_id in expected and not (item.ok and item.health_ok)
+                ),
+                None,
+            )
+            release.error = _safe_error(
+                (failed_ack.error_code if failed_ack else "")
+                or (failed_ack.error_message if failed_ack else "")
+                or "one_or_more_nodes_failed"
+            )
         release.rollback_reason = (
             ""
             if release.status == "succeeded"
@@ -3361,7 +3268,19 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
                 task.status = release.status
                 task.stage = release.stage
                 task.progress = release.progress
-                task.result = {"release_id": release.release_id, "nodes": list(received_nodes)}
+                task.result = {
+                    "release_id": release.release_id,
+                    "nodes": list(received_nodes),
+                    "errors": [
+                        {
+                            "node_id": item.node_id,
+                            "error_code": item.error_code,
+                            "error_message": item.error_message,
+                        }
+                        for item in all_acks
+                        if item.node_id in expected and not (item.ok and item.health_ok)
+                    ],
+                }
                 task.finished_at = release.finished_at
                 await task.save()
     return {"accepted": True}
@@ -3642,125 +3561,59 @@ async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
 @app.get("/api/v1/access/linux-setup.sh", response_class=PlainTextResponse)
 async def linux_setup(
     _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> str:
-    return render_linux_setup_script(_settings())
+) -> PlainTextResponse:
+    return PlainTextResponse(
+        load_linux_setup_script(_settings()),
+        headers={"Content-Disposition": 'attachment; filename="grouproxy-linux-setup.sh"'},
+        media_type="text/x-shellscript",
+    )
+
+
+@app.get("/api/v1/access/windows-setup.ps1", response_class=PlainTextResponse)
+async def windows_setup(
+    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
+) -> PlainTextResponse:
+    return PlainTextResponse(
+        load_windows_setup_script(_settings()),
+        headers={"Content-Disposition": 'attachment; filename="grouproxy-windows-setup.ps1"'},
+        media_type="text/plain",
+    )
 
 
 @app.get("/api/v1/access/config", response_model=AccessConfigOut)
 async def access_config(
     _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
 ) -> AccessConfigOut:
-    settings = _settings()
-    return AccessConfigOut(fqdn=settings.proxy_access_fqdn, port=settings.proxy_access_port)
-
-
-@app.get("/api/v1/access/proxy-credentials", response_model=EmployeeProxyAccessOut)
-async def employee_proxy_access(
-    principal: AuthenticatedPrincipal = Depends(  # noqa: B008 - FastAPI dependency declaration
-        require_authenticated
-    ),
-) -> EmployeeProxyAccessOut:
-    credentials = await ProxyCredential.find(ProxyCredential.itcode == principal.itcode).to_list()
-    credentials_by_site = {item.site_id: item for item in credentials}
-    sites = await Site.find_all().sort(+Site.slug).to_list()
-    return EmployeeProxyAccessOut(
-        itcode=principal.itcode,
-        sites=[
-            EmployeeAccessSiteOut(
-                id=_model_id(site),
-                slug=site.slug,
-                name=site.name,
-                proxy_auth_required=site.proxy_auth_required,
-                credential_configured=bool(
-                    credentials_by_site.get(_model_id(site))
-                    and credentials_by_site[_model_id(site)].active
-                ),
-                username=(
-                    credentials_by_site[_model_id(site)].username
-                    if credentials_by_site.get(_model_id(site))
-                    and credentials_by_site[_model_id(site)].active
-                    else None
-                ),
-            )
-            for site in sites
-        ],
-    )
-
-
-@app.post(
-    "/api/v1/access/proxy-credentials/{site_id}/rotate",
-    response_model=ProxyCredentialReveal,
-)
-async def rotate_own_proxy_credential(
-    site_id: str,
-    request: Request,
-    response: Response,
-    principal: AuthenticatedPrincipal = Depends(  # noqa: B008 - FastAPI dependency declaration
-        require_authenticated
-    ),
-) -> ProxyCredentialReveal:
-    site = await Site.get(site_id)
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    return await _rotate_proxy_credential_for_subject(
-        site=site,
-        itcode=principal.itcode,
-        actor=principal.itcode,
-        actor_role=principal.role,
-        request=request,
-    )
-
-
-@app.post(
-    "/api/v1/sites/{site_id}/proxy-credentials/{itcode}/rotate",
-    response_model=ProxyCredentialReveal,
-)
-async def admin_rotate_proxy_credential(
-    site_id: str,
-    itcode: str,
-    request: Request,
-    response: Response,
-    _: str = Depends(require_management),
-) -> ProxyCredentialReveal:
-    site = await Site.get(site_id)
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    try:
-        subject_itcode = normalize_itcode(itcode)
-    except AuthError as exc:
-        raise _auth_http_error(exc) from exc
-    subject = await find_user_by_itcode(subject_itcode)
-    if subject is None or not subject.is_active:
-        raise HTTPException(404, "employee_not_found")
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    return await _rotate_proxy_credential_for_subject(
-        site=site,
-        itcode=subject_itcode,
-        actor=_actor(),
-        actor_role="admin",
-        request=request,
+    profile = access_profile(_settings())
+    return AccessConfigOut(
+        environment=profile.environment,
+        fqdn=profile.fqdn,
+        port=PROXY_LISTEN_PORT,
+        macos_shortcut_url=profile.macos_shortcut_url,
     )
 
 
 @app.get("/api/v1/access/proxy.pac", response_class=PlainTextResponse)
 async def proxy_pac(
     _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> str:
-    settings = _settings()
+) -> PlainTextResponse:
+    profile = access_profile(_settings())
     # PAC only chooses the single HTTP listener. It is not an authorization
     # layer and never embeds regional IP addresses.
-    return f"""function FindProxyForURL(url, host) {{
+    content = f"""function FindProxyForURL(url, host) {{
   if (isPlainHostName(host) ||
       shExpMatch(host, \"localhost\") ||
       isInNet(host, \"10.0.0.0\", \"255.0.0.0\") ||
       isInNet(host, \"172.16.0.0\", \"255.240.0.0\") ||
       isInNet(host, \"192.168.0.0\", \"255.255.0.0\")) return \"DIRECT\";
-  return \"PROXY {settings.proxy_access_fqdn}:{settings.proxy_access_port}\";
+  return \"PROXY {profile.fqdn}:{PROXY_LISTEN_PORT}\";
 }}
 """
+    return PlainTextResponse(
+        content,
+        headers={"Content-Disposition": 'attachment; filename="grouproxy-proxy.pac"'},
+        media_type="application/x-ns-proxy-autoconfig",
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

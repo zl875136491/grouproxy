@@ -9,6 +9,12 @@ export const metadata: Metadata = {
   description: "区域代理运维控制台",
 };
 
+// The dashboard shell contains client-side queries and session state. Do not
+// let Next.js cache an old shell that still references a previous chunk after
+// a dashboard deployment.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>

@@ -59,14 +59,8 @@ class SiteOut(BaseModel):
     slug: str
     name: str
     dns_note: str
-    proxy_auth_required: bool
-    http_port: int
     shutdown: bool
     config_revision: int
-
-
-class SiteProxyAuthUpdate(BaseModel):
-    required: bool
 
 
 class SiteNameUpdate(BaseModel):
@@ -80,18 +74,6 @@ class SiteNameUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
 
 
-class ProxyCredentialOut(BaseModel):
-    site_id: str
-    username: str
-    active: bool
-    rotated_at: datetime
-
-
-class ProxyCredentialReveal(ProxyCredentialOut):
-    password: str
-    release_id: str | None = None
-
-
 class EmployeeOut(BaseModel):
     """Management-safe view of a local employee account."""
 
@@ -101,20 +83,6 @@ class EmployeeOut(BaseModel):
     created_at: datetime
     password_changed_at: datetime | None
     last_login_at: datetime | None
-
-
-class EmployeeAccessSiteOut(BaseModel):
-    id: str
-    slug: str
-    name: str
-    proxy_auth_required: bool
-    credential_configured: bool
-    username: str | None = None
-
-
-class EmployeeProxyAccessOut(BaseModel):
-    itcode: str
-    sites: list[EmployeeAccessSiteOut]
 
 
 class NodeCreate(BaseModel):
@@ -176,7 +144,6 @@ class CIDRPreviewRequest(BaseModel):
 class CIDRPreviewResponse(BaseModel):
     allowed: bool
     matched_cidr: str | None = None
-    requires_auth: bool
     reason: str
     effective_cidrs: list[str]
 
@@ -239,9 +206,15 @@ class SubscriptionSourceCreate(BaseModel):
     redirect_limit: int = Field(default=3, ge=0, le=5)
 
 
+class SubscriptionSingleNodeCreate(BaseModel):
+    name: str = Field(default="", max_length=120)
+    uri: str = Field(min_length=1, max_length=16_384)
+
+
 class SubscriptionSourceOut(BaseModel):
     id: str
     name: str
+    source_type: Literal["http", "upload", "single_node"]
     url_hint: str
     fetch_interval_sec: int
     max_body_bytes: int
@@ -269,6 +242,18 @@ class SubscriptionVersionOut(BaseModel):
     node_count: int
     published: bool
     created_at: datetime
+
+
+class SubscriptionVersionContentOut(SubscriptionVersionOut):
+    """A subscription version plus its decoded source document.
+
+    The catalog intentionally omits the raw payload because versions can be
+    large and may contain credentials. Operators request this protected
+    representation explicitly when inspecting a version.
+    """
+
+    content: str
+    encoding: Literal["utf-8"] = "utf-8"
 
 
 class SiteSubscriptionOut(BaseModel):
@@ -684,10 +669,11 @@ class ProbeTaskRequest(BaseModel):
 
 
 class AccessConfigOut(BaseModel):
+    environment: Literal["test", "production"]
     fqdn: str
     port: int
     protocol: Literal["http-connect"] = "http-connect"
-    https_proxy_enabled: bool = False
+    macos_shortcut_url: str
 
 
 class AgentHeartbeat(BaseModel):

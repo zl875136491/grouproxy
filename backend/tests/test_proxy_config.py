@@ -7,10 +7,154 @@ from starlette.requests import Request
 
 import main as main_module
 from app.schemas import AgentProxyConfigBatch, NodeNameUpdate, ProxyGroupSnapshot
+from app.services import bundles
 
 
 def _request() -> Request:
     return Request({"type": "http", "method": "PATCH", "path": "/api/v1/nodes/a", "headers": []})
+
+
+def test_single_node_subscription_route_is_registered() -> None:
+    routes = {
+        (route.path, method)
+        for route in main_module.app.routes
+        for method in (route.methods or set())
+    }
+
+    assert ("/api/v1/subscriptions/single-node", "POST") in routes
+    assert (
+        "/api/v1/subscriptions/{source_id}/versions/{version_id}/content",
+        "GET",
+    ) in routes
+
+
+@pytest.mark.asyncio
+async def test_single_node_handler_reports_validation_errors_after_route_match() -> None:
+    payload = main_module.SubscriptionSingleNodeCreate(name="probe", uri="vmess://invalid")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main_module.create_single_node_subscription(payload, "admin")
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "single_node_invalid_vmess"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selected_outbound, expected_selection",
+    [
+        ("missing", None),
+        ("current", {"group": "subscription", "outbound": "current"}),
+    ],
+)
+async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_outbound: str,
+    expected_selection: dict[str, str] | None,
+) -> None:
+    class EmptyBlacklistQuery:
+        async def to_list(self) -> list[object]:
+            return []
+
+    class EmptyBlacklist:
+        enabled = object()
+
+        @classmethod
+        def find(cls, *_: object) -> EmptyBlacklistQuery:
+            return EmptyBlacklistQuery()
+
+    async def no_cidrs(_: str) -> tuple[list[str], list[str]]:
+        return [], []
+
+    async def current_subscription(**_: object) -> dict[str, object]:
+        return {
+            "version": 1,
+            "version_id": "version-1",
+            "hash": "a" * 64,
+            "format": "sing-box",
+            "size_bytes": 64,
+            "content": '{"outbounds":[{"type":"vmess","tag":"current"}]}',
+        }
+
+    async def current_tags(_: str) -> set[str]:
+        return {"current"}
+
+    monkeypatch.setattr(bundles, "DestinationBlacklist", EmptyBlacklist)
+    monkeypatch.setattr(bundles, "effective_cidrs", no_cidrs)
+    monkeypatch.setattr(bundles, "selected_subscription_bundle", current_subscription)
+    monkeypatch.setattr(bundles, "_selected_subscription_tags", current_tags)
+
+    site = SimpleNamespace(id="site-1", shutdown=False)
+    node = SimpleNamespace(agent_id="node-1")
+    settings = SimpleNamespace(
+        bundle_hmac_secret="bundle-secret-for-test",
+        bundle_ttl_days=30,
+        subscription_inline_max_bytes=128_000,
+        backend_public_url="http://127.0.0.1:8000",
+    )
+    result = await bundles.build_signed_bundle(
+        site=site,
+        node=node,
+        desired_version=2,
+        release_id="release-1",
+        settings=settings,
+        proxy_selection={"group": "subscription", "outbound": selected_outbound},
+    )
+
+    assert result.get("proxy_selection") == expected_selection
+
+
+@pytest.mark.asyncio
+async def test_repair_stale_proxy_selection_resigns_existing_bundle() -> None:
+    saved = False
+
+    async def save() -> None:
+        nonlocal saved
+        saved = True
+
+    desired = SimpleNamespace(
+        bundle={
+            "schema_version": 1,
+            "subscription": {
+                "format": "sing-box",
+                "content": '{"outbounds":[{"type":"vmess","tag":"current"}]}',
+            },
+            "proxy_selection": {"group": "subscription", "outbound": "removed"},
+        },
+        bundle_hash="old",
+        save=save,
+    )
+    settings = SimpleNamespace(bundle_hmac_secret="bundle-secret")
+
+    assert await bundles.repair_stale_proxy_selection(desired, settings) is True
+    assert saved is True
+    assert "proxy_selection" not in desired.bundle
+    assert desired.bundle_hash != "old"
+
+
+def test_latest_ack_per_node_ignores_historical_failures() -> None:
+    older = SimpleNamespace(
+        node_id="codedev",
+        sequence=10,
+        received_at=datetime(2026, 9, 7, 18, 0, tzinfo=timezone.utc),
+    )
+    newer = SimpleNamespace(
+        node_id="codedev",
+        sequence=11,
+        received_at=datetime(2026, 9, 7, 18, 1, tzinfo=timezone.utc),
+    )
+    other = SimpleNamespace(
+        node_id="nuc",
+        sequence=1,
+        received_at=datetime(2026, 9, 7, 18, 2, tzinfo=timezone.utc),
+    )
+
+    result = main_module._latest_ack_per_node([older, newer, other])
+
+    assert [(item.node_id, item.sequence) for item in result] == [
+        ("codedev", 11),
+        ("nuc", 1),
+    ]
 
 
 def test_proxy_projection_contains_only_safe_group_metadata() -> None:

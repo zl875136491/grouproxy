@@ -189,16 +189,16 @@ async function login() {
   if (!response.ok) throw new Error(`Browser test login failed with HTTP ${response.status}`);
   const payload = await response.json();
   if (!payload.access_token) throw new Error("Browser test login did not return a session token");
-  return payload.access_token;
+  return payload;
 }
 
-let token = "";
+let session;
 let chrome;
 let client;
 let profileDirectory;
 
 try {
-  token = await login();
+  session = await login();
   profileDirectory = await mkdtemp(path.join(os.tmpdir(), "grouproxy-i18n-browser-"));
   const launched = startChrome(profileDirectory);
   chrome = launched.chrome;
@@ -212,7 +212,7 @@ try {
   const apiRequests = [];
   const browserErrors = [];
   client.on("Network.requestWillBeSent", ({ request }) => {
-    if (request.url.includes("/backend-api/")) apiRequests.push(request.url);
+    if (request.url.includes("/api/")) apiRequests.push(request.url);
   });
   client.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
     browserErrors.push(exceptionDetails.exception?.description || exceptionDetails.text || "Runtime exception");
@@ -227,7 +227,7 @@ try {
     mobile: viewportWidth < 600,
   });
   await client.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `localStorage.setItem("grouproxy.management_token", ${JSON.stringify(token)}); localStorage.setItem("grouproxy.session_role", "admin");${requestedTheme ? ` localStorage.setItem("grouproxy.theme", ${JSON.stringify(requestedTheme)});` : ""}`,
+    source: `localStorage.setItem("grouproxy.management_token", ${JSON.stringify(session.access_token)}); localStorage.setItem("grouproxy.session_role", ${JSON.stringify(session.role)}); localStorage.setItem("grouproxy.session_expires_at", ${JSON.stringify(session.expires_at)});${requestedTheme ? ` localStorage.setItem("grouproxy.theme", ${JSON.stringify(requestedTheme)});` : ""}`,
   });
   await client.send("Page.navigate", { url: `${frontendURL}${browserPath}` });
 
@@ -304,7 +304,7 @@ try {
     assert.equal(
       apiRequests.length,
       requestCountBeforeSwitch,
-      "Changing locale unexpectedly refetched /backend-api data",
+      "Changing locale unexpectedly refetched /api data",
     );
     console.log("Locale switch updated cached telemetry in Chinese, English, and Spanish without an API refetch.");
   }
@@ -313,10 +313,10 @@ try {
     await writeFile(screenshotPath, Buffer.from(screenshot.data, "base64"));
   }
 } finally {
-  if (token) {
+  if (session?.access_token) {
     await fetch(`${backendURL}/api/v1/auth/logout`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${session.access_token}` },
     }).catch(() => undefined);
   }
   client?.close();

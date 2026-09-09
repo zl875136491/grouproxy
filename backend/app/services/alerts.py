@@ -54,6 +54,19 @@ async def set_alert(
     return existing
 
 
+async def resolve_open_alerts(*, category: str) -> int:
+    """Resolve every currently open alert in one recovered health category."""
+
+    current = utcnow()
+    alerts = await Alert.find({"category": category, "status": "open"}).to_list()
+    for alert in alerts:
+        alert.status = "resolved"
+        alert.resolved_at = current
+        alert.last_seen_at = current
+        await alert.save()
+    return len(alerts)
+
+
 async def sync_node_alerts(node: Node) -> None:
     """Materialize node health dimensions as separately visible alerts."""
 

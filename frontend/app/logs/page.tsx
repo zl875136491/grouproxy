@@ -42,9 +42,9 @@ export default function LogsPage() {
   const entries = logs.data || [];
 
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill list-page">
       <PageHeader eyebrow="OBSERVE" title="Access logs" description="Recent allow and deny decisions from edge monitors." actions={<RefreshButton label="Refresh" onRefresh={() => logs.refetch()} />} />
-      <Panel>
+      <Panel className="list-panel">
         <div className="table-toolbar">
           <div className="segmented-control" role="group" aria-label={t("Action")}>
             {(["", "deny", "allow"] as ActionFilter[]).map((value) => <button key={value || "all"} className={action === value ? "segmented-active" : ""} onClick={() => setAction(value)}>{t(value === "" ? "All decisions" : value === "deny" ? "Only denies" : "Only allows")}</button>)}
@@ -61,7 +61,7 @@ export default function LogsPage() {
             { label: "Node", value: nodeId, setValue: setNodeId, options: [{ value: "", label: "All nodes" }, ...(nodes.data || []).filter((node) => !siteId || node.site_id === siteId).map((node) => ({ value: node.id, label: node.name }))] },
           ]}
         />
-        <div className="table-wrap"><table><thead><tr><th>{t("Time")}</th><th>{t("Node")}</th><th>{t("Source")}</th><th>{t("Destination")}</th><th>{t("Action")}</th><th>{t("Deny reason")}</th><th>{t("Traffic")}</th><th>{t("Duration")}</th></tr></thead><tbody>{entries.length ? entries.map((entry) => <LogRow key={entry.id} entry={entry} siteName={siteNames.get(entry.site_id) || entry.site_id} nodeName={nodeNames.get(entry.node_id) || entry.node_id} formatDate={formatDate} formatBytes={formatBytes} formatDuration={formatDuration} formatNumber={formatNumber} t={t} />) : <tr><td colSpan={8}><EmptyState title="No access logs recorded." /></td></tr>}</tbody></table></div>
+        <div className="table-wrap table-scroll"><table><thead><tr><th>{t("Time")}</th><th>{t("Node")}</th><th>{t("Source")}</th><th>{t("Destination")}</th><th>{t("Action")}</th><th>{t("Deny reason")}</th><th>{t("Traffic")}</th><th>{t("Duration")}</th></tr></thead><tbody>{entries.length ? entries.map((entry) => <LogRow key={entry.id} entry={entry} siteName={siteNames.get(entry.site_id) || entry.site_id} nodeName={nodeNames.get(entry.node_id) || entry.node_id} formatDate={formatDate} formatBytes={formatBytes} formatDuration={formatDuration} formatNumber={formatNumber} t={t} />) : <tr><td colSpan={8}><EmptyState title="No access logs recorded." /></td></tr>}</tbody></table></div>
       </Panel>
     </div>
   );

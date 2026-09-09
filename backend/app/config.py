@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PROXY_LISTEN_PORT = 1080
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GROUPROXY_", env_file=".env", extra="ignore")
@@ -20,12 +22,6 @@ class Settings(BaseSettings):
     admin_password: str = Field(min_length=12)
     management_token: str = Field(min_length=32)
     allow_insecure_agent_http: bool = False
-    default_http_port: int = 80
-    proxy_access_fqdn: str = Field(
-        default="proxy.corp.internal",
-        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$",
-    )
-    proxy_access_port: int = Field(default=80, ge=1, le=65535)
     probe_auto_enabled: bool = True
     probe_interval_seconds: int = Field(default=300, ge=30, le=86_400)
     probe_target_url: str = "https://example.com/"
@@ -45,17 +41,27 @@ class Settings(BaseSettings):
     backup_retention_daily_days: int = Field(default=7, ge=1, le=365)
     backup_retention_weekly_weeks: int = Field(default=4, ge=0, le=104)
     backup_retention_monthly_months: int = Field(default=3, ge=0, le=120)
+    # A collection can be split across several archive members. Keeping each
+    # member bounded makes verification resistant to archive bombs without
+    # making a normal, retained telemetry collection impossible to back up.
+    backup_member_max_bytes: int = Field(
+        default=128 * 1024 * 1024, ge=1_024 * 1_024, le=2 * 1_024 * 1_024 * 1_024
+    )
+    backup_archive_max_bytes: int = Field(
+        default=1_024 * 1_024 * 1_024,
+        ge=1_024 * 1_024,
+        le=8 * 1_024 * 1_024 * 1_024,
+    )
     bundle_ttl_days: int = 30
     subscription_default_interval_sec: int = 21_600
     subscription_max_body_bytes: int = 2_000_000
     subscription_inline_max_bytes: int = 128_000
     subscription_worker_poll_seconds: float = 1.0
     subscription_task_lease_seconds: int = 60
-    auth_session_ttl_minutes: int = Field(default=720, ge=15, le=43_200)
+    auth_session_ttl_minutes: int = Field(default=43_200, ge=15, le=43_200)
     auth_verification_ttl_seconds: int = Field(default=600, ge=60, le=3_600)
     auth_verification_resend_seconds: int = Field(default=60, ge=15, le=600)
     auth_verification_max_attempts: int = Field(default=5, ge=3, le=10)
-    proxy_credential_secret: SecretStr | None = None
     gquan_api_base_url: str = "https://one.1oa.com.cn/springboard/api/v1"
     gquan_app_token: SecretStr | None = None
     gquan_delivery_mode: Literal["app", "stub"] = "app"

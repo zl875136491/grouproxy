@@ -1,8 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, CircleAlert, Filter, Gauge, Search, Server, Waypoints, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, Filter, Search, Server, Waypoints, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getNodes,
   getProxyConfigs,
@@ -12,7 +12,6 @@ import {
   type ProxyConfigSnapshot,
   type ProxyEndpoint,
   type ProxyGroup,
-  type Release,
   type Site,
 } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
@@ -20,6 +19,7 @@ import { cn } from "../../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
+import { useToast } from "../../components/toast";
 import { Button, ConfirmDialog, IconButton, Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 function endpointStatus(endpoint: ProxyEndpoint): string {
@@ -262,8 +262,7 @@ function OutboundServiceCard({
         <div className="proxy-group-title">
           <span className="proxy-group-icon" aria-hidden="true"><Waypoints size={16} /></span>
           <div>
-            <strong>{t("Outbound services")}</strong>
-            <span>{t("{count} services", { count: endpoints.length })}</span>
+            <strong>{t("Subscription")}</strong>
           </div>
         </div>
         <StatusBadge status={groupStatus(group)} />
@@ -305,7 +304,6 @@ function NodeProxyPanel({
   snapshot,
   formatDate,
   formatDuration,
-  formatNumber,
   onSelect,
   endpointSearch,
   endpointStatusFilter,
@@ -317,7 +315,6 @@ function NodeProxyPanel({
   snapshot: ProxyConfigSnapshot | undefined;
   formatDate: (value: string | null | undefined, withTime?: boolean) => string;
   formatDuration: (value: number | null | undefined) => string;
-  formatNumber: (value: number | null | undefined) => string;
   onSelect: (endpoint: ProxyEndpoint) => void;
   endpointSearch: string;
   endpointStatusFilter: EndpointFilter;
@@ -327,6 +324,25 @@ function NodeProxyPanel({
 }) {
   const selectionGroup = snapshot?.groups.find((group) => group.name.trim().toLocaleLowerCase() === "subscription");
   const apiAvailable = snapshot?.api_available ?? false;
+  const { toast } = useToast();
+  const warningKey = useRef("");
+
+  useEffect(() => {
+    const error = snapshot?.error?.trim();
+    if (!error) {
+      warningKey.current = "";
+      return;
+    }
+    const key = `${node.agent_id}:${error}`;
+    if (warningKey.current === key) return;
+    warningKey.current = key;
+    toast({
+      title: t("Proxy snapshot warning"),
+      description: t(error),
+      variant: "destructive",
+    });
+  }, [node.agent_id, snapshot?.error, t, toast]);
+
   return (
     <Panel className="proxy-node-panel">
       <header className="proxy-node-heading">
@@ -336,23 +352,15 @@ function NodeProxyPanel({
         </div>
         <SnapshotState snapshot={snapshot} formatDate={formatDate} t={t} />
       </header>
-      {snapshot?.error
-        ? <div className="proxy-inline-warning"><CircleAlert size={15} /><span>{t(snapshot.error)}</span></div>
-        : null}
       {selectionGroup?.all.length
-        ? <div className={cn("proxy-groups", !apiAvailable && "proxy-groups-stale")}>
+          ? <div className={cn("proxy-groups", !apiAvailable && "proxy-groups-stale")}>
             {!apiAvailable ? <div className="proxy-stale-note">{t("Showing last successful snapshot.")}</div> : null}
-            <div className="proxy-selection-note">{t("Choose an outbound below. The selection creates a node release and is applied by its monitor.")}</div>
             <OutboundServiceCard group={selectionGroup} formatDuration={formatDuration} onSelect={onSelect} endpointSearch={endpointSearch} endpointStatusFilter={endpointStatusFilter} onEndpointSearch={onEndpointSearch} onEndpointStatus={onEndpointStatus} t={t} />
           </div>
         : <EmptyState
             title={apiAvailable ? "No outbound services reported." : "Proxy API is unavailable."}
             detail={apiAvailable ? "The monitor has not reported its subscription selector yet." : "The control plane will show the last successful snapshot when the monitor reconnects."}
           />}
-      <footer className="proxy-node-footer">
-        <span>{t("{count} services", { count: formatNumber(selectionGroup?.all.length || 0) })}</span>
-        <span>{snapshot ? t("Received {date}", { date: formatDate(snapshot.received_at) }) : t("Awaiting monitor data")}</span>
-      </footer>
     </Panel>
   );
 }
@@ -371,7 +379,6 @@ export default function ProxiesPage() {
   const [endpointSearch, setEndpointSearch] = useState("");
   const [endpointStatusFilter, setEndpointStatusFilter] = useState<EndpointFilter>("");
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
-  const [selectionNotice, setSelectionNotice] = useState<Release | null>(null);
   const configs = useQuery({ queryKey: ["proxy-configs"], queryFn: () => getProxyConfigs(), enabled: session === true, refetchInterval: 5_000 });
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, staleTime: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, staleTime: 30_000 });
@@ -393,9 +400,8 @@ export default function ProxiesPage() {
       expected_current_version: selection.node.desired_version || null,
       note: "Selected from proxy operations view",
     }),
-    onSuccess: async (release) => {
+    onSuccess: async () => {
       setPendingSelection(null);
-      setSelectionNotice(release);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["proxy-configs"] }),
         queryClient.invalidateQueries({ queryKey: ["nodes"] }),
@@ -428,7 +434,7 @@ export default function ProxiesPage() {
 
   const snapshot = selectedSnapshot;
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill proxies-page">
       <PageHeader
         eyebrow="OPERATE"
         title="Outbound services"
@@ -442,20 +448,18 @@ export default function ProxiesPage() {
             {siteItems.map((site) => {
               const active = site.id === selectedSiteId;
               const count = (nodes.data || []).filter((node) => node.site_id === site.id).length;
-              return <button key={site.id} type="button" role="tab" aria-selected={active} className={active ? "segmented-active" : ""} onClick={() => { setSelectedSiteId(site.id); setSelectedNodeId(""); setEndpointSearch(""); setEndpointStatusFilter(""); setSelectionNotice(null); }}>{t(site.name)}<span className="tab-count">{formatNumber(count)}</span></button>;
+              return <button key={site.id} type="button" role="tab" aria-selected={active} className={active ? "segmented-active" : ""} onClick={() => { setSelectedSiteId(site.id); setSelectedNodeId(""); setEndpointSearch(""); setEndpointStatusFilter(""); }}>{t(site.name)}<span className="tab-count">{formatNumber(count)}</span></button>;
             })}
           </div>
           {selectedSite && siteNodes.length > 1 ? <>
             <div className="proxy-switcher-heading proxy-node-switcher-heading"><div><span className="panel-kicker">{t("NODE")}</span><strong>{t("Choose a node")}</strong></div><span className="toolbar-note">{t("{count} nodes", { count: formatNumber(siteNodes.length) })}</span></div>
             <div className="segmented-control proxy-node-tabs" role="tablist" aria-label={t("Nodes")}>
-              {siteNodes.map((node) => <button key={node.id} type="button" role="tab" aria-selected={node.id === selectedNode?.id} className={node.id === selectedNode?.id ? "segmented-active" : ""} onClick={() => { setSelectedNodeId(node.id); setEndpointSearch(""); setEndpointStatusFilter(""); setSelectionNotice(null); }}>{node.name}<StatusBadge status={node.liveness_status} /></button>)}
+              {siteNodes.map((node) => <button key={node.id} type="button" role="tab" aria-selected={node.id === selectedNode?.id} className={node.id === selectedNode?.id ? "segmented-active" : ""} onClick={() => { setSelectedNodeId(node.id); setEndpointSearch(""); setEndpointStatusFilter(""); }}>{node.name}<StatusBadge status={node.liveness_status} /></button>)}
             </div>
           </> : null}
         </div>
-        <div className="proxy-toolbar-foot"><span className="toolbar-title"><Gauge size={18} />{selectedSite ? t(selectedSite.name) : t("No site selected")}</span><span className="toolbar-note">{t("A selection is released through the monitor ACK workflow.")}</span></div>
       </Panel>
-      {selectionNotice ? <div className="change-summary"><span>{t("Release queued for {node}.", { node: selectionNotice.node_ids[0] || t("the node") })}</span><StatusBadge status={selectionNotice.status} /></div> : null}
-      {selectedNode ? <NodeProxyPanel node={selectedNode} snapshot={snapshot} formatDate={formatDate} formatDuration={formatDuration} formatNumber={formatNumber} endpointSearch={endpointSearch} endpointStatusFilter={endpointStatusFilter} onEndpointSearch={setEndpointSearch} onEndpointStatus={setEndpointStatusFilter} onSelect={(endpoint) => setPendingSelection({ node: selectedNode, endpoint })} t={t} /> : <Panel><EmptyState title="No nodes enrolled." detail="Enroll a regional monitor before choosing an outbound service." /></Panel>}
+      {selectedNode ? <NodeProxyPanel node={selectedNode} snapshot={snapshot} formatDate={formatDate} formatDuration={formatDuration} endpointSearch={endpointSearch} endpointStatusFilter={endpointStatusFilter} onEndpointSearch={setEndpointSearch} onEndpointStatus={setEndpointStatusFilter} onSelect={(endpoint) => setPendingSelection({ node: selectedNode, endpoint })} t={t} /> : <Panel><EmptyState title="No nodes enrolled." detail="Enroll a regional monitor before choosing an outbound service." /></Panel>}
       <ConfirmDialog
         open={Boolean(pendingSelection)}
         onOpenChange={(open) => { if (!open && !selectMutation.isPending) setPendingSelection(null); }}
@@ -465,7 +469,6 @@ export default function ProxiesPage() {
         busy={selectMutation.isPending}
         onConfirm={() => pendingSelection && selectMutation.mutate(pendingSelection)}
       />
-      {selectMutation.error ? <div className="inline-error" role="alert">{selectMutation.error instanceof Error ? t(selectMutation.error.message) : t("The proxy selection could not be released.")}</div> : null}
     </div>
   );
 }

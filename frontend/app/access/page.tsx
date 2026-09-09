@@ -1,210 +1,190 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clipboard, Download, FileCode2, KeyRound, Laptop, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  getAccessConfig,
-  getEmployeeProxyAccess,
-  getLinuxSetupScript,
-  getProxyPAC,
-  rotateOwnProxyCredential,
-  type ProxyCredentialReveal,
-} from "../../lib/api";
+  BookOpen,
+  Check,
+  Clipboard,
+  Download,
+  ExternalLink,
+  FileCode2,
+  Laptop,
+  Link2,
+} from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { getAccessConfig, getLinuxSetupScript, getProxyPAC, getWindowsSetupScript } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { ErrorState, LoadingState } from "../../components/data-state";
-import { PageHeader } from "../../components/page-header";
 import { SessionGate, useAuthenticatedSession } from "../../components/session-gate";
-import { Button, DetailDialog, Panel, StatusBadge } from "../../components/ui";
+import { notifyToast, toastErrorMessage } from "../../components/toast";
+import { Button, StatusBadge } from "../../components/ui";
+
+type CodeSnippetProps = {
+  id: string;
+  filename: string;
+  language: string;
+  content: string;
+  copiedId: string;
+  onCopy: () => void;
+  onDownload?: () => void;
+  t: (key: string, values?: Record<string, string | number>) => string;
+};
+
+function CodeSnippet({ id, filename, language, content, copiedId, onCopy, onDownload, t }: CodeSnippetProps) {
+  const copied = copiedId === id;
+  return (
+    <div className="access-doc-codeblock">
+      <div className="access-doc-codebar">
+        <div className="access-doc-code-meta"><FileCode2 size={14} aria-hidden="true" /><code>{filename}</code><span>{language}</span></div>
+        <div className="row-actions">
+          <Button size="sm" onClick={onCopy}>{copied ? <Check size={14} /> : <Clipboard size={14} />}{copied ? t("Copied") : t("Copy")}</Button>
+          {onDownload ? <Button size="sm" onClick={onDownload}><Download size={14} />{t("Download")}</Button> : null}
+        </div>
+      </div>
+      <pre className="access-doc-code"><code>{content}</code></pre>
+    </div>
+  );
+}
+
+function SectionHeading({ id, eyebrow, title, description, children, t }: { id: string; eyebrow: string; title: string; description?: string; children?: ReactNode; t: (key: string, values?: Record<string, string | number>) => string }) {
+  return (
+    <div className="access-doc-section-heading">
+      <div><span className="access-doc-eyebrow">{t(eyebrow)}</span><h2 id={id}>{t(title)}</h2>{description ? <p>{t(description)}</p> : null}</div>
+      {children}
+    </div>
+  );
+}
+
+function downloadText(content: string, filename: string, mime = "text/plain;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function writeClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("clipboard_unavailable");
+}
 
 export default function AccessPage() {
   const { t, formatNumber } = usePreferences();
   const session = useAuthenticatedSession();
-  const queryClient = useQueryClient();
-  const [scriptCopied, setScriptCopied] = useState(false);
-  const [credentialCopied, setCredentialCopied] = useState(false);
-  const [revealed, setRevealed] = useState<ProxyCredentialReveal | null>(null);
-  const script = useQuery({
-    queryKey: ["linux-setup-script"],
-    queryFn: getLinuxSetupScript,
-    enabled: session === true,
-    staleTime: 60_000,
-  });
-  const pac = useQuery({
-    queryKey: ["proxy-pac"],
-    queryFn: getProxyPAC,
-    enabled: session === true,
-    staleTime: 60_000,
-  });
-  const accessConfig = useQuery({
-    queryKey: ["access-config"],
-    queryFn: getAccessConfig,
-    enabled: session === true,
-    staleTime: 60_000,
-  });
-  const employeeAccess = useQuery({
-    queryKey: ["employee-proxy-access"],
-    queryFn: getEmployeeProxyAccess,
-    enabled: session === true,
-    staleTime: 30_000,
-  });
-  const rotate = useMutation({
-    mutationFn: rotateOwnProxyCredential,
-    onSuccess: async (credential) => {
-      setRevealed(credential);
-      await queryClient.invalidateQueries({ queryKey: ["employee-proxy-access"] });
-    },
-  });
+  const [copiedId, setCopiedId] = useState("");
+  const accessConfig = useQuery({ queryKey: ["access-config"], queryFn: getAccessConfig, enabled: session === true, staleTime: 60_000 });
+  const linuxScript = useQuery({ queryKey: ["linux-setup-script"], queryFn: getLinuxSetupScript, enabled: session === true, staleTime: 60_000 });
+  const windowsScript = useQuery({ queryKey: ["windows-setup-script"], queryFn: getWindowsSetupScript, enabled: session === true, staleTime: 60_000 });
+  const pac = useQuery({ queryKey: ["proxy-pac"], queryFn: getProxyPAC, enabled: session === true, staleTime: 60_000 });
 
-  async function copyScript() {
-    if (!script.data) return;
-    await navigator.clipboard.writeText(script.data);
-    setScriptCopied(true);
-    window.setTimeout(() => setScriptCopied(false), 2_000);
-  }
-
-  async function copyCredential() {
-    if (!revealed) return;
-    await navigator.clipboard.writeText(revealed.password);
-    setCredentialCopied(true);
-    window.setTimeout(() => setCredentialCopied(false), 2_000);
-  }
-
-  function closeCredentialDialog(open: boolean) {
-    if (open) return;
-    setRevealed(null);
-    setCredentialCopied(false);
-    rotate.reset();
-  }
-
-  function downloadScript() {
-    if (!script.data) return;
-    const url = URL.createObjectURL(new Blob([script.data], { type: "text/x-shellscript" }));
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "grouproxy-linux-setup.sh";
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  if (session === null) return <LoadingState rows={6} />;
-  if (!session) return <SessionGate />;
-  if (script.isLoading || pac.isLoading || accessConfig.isLoading || employeeAccess.isLoading) {
-    return <LoadingState rows={6} />;
-  }
-  const accessError = script.error || pac.error || accessConfig.error || employeeAccess.error;
-  if (script.isError || pac.isError || accessConfig.isError || employeeAccess.isError) {
-    return (
-      <ErrorState
-        error={accessError instanceof Error ? accessError.message : "Unable to load access configuration."}
-        onRetry={() => void Promise.all([script.refetch(), pac.refetch(), accessConfig.refetch(), employeeAccess.refetch()])}
-      />
-    );
-  }
   const config = accessConfig.data;
-  const siteItems = employeeAccess.data?.sites || [];
+  const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:1080";
+  const shellEndpoint = shellQuote(endpoint);
+  const quickCommand = `export http_proxy=${shellEndpoint} https_proxy=${shellEndpoint} HTTP_PROXY=${shellEndpoint} HTTPS_PROXY=${shellEndpoint}`;
+  const verificationCommand = `curl --fail --silent --show-error --proxy ${shellEndpoint} https://ipinfo.io/json`;
+  const enableCommand = "chmod +x ./grouproxy-linux-setup.sh && ./grouproxy-linux-setup.sh";
+  const disableCommand = "./grouproxy-linux-setup.sh --uninstall";
+
+  const copyContent = async (id: string, content: string, label: string) => {
+    try {
+      await writeClipboard(content);
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId((current) => current === id ? "" : current), 1_800);
+      notifyToast({ title: t("Copied"), description: label, variant: "success" });
+    } catch (error) {
+      notifyToast({ title: t("Operation failed"), description: t(toastErrorMessage(error)), variant: "destructive" });
+    }
+  };
+
+  const snippets = { quick: quickCommand, verify: verificationCommand, enable: enableCommand, disable: disableCommand };
+
+  if (session === null) return <LoadingState rows={7} />;
+  if (!session) return <SessionGate />;
+  if (accessConfig.isLoading || linuxScript.isLoading || windowsScript.isLoading || pac.isLoading) return <LoadingState rows={7} />;
+  const issue = accessConfig.error || linuxScript.error || windowsScript.error || pac.error;
+  if (accessConfig.isError || linuxScript.isError || windowsScript.isError || pac.isError) {
+    return <ErrorState error={issue instanceof Error ? issue.message : "Unable to load access configuration."} onRetry={() => void Promise.all([accessConfig.refetch(), linuxScript.refetch(), windowsScript.refetch(), pac.refetch()])} />;
+  }
+  if (!config || !linuxScript.data || !windowsScript.data || !pac.data) return <LoadingState rows={7} />;
+
+  function copySnippet(id: string, content: string, label: string) {
+    void copyContent(id, content, label);
+  }
 
   return (
-    <div className="page-stack">
-      <PageHeader
-        eyebrow="GOVERN"
-        title="Access"
-        description="Employee proxy connection details, credentials, and the rendered Linux setup script."
-      />
-      <section className="access-grid">
-        <Panel className="access-state-panel">
-          <div className="panel-heading">
-            <div>
-              <span className="panel-kicker">{t("CURRENT PATH")}</span>
-              <h2>HTTP CONNECT</h2>
-            </div>
-            <StatusBadge status="enabled" />
-          </div>
-          <div className="access-facts">
-            <div><span>FQDN</span><strong className="mono">{config?.fqdn || "-"}</strong></div>
-            <div><span>{t("Proxy port")}</span><strong>{config ? formatNumber(config.port, { useGrouping: false }) : "-"}</strong></div>
-            <div><span>{t("Transport")}</span><strong>HTTP CONNECT</strong></div>
-          </div>
-          <div className="access-note">
-            <ShieldCheck size={18} />
-            <span>{t("Destination HTTPS remains end-to-end inside the HTTP CONNECT tunnel.")}</span>
-          </div>
-        </Panel>
-        <Panel>
-          <div className="panel-heading">
-            <div>
-              <span className="panel-kicker">LINUX</span>
-              <h2>{t("Setup script")}</h2>
-            </div>
-            <Laptop size={19} />
-          </div>
-          <div className="script-actions">
-            <Button variant="secondary" onClick={() => void copyScript()}><Clipboard size={16} /> {scriptCopied ? t("Copied") : t("Copy")}</Button>
-            <Button variant="primary" onClick={downloadScript}><Download size={16} /> {t("Download")}</Button>
-          </div>
-          <pre className="script-view">{script.data}</pre>
-        </Panel>
-        <Panel className="credential-panel">
-          <div className="panel-heading">
-            <div>
-              <span className="panel-kicker">{t("IDENTITY")}</span>
-              <h2>{t("Proxy credentials")}</h2>
-            </div>
-            <KeyRound size={19} />
-          </div>
-          {rotate.isError ? <div className="credential-error" role="alert">{t(rotate.error instanceof Error ? rotate.error.message : "request_failed")}</div> : null}
-          <div className="credential-list">
-            {siteItems.map((site) => (
-              <div className="credential-row" key={site.id}>
-                <div>
-                  <strong>{t(site.name)}</strong>
-                  <span>{site.proxy_auth_required ? t("Authentication required") : t("Network allowlist only")}</span>
-                  {site.credential_configured && site.username ? <code>{site.username}</code> : null}
-                </div>
-                <div className="credential-row-actions">
-                  <StatusBadge status={site.credential_configured ? "ready" : "pending"} />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={rotate.isPending}
-                    onClick={() => rotate.mutate(site.id)}
-                  >
-                    <KeyRound size={14} /> {site.credential_configured ? t("Rotate credential") : t("Create credential")}
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Panel>
-        <Panel>
-          <div className="panel-heading">
-            <div>
-              <span className="panel-kicker">PAC</span>
-              <h2>{t("Automatic proxy configuration")}</h2>
-            </div>
-            <FileCode2 size={19} />
-          </div>
-          <p className="panel-description">{t("PAC chooses the single HTTP listener and does not grant access.")}</p>
-          <pre className="script-view">{pac.data}</pre>
-        </Panel>
-      </section>
-      <DetailDialog
-        open={Boolean(revealed)}
-        onOpenChange={closeCredentialDialog}
-        title="Proxy credential"
-        contentClassName="credential-dialog-content"
-      >
-        {revealed ? (
-          <div className="detail-stack">
-            <dl className="detail-list">
-              <div><dt>{t("Proxy username")}</dt><dd className="mono">{revealed.username}</dd></div>
-              <div><dt>{t("One-time proxy password")}</dt><dd className="mono credential-secret">{revealed.password}</dd></div>
-              {revealed.release_id ? <div><dt>{t("Credential release")}</dt><dd className="mono">{revealed.release_id}</dd></div> : null}
-            </dl>
-            <Button variant="primary" onClick={() => void copyCredential()}><Clipboard size={16} /> {credentialCopied ? t("Password copied") : t("Copy password")}</Button>
-          </div>
-        ) : null}
-      </DetailDialog>
+    <div className="page-fill access-docs-page">
+      <div className="access-docs-layout">
+        <main className="access-docs-article">
+          <header className="access-docs-header">
+            <div className="access-docs-title-row"><div className="access-docs-mark"><BookOpen size={18} /></div><div><span className="access-doc-eyebrow">{t("ACCESS GUIDE")}</span><h1>{t("Proxy access")}</h1></div></div>
+            <p>{t("Configure the Grouproxy HTTP CONNECT endpoint on a workstation, verify the route, and return to a direct connection when finished.")}</p>
+            <div className="access-endpoint-bar"><div className="access-endpoint-status"><StatusBadge status="enabled" /><span>{t(config.environment === "test" ? "Test environment" : "Production environment")}</span></div><code>{endpoint}</code><span className="access-endpoint-port">{t("Port")} {formatNumber(config.port, { useGrouping: false })}</span></div>
+          </header>
+
+          <section className="access-doc-section" aria-labelledby="access-overview">
+            <SectionHeading id="access-overview" eyebrow="OVERVIEW" title="Proxy endpoint" description="The proxy service is exposed directly on port 1080. Dashboard access is separate and does not require an NGINX forwarding layer." t={t} />
+            <div className="access-doc-callout"><Link2 size={17} /><div><strong>{t("HTTP CONNECT")}</strong><span>{t("Destination HTTPS remains end-to-end inside the HTTP CONNECT tunnel. No proxy credentials or TLS interception are used.")}</span></div></div>
+            <dl className="access-doc-facts"><div><dt>{t("Environment")}</dt><dd>{t(config.environment === "test" ? "Test environment" : "Production environment")}</dd></div><div><dt>FQDN</dt><dd className="mono">{config.fqdn}</dd></div><div><dt>{t("Port")}</dt><dd>{formatNumber(config.port, { useGrouping: false })}</dd></div><div><dt>{t("Protocol")}</dt><dd>HTTP CONNECT</dd></div></dl>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-quick-start">
+            <SectionHeading id="access-quick-start" eyebrow="QUICK START" title="Configure a shell in one line" description="The variables apply to this terminal and the processes started from it." t={t} />
+            <CodeSnippet id="quick" filename="shell" language="bash" content={snippets.quick} copiedId={copiedId} onCopy={() => copySnippet("quick", snippets.quick, t("Configure a shell in one line"))} onDownload={() => downloadText(snippets.quick, "grouproxy-proxy-env.sh", "text/x-shellscript")} t={t} />
+            <ol className="access-doc-steps"><li>{t("Paste the command into a new terminal.")}</li><li>{t("Run the verification command below before opening applications.")}</li><li>{t("Close the terminal or run the disable command to return to direct access.")}</li></ol>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-windows">
+            <SectionHeading id="access-windows" eyebrow="WINDOWS" title="Windows one-click setup" description="The pre-generated PowerShell asset configures the current Windows user and keeps a backup for a reversible disable operation." t={t}><span className="access-doc-download-note"><Download size={14} />{t("Download ready")}</span></SectionHeading>
+            <CodeSnippet id="windows" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsScript.data} copiedId={copiedId} onCopy={() => copySnippet("windows", windowsScript.data, t("Windows one-click setup"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
+            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script, then open PowerShell in its download folder.")}</p><p><strong>2.</strong> <code>Set-ExecutionPolicy -Scope Process Bypass</code>, then run <code>.\grouproxy-windows-setup.ps1</code>.</p><p><strong>3.</strong> {t("Use -SkipDirectTest to skip the optional direct-network checks, or -Disable to restore the previous Windows proxy settings.")}</p></div>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-macos">
+            <SectionHeading id="access-macos" eyebrow="MACOS" title="macOS shortcut" description="Use the shortcut prepared for the selected deployment environment." t={t} />
+            <div className="access-doc-action-row"><a className="access-doc-link-button" href={config.macos_shortcut_url} target="_blank" rel="noreferrer"><Laptop size={17} />{t("Get shortcut")}<ExternalLink size={14} /></a><span>{t("Opens Apple Shortcuts in a new tab.")}</span></div>
+            <ol className="access-doc-steps"><li>{t("Open the environment-specific iCloud link.")}</li><li>{t("Review the actions and add the shortcut to the Shortcuts app.")}</li><li>{t("Run it from Shortcuts and follow the prompts shown by macOS.")}</li></ol>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-linux">
+            <SectionHeading id="access-linux" eyebrow="LINUX" title="Linux desktop and shell setup" description="The repository-provided script configures shell variables and GNOME or KDE settings when available." t={t} />
+            <CodeSnippet id="linux" filename="grouproxy-linux-setup.sh" language="bash" content={linuxScript.data} copiedId={copiedId} onCopy={() => copySnippet("linux", linuxScript.data, t("Linux desktop and shell setup"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} t={t} />
+            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script and make it executable.")}</p><p><strong>2.</strong> {t("Run it as the current user for shell and desktop settings.")}</p><p><strong>3.</strong> {t("Use --no-desktop for shell-only setup, --system for system defaults as root, or --uninstall to remove only Grouproxy-managed settings.")}</p></div>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-verify">
+            <SectionHeading id="access-verify" eyebrow="VERIFY" title="Test the actual proxy route" description="These commands make a real HTTPS request through HTTP CONNECT and show the proxy exit address." t={t} />
+            <CodeSnippet id="verify" filename="verify-proxy.sh" language="bash" content={snippets.verify} copiedId={copiedId} onCopy={() => copySnippet("verify", snippets.verify, t("Test the actual proxy route"))} onDownload={() => downloadText(snippets.verify, "grouproxy-verify-proxy.sh", "text/x-shellscript")} t={t} />
+            <div className="access-doc-action-row"><button className="access-doc-link-button access-doc-link-secondary" type="button" onClick={() => downloadText(pac.data, "grouproxy-proxy.pac", "application/x-ns-proxy-autoconfig")}><Download size={16} />{t("Download PAC file")}</button><span>{t("PAC chooses the single HTTP listener and does not grant access.")}</span></div>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-notes">
+            <SectionHeading id="access-notes" eyebrow="NOTES" title="Connection behavior" description="Keep these details in mind when troubleshooting workstation access." t={t} />
+            <ul className="access-doc-notes"><li>{t("The proxy is HTTP CONNECT on TCP 1080; HTTPS destinations remain encrypted end-to-end.")}</li><li>{t("The endpoint has no proxy authentication layer. Network policy and site CIDRs control access.")}</li><li>{t("Existing applications may need to be restarted after enabling or disabling environment variables.")}</li></ul>
+            <div className="access-doc-command-pair"><CodeSnippet id="enable" filename={t("Linux enable")} language="bash" content={snippets.enable} copiedId={copiedId} onCopy={() => copySnippet("enable", snippets.enable, t("Linux enable"))} t={t} /><CodeSnippet id="disable" filename={t("Linux disable")} language="bash" content={snippets.disable} copiedId={copiedId} onCopy={() => copySnippet("disable", snippets.disable, t("Linux disable"))} t={t} /></div>
+          </section>
+        </main>
+
+        <aside className="access-docs-rail" aria-label={t("On this page")}><div className="access-docs-rail-sticky"><div className="access-docs-rail-title">{t("On this page")}</div>{[["access-overview", "Overview"], ["access-quick-start", "Quick start"], ["access-windows", "Windows"], ["access-macos", "macOS"], ["access-linux", "Linux"], ["access-verify", "Verification"], ["access-notes", "Notes"]].map(([id, label]) => <a href={`#${id}`} key={id}>{t(label)}</a>)}<div className="access-docs-rail-endpoint"><span>{t("Environment")}</span><strong>{t(config.environment === "test" ? "Test environment" : "Production environment")}</strong><code>{config.fqdn}:{config.port}</code></div></div></aside>
+      </div>
     </div>
   );
 }

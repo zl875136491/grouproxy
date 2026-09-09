@@ -1,24 +1,24 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowRight, FileClock, Network, ShieldCheck } from "lucide-react";
+import { ArrowRight, FileClock, Network } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import {
   getNodes,
   getOverview,
   getReleases,
   getSites,
-  getTasks,
   type Node,
   type Site,
 } from "../lib/api";
 import { usePreferences } from "../lib/preferences";
-import { label } from "../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../components/data-state";
 import { ControlPlaneTopology } from "../components/control-plane-topology";
 import { PageHeader } from "../components/page-header";
 import { SessionGate, useManagementSession } from "../components/session-gate";
 import { Panel, StatusBadge } from "../components/ui";
+import { notifyToast } from "../components/toast";
 
 const activeReleaseStates = new Set(["queued", "applying", "health_check", "rolling_back"]);
 
@@ -35,13 +35,32 @@ function siteState(site: Site, nodes: Node[]) {
 }
 
 export default function OverviewPage() {
-  const { t, formatDate, formatNumber, formatPercent } = usePreferences();
+  const { t, formatDate, formatNumber } = usePreferences();
   const session = useManagementSession();
   const overview = useQuery({ queryKey: ["overview"], queryFn: getOverview, enabled: session === true, refetchInterval: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, refetchInterval: 10_000 });
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, refetchInterval: 10_000 });
   const releases = useQuery({ queryKey: ["releases"], queryFn: () => getReleases(), enabled: session === true, refetchInterval: 5_000 });
-  const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => getTasks(), enabled: session === true, refetchInterval: 5_000 });
+  const lastReportedDrift = useRef<number | null>(null);
+  const [selectedSiteId, setSelectedSiteId] = useState("");
+
+  useEffect(() => {
+    const availableSites = sites.data || [];
+    if (!selectedSiteId && availableSites[0]) setSelectedSiteId(availableSites[0].id);
+    if (selectedSiteId && !availableSites.some((site) => site.id === selectedSiteId)) setSelectedSiteId(availableSites[0]?.id || "");
+  }, [selectedSiteId, sites.data]);
+
+  useEffect(() => {
+    const driftedNodes = overview.data?.drifted_nodes || 0;
+    if (driftedNodes > 0 && lastReportedDrift.current !== driftedNodes) {
+      notifyToast({
+        title: t("{count} nodes need attention", { count: formatNumber(driftedNodes) }),
+        description: t("Configuration or service state differs from the desired release."),
+        variant: "destructive",
+      });
+    }
+    lastReportedDrift.current = driftedNodes;
+  }, [formatNumber, overview.data?.drifted_nodes, t]);
 
   if (session === null) return <LoadingState rows={8} />;
   if (!session) return <SessionGate />;
@@ -56,16 +75,16 @@ export default function OverviewPage() {
   const siteItems = sites.data || [];
   const nodeItems = nodes.data || [];
   const releaseItems = releases.data || [];
-  const taskItems = tasks.data || [];
   const overviewData = overview.data;
   const activeReleases = releaseItems.filter((item) => activeReleaseStates.has(item.status));
-  const activeTasks = taskItems.filter((item) => ["queued", "running", "cancel_requested"].includes(item.status));
   const nodesBySite = new Map(siteItems.map((site) => [site.id, nodeItems.filter((node) => node.site_id === site.id)]));
   const siteNames = new Map(siteItems.map((site) => [site.id, site.name]));
   const topologySites = siteItems.map((site) => {
     const siteNodes = nodesBySite.get(site.id) || [];
     return { site, state: siteState(site, siteNodes), nodeCount: siteNodes.length };
   });
+  const selectedSite = siteItems.find((site) => site.id === selectedSiteId) || null;
+  const selectedSiteNodes = selectedSite ? (nodesBySite.get(selectedSite.id) || []) : [];
 
   return (
     <div className="page-stack">
@@ -76,14 +95,6 @@ export default function OverviewPage() {
         actions={<Link className="button button-primary button-md" href="/sites"><Network size={16} /> {t("Manage policy")}</Link>}
       />
 
-      {overviewData.drifted_nodes > 0 ? (
-        <div className="alert-strip alert-danger" role="alert">
-          <ShieldCheck size={18} />
-          <div><strong>{t("{count} nodes need attention", { count: formatNumber(overviewData.drifted_nodes) })}</strong><span>{t("Configuration or service state differs from the desired release.")}</span></div>
-          <Link href="/nodes">{t("Review nodes")} <ArrowRight size={15} /></Link>
-        </div>
-      ) : null}
-
       <section className="metric-grid" aria-label={t("Control-plane summary")}>
         <Panel className="metric-panel"><span>{t("Nodes online")}</span><strong>{formatNumber(overviewData.online_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Heartbeat state")}</em></Panel>
         <Panel className="metric-panel"><span>{t("Configuration in sync")}</span><strong>{formatNumber(overviewData.in_sync_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Applied bundle matches")}</em></Panel>
@@ -92,7 +103,7 @@ export default function OverviewPage() {
       </section>
 
       <section className="metric-grid metric-grid-trio" aria-label={t("Deployment and alert summary")}>
-        <Panel className="metric-panel"><span>{t("Active deployments")}</span><strong>{formatNumber(activeReleases.length)}</strong><em>{t("{count} queued or running tasks", { count: formatNumber(activeTasks.length) })}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Active deployments")}</span><strong>{formatNumber(activeReleases.length)}</strong><em>{t("Queued and running releases")}</em></Panel>
         <Link className="panel metric-panel metric-panel-link" href="/alerts"><span>{t("Open alerts")}</span><strong>{formatNumber(overviewData.open_alerts)}</strong><em>{t("Review active conditions")}</em></Link>
         <Link className="panel metric-panel metric-panel-link" href="/probes"><span>{t("Open circuits")}</span><strong>{formatNumber(overviewData.open_circuits)}</strong><em>{t("Review outbound health")}</em></Link>
       </section>
@@ -100,7 +111,8 @@ export default function OverviewPage() {
       <section className="dashboard-grid dashboard-grid-primary">
         <Panel className="topology-panel">
           <div className="panel-heading"><div><span className="panel-kicker">{t("REGIONAL TOPOLOGY")}</span><h2>{t("Control plane to edge sites")}</h2></div><Link href="/nodes">{t("Node inventory")} <ArrowRight size={15} /></Link></div>
-          <ControlPlaneTopology sites={topologySites} onlineNodes={overviewData.online_nodes} totalNodes={overviewData.nodes} formatNumber={formatNumber} t={t} />
+          <ControlPlaneTopology sites={topologySites} onlineNodes={overviewData.online_nodes} totalNodes={overviewData.nodes} formatNumber={formatNumber} t={t} selectedSiteId={selectedSiteId} onSiteSelect={setSelectedSiteId} />
+          {selectedSite ? <TopologySiteDetail site={selectedSite} nodes={selectedSiteNodes} state={topologySites.find((item) => item.site.id === selectedSite.id)?.state || "unknown"} formatNumber={formatNumber} t={t} /> : <div className="topology-site-empty">{t("Select a site in the topology to inspect its nodes.")}</div>}
         </Panel>
 
         <Panel className="activity-panel">
@@ -113,16 +125,22 @@ export default function OverviewPage() {
         </Panel>
       </section>
 
-      <section className="dashboard-grid dashboard-grid-secondary">
-        <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">{t("EDGE INVENTORY")}</span><h2>{t("Node state")}</h2></div><Link href="/nodes">{t("Open nodes")} <ArrowRight size={15} /></Link></div>
-          <div className="table-wrap"><table><thead><tr><th>{t("Node")}</th><th>{t("Liveness")}</th><th>{t("Config")}</th><th>{t("Service")}</th><th>{t("Applied / desired")}</th></tr></thead><tbody>{nodeItems.map((node) => <tr key={node.id}><td><strong>{node.name}</strong><span className="cell-secondary">{t(siteNames.get(node.site_id) || node.site_id)}</span></td><td><StatusBadge status={node.liveness_status} /></td><td><StatusBadge status={node.config_status} /></td><td><StatusBadge status={node.service_status} /></td><td>{formatNumber(node.applied_version)} / {formatNumber(node.desired_version)}</td></tr>)}</tbody></table></div>
-        </Panel>
-        <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">{t("TASK QUEUE")}</span><h2>{t("Active work")}</h2></div><Link href="/tasks">{t("Open queue")} <ArrowRight size={15} /></Link></div>
-          {tasks.isLoading ? <LoadingState rows={3} /> : tasks.isError ? <ErrorState error="Task queue is unavailable." onRetry={() => void tasks.refetch()} /> : activeTasks.length ? <div className="activity-list">{activeTasks.slice(0, 5).map((task) => <Link className="activity-row" href="/tasks" key={task.task_id}><span className="activity-icon"><Activity size={16} /></span><div><strong>{t(label(task.task_type))}</strong><span>{t(task.stage.replaceAll("_", " "))} · {formatPercent(task.progress)}</span></div><StatusBadge status={task.status} /></Link>)}</div> : <EmptyState title="No active tasks" detail="Queued and running jobs appear here." />}
-        </Panel>
-      </section>
     </div>
   );
+}
+
+function TopologySiteDetail({
+  site,
+  nodes,
+  state,
+  formatNumber,
+  t,
+}: {
+  site: Site;
+  nodes: Node[];
+  state: string;
+  formatNumber: (value: number) => string;
+  t: (key: string, values?: Record<string, string | number>) => string;
+}) {
+  return <article className="topology-site-detail"><header><div><span className="panel-kicker">{t("SELECTED SITE")}</span><h3>{t(site.name)}</h3><span className="mono">{site.slug}</span></div><div className="topology-site-detail-actions"><StatusBadge status={state} /><Link href={`/sites/${site.slug}/cidrs`}>{t("Open policy")} <ArrowRight size={14} /></Link></div></header><div className="topology-site-facts"><div><span>{t("Nodes")}</span><strong>{formatNumber(nodes.length)}</strong></div><div><span>{t("Online")}</span><strong>{formatNumber(nodes.filter((node) => node.liveness_status === "online").length)}</strong></div><div><span>{t("In sync")}</span><strong>{formatNumber(nodes.filter((node) => node.config_status === "in_sync").length)}</strong></div></div>{nodes.length ? <div className="topology-node-list">{nodes.map((node) => <div className="topology-node-row" key={node.id}><div><strong>{node.name}</strong><small className="mono">{node.agent_id}</small></div><div><StatusBadge status={node.liveness_status} /><StatusBadge status={node.config_status} /></div></div>)}</div> : <p className="topology-site-empty">{t("No node enrolled")}</p>}</article>;
 }

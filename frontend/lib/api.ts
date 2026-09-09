@@ -31,10 +31,8 @@ export type Site = {
   slug: string;
   name: string;
   dns_note: string;
-  proxy_auth_required: boolean;
   shutdown: boolean;
   config_revision: number;
-  http_port: number;
 };
 
 export type Node = {
@@ -111,7 +109,6 @@ export type CIDREntry = {
 export type CIDRPreview = {
   allowed: boolean;
   matched_cidr: string | null;
-  requires_auth: boolean;
   reason: string;
   effective_cidrs: string[];
 };
@@ -147,6 +144,7 @@ export type DestinationBlacklist = {
 export type SubscriptionSource = {
   id: string;
   name: string;
+  source_type: "http" | "upload" | "single_node";
   url_hint: string;
   fetch_interval_sec: number;
   max_body_bytes: number;
@@ -174,6 +172,11 @@ export type SubscriptionVersion = {
   node_count: number;
   published: boolean;
   created_at: string;
+};
+
+export type SubscriptionVersionContent = SubscriptionVersion & {
+  content: string;
+  encoding: "utf-8";
 };
 
 export type SiteSubscription = {
@@ -389,24 +392,11 @@ export type Alert = {
 };
 
 export type AccessConfig = {
+  environment: "test" | "production";
   fqdn: string;
   port: number;
   protocol: "http-connect";
-  https_proxy_enabled: boolean;
-};
-
-export type EmployeeAccessSite = {
-  id: string;
-  slug: string;
-  name: string;
-  proxy_auth_required: boolean;
-  credential_configured: boolean;
-  username: string | null;
-};
-
-export type EmployeeProxyAccess = {
-  itcode: string;
-  sites: EmployeeAccessSite[];
+  macos_shortcut_url: string;
 };
 
 export type Employee = {
@@ -416,22 +406,6 @@ export type Employee = {
   created_at: string;
   password_changed_at: string | null;
   last_login_at: string | null;
-};
-
-export type ProxyCredential = {
-  site_id: string;
-  username: string;
-  active: boolean;
-  rotated_at: string;
-};
-
-export type ProxyCredentialReveal = {
-  site_id: ProxyCredential["site_id"];
-  username: ProxyCredential["username"];
-  active: ProxyCredential["active"];
-  rotated_at: ProxyCredential["rotated_at"];
-  password: string;
-  release_id: string | null;
 };
 
 export type BackupRecord = {
@@ -467,14 +441,54 @@ export class ApiError extends Error {
   }
 }
 
-const baseURL = (process.env.NEXT_PUBLIC_API_BASE_URL || "/backend-api").replace(
+const baseURL = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(
   /\/$/,
   "",
 );
 const tokenKey = "grouproxy.management_token";
 const roleKey = "grouproxy.session_role";
+const expiresAtKey = "grouproxy.session_expires_at";
+const authNoticeKey = "grouproxy.authentication_notice";
+
+const authenticationFailureCodes = new Set([
+  "management_auth_required",
+  "management_session_expired",
+  "management_session_revoked",
+  "management_session_invalid",
+  "management_account_inactive",
+]);
 
 export type SessionRole = AuthSession["role"];
+
+function storedSessionExpired() {
+  if (typeof window === "undefined") return false;
+  const value = window.localStorage.getItem(expiresAtKey);
+  if (!value) return false;
+  const expiresAt = Date.parse(value);
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+}
+
+function redirectForAuthenticationFailure(detail: string) {
+  if (typeof window === "undefined") return;
+  clearManagementSession();
+  try {
+    window.sessionStorage.setItem(authNoticeKey, detail);
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts.
+  }
+  if (window.location.pathname !== "/login") {
+    window.location.replace(`/login?reason=${encodeURIComponent(detail)}`);
+  }
+}
+
+function activeManagementToken() {
+  const token = managementToken();
+  if (token && storedSessionExpired()) {
+    redirectForAuthenticationFailure("management_session_expired");
+    return "";
+  }
+  return token;
+}
 
 export function managementToken() {
   if (typeof window !== "undefined") {
@@ -484,11 +498,11 @@ export function managementToken() {
 }
 
 export function hasManagementSession() {
-  return Boolean(managementToken()) && managementSessionRole() !== "employee";
+  return Boolean(activeManagementToken()) && managementSessionRole() !== "employee";
 }
 
 export function hasAuthenticatedSession() {
-  return Boolean(managementToken());
+  return Boolean(activeManagementToken());
 }
 
 export function managementSessionRole(): SessionRole | null {
@@ -501,14 +515,33 @@ export function clearManagementSession() {
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(tokenKey);
     window.localStorage.removeItem(roleKey);
+    window.localStorage.removeItem(expiresAtKey);
   }
 }
 
-export function saveManagementSession(token: string, role: SessionRole) {
+export function saveManagementSession(token: string, role: SessionRole, expiresAt: string) {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(tokenKey, token);
     window.localStorage.setItem(roleKey, role);
+    window.localStorage.setItem(expiresAtKey, expiresAt);
+    try {
+      window.sessionStorage.removeItem(authNoticeKey);
+    } catch {
+      // Storage can be unavailable in hardened/private browser contexts.
+    }
   }
+}
+
+export function consumeAuthenticationNotice() {
+  if (typeof window === "undefined") return "";
+  let detail = "";
+  try {
+    detail = window.sessionStorage.getItem(authNoticeKey) || "";
+    window.sessionStorage.removeItem(authNoticeKey);
+  } catch {
+    // The query parameter remains as a fallback when storage is unavailable.
+  }
+  return detail;
 }
 
 export function loginWithPassword(itcode: string, password: string) {
@@ -578,7 +611,10 @@ async function readError(response: Response) {
 
 async function apiFetch(path: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(`${baseURL}${path}`, { ...init, cache: "no-store" });
+    const target = baseURL && (path === baseURL || path.startsWith(`${baseURL}/`))
+      ? path
+      : `${baseURL}${path}`;
+    return await fetch(target, { ...init, cache: "no-store" });
   } catch {
     throw new ApiError(0, "network_error");
   }
@@ -590,7 +626,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = managementToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await apiFetch(path, { ...init, headers });
-  if (!response.ok) throw new ApiError(response.status, await readError(response));
+  if (!response.ok) {
+    const detail = await readError(response);
+    if (response.status === 401 && token && authenticationFailureCodes.has(detail)) {
+      redirectForAuthenticationFailure(detail);
+    }
+    throw new ApiError(response.status, detail);
+  }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
@@ -600,7 +642,13 @@ async function requestText(path: string): Promise<string> {
   const response = await apiFetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!response.ok) throw new ApiError(response.status, await readError(response));
+  if (!response.ok) {
+    const detail = await readError(response);
+    if (response.status === 401 && token && authenticationFailureCodes.has(detail)) {
+      redirectForAuthenticationFailure(detail);
+    }
+    throw new ApiError(response.status, detail);
+  }
   return response.text();
 }
 
@@ -613,7 +661,13 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
     headers,
     body: form,
   });
-  if (!response.ok) throw new ApiError(response.status, await readError(response));
+  if (!response.ok) {
+    const detail = await readError(response);
+    if (response.status === 401 && token && authenticationFailureCodes.has(detail)) {
+      redirectForAuthenticationFailure(detail);
+    }
+    throw new ApiError(response.status, detail);
+  }
   return (await response.json()) as T;
 }
 
@@ -649,12 +703,6 @@ export function updateSiteName(siteId: string, name: string) {
 
 export function getEmployees() {
   return request<Employee[]>("/api/v1/employees");
-}
-
-export function getEmployeeProxyCredentials(itcode: string) {
-  return request<ProxyCredential[]>(
-    `/api/v1/employees/${encodeURIComponent(itcode)}/proxy-credentials`,
-  );
 }
 
 export function getNodes() {
@@ -704,10 +752,6 @@ export function selectNodeProxy(nodeId: string, value: ProxySelectionRequest) {
 
 export function setSiteShutdown(siteId: string, shutdown: boolean) {
   return request<Site>(`/api/v1/sites/${siteId}/shutdown`, jsonRequest("POST", { shutdown }));
-}
-
-export function setSiteProxyAuth(siteId: string, required: boolean) {
-  return request<Site>(`/api/v1/sites/${siteId}/proxy-auth`, jsonRequest("PUT", { required }));
 }
 
 export function getSiteCIDRs(siteId: string) {
@@ -769,6 +813,12 @@ export function getSubscriptions() {
   return request<SubscriptionCatalog>("/api/v1/subscriptions");
 }
 
+export function getSubscriptionVersionContent(sourceId: string, versionId: string) {
+  return request<SubscriptionVersionContent>(
+    `/api/v1/subscriptions/${encodeURIComponent(sourceId)}/versions/${encodeURIComponent(versionId)}/content`,
+  );
+}
+
 export function createSubscriptionSource(value: {
   name: string;
   url: string;
@@ -790,6 +840,16 @@ export function uploadSubscription(name: string, file: File) {
   form.set("name", name);
   form.set("file", file);
   return requestForm<SubscriptionUploadResponse>("/api/v1/subscriptions/upload", form);
+}
+
+export function createSingleNodeSubscription(name: string, uri: string) {
+  return request<SubscriptionUploadResponse>("/api/v1/subscriptions/single-node", {
+    ...jsonRequest("POST", { name, uri }),
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": createIdempotencyKey("subscription.single-node"),
+    },
+  });
 }
 
 export function refreshSubscription(sourceId: string) {
@@ -980,26 +1040,12 @@ export function getLinuxSetupScript() {
   return requestText("/api/v1/access/linux-setup.sh");
 }
 
+export function getWindowsSetupScript() {
+  return requestText("/api/v1/access/windows-setup.ps1");
+}
+
 export function getAccessConfig() {
   return request<AccessConfig>("/api/v1/access/config");
-}
-
-export function getEmployeeProxyAccess() {
-  return request<EmployeeProxyAccess>("/api/v1/access/proxy-credentials");
-}
-
-export function rotateOwnProxyCredential(siteId: string) {
-  return request<ProxyCredentialReveal>(
-    `/api/v1/access/proxy-credentials/${encodeURIComponent(siteId)}/rotate`,
-    jsonRequest("POST", {}),
-  );
-}
-
-export function rotateEmployeeProxyCredential(siteId: string, itcode: string) {
-  return request<ProxyCredentialReveal>(
-    `/api/v1/sites/${encodeURIComponent(siteId)}/proxy-credentials/${encodeURIComponent(itcode)}/rotate`,
-    jsonRequest("POST", {}),
-  );
 }
 
 export function getProxyPAC() {

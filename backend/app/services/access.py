@@ -1,22 +1,55 @@
-"""Render the employee Linux setup script from the checked-in deployment template."""
+"""Select immutable employee access assets for the active deployment."""
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from ..config import Settings
 
-_TEMPLATE_PATH = Path(__file__).resolve().parents[3] / "deploy" / "linux-setup-proxy.sh"
+_DEPLOY_PATH = Path(__file__).resolve().parents[3] / "deploy"
 
 
-def render_linux_setup_script(settings: Settings) -> str:
-    """Use the same HTTP-only script for the download endpoint and repository."""
+@dataclass(frozen=True)
+class AccessProfile:
+    environment: Literal["test", "production"]
+    fqdn: str
+    macos_shortcut_url: str
+    linux_script_path: Path
+    windows_script_path: Path
 
-    template = _TEMPLATE_PATH.read_text(encoding="utf-8")
-    host_line = 'PROXY_HOST="${GROUPROXY_PROXY_HOST:-proxy.corp.internal}"'
-    port_line = 'PROXY_PORT="${GROUPROXY_PROXY_PORT:-80}"'
-    rendered_host_line = (
-        f'PROXY_HOST="${{GROUPROXY_PROXY_HOST:-{settings.proxy_access_fqdn}}}"'
-    )
-    rendered_port_line = f'PROXY_PORT="${{GROUPROXY_PROXY_PORT:-{settings.proxy_access_port}}}"'
-    if host_line not in template or port_line not in template:
-        raise RuntimeError("linux_setup_template_markers_missing")
-    return template.replace(host_line, rendered_host_line).replace(port_line, rendered_port_line)
+
+_ACCESS_PROFILES: dict[str, AccessProfile] = {
+    "test": AccessProfile(
+        environment="test",
+        fqdn="test-proxy.1oa.com.cn",
+        macos_shortcut_url="https://www.icloud.com/shortcuts/5afbae477a7145e28ec2839d56577885",
+        linux_script_path=_DEPLOY_PATH / "linux-setup-proxy-test.sh",
+        windows_script_path=_DEPLOY_PATH / "windows-setup-proxy-test.ps1",
+    ),
+    "production": AccessProfile(
+        environment="production",
+        fqdn="proxy.1oa.com.cn",
+        macos_shortcut_url="https://www.icloud.com/shortcuts/2eebe51c251d4da6949d85363e482872",
+        linux_script_path=_DEPLOY_PATH / "linux-setup-proxy.sh",
+        windows_script_path=_DEPLOY_PATH / "windows-setup-proxy.ps1",
+    ),
+}
+
+
+def access_profile(settings: Settings) -> AccessProfile:
+    """Map every non-test deployment to the production access assets."""
+
+    # ``getattr`` keeps this selector compatible with lightweight settings
+    # doubles used by maintenance scripts while the real Pydantic settings
+    # object always provides ``environment``.
+    environment = str(getattr(settings, "environment", "production"))
+    profile_name = "test" if environment.strip().lower() == "test" else "production"
+    return _ACCESS_PROFILES[profile_name]
+
+
+def load_linux_setup_script(settings: Settings) -> str:
+    return access_profile(settings).linux_script_path.read_text(encoding="utf-8")
+
+
+def load_windows_setup_script(settings: Settings) -> str:
+    return access_profile(settings).windows_script_path.read_text(encoding="utf-8")

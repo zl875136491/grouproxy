@@ -16,7 +16,6 @@ set +a
 
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 FRONTEND_URL="http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
-DASHBOARD_BASE_PATH="${GROUPROXY_TEST_DASHBOARD_BASE_PATH:-/dashboard}"
 AUTH_HEADER="Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}"
 
 curl -fsS "$BACKEND_URL/healthz" >/dev/null
@@ -69,7 +68,9 @@ curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/audit/export?export_format=ndjs
   | grep -qx true
 
 access_config="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/config")"
-jq -e '.protocol == "http-connect" and .https_proxy_enabled == false and (.port | type) == "number"' \
+jq -e '(.environment == "test" or .environment == "production") and
+  (.macos_shortcut_url | startswith("https://www.icloud.com/shortcuts/")) and
+  .protocol == "http-connect" and (.port == 1080)' \
   <<<"$access_config" >/dev/null
 curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/proxy.pac" \
   | grep -q 'return "PROXY '
@@ -78,6 +79,10 @@ grep -q 'HTTPS transport is intentionally disabled.' <<<"$linux_setup_script"
 grep -q -- '--uninstall' <<<"$linux_setup_script"
 grep -q 'gsettings set org.gnome.system.proxy mode manual' <<<"$linux_setup_script"
 grep -q 'kwriteconfig' <<<"$linux_setup_script"
+windows_setup_script="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/windows-setup.ps1")"
+grep -q 'ProxyEnable' <<<"$windows_setup_script"
+grep -q -- '-Disable' <<<"$windows_setup_script"
+grep -q 'https://ipinfo.io/json' <<<"$windows_setup_script"
 
-curl -fsS "$FRONTEND_URL${DASHBOARD_BASE_PATH}/alerts" | grep -qi 'grouproxy'
+curl -fsS "$FRONTEND_URL/alerts" | grep -qi 'grouproxy'
 printf 'Phase 3 local observability and access validation passed.\n'

@@ -7,18 +7,23 @@ and nftables prechecks before applying the candidate. It samples the proxy
 listener and loopback Clash API during the health window and restores
 last-good state on failure.
 
-Version `0.3.0` also resolves immutable subscription payloads. It validates
+Version `0.4.0` also resolves immutable subscription payloads. It validates
 the declared SHA-256 before parsing Clash YAML, SIP008, or sing-box outbound
-JSON, and only fetches a large blob from its configured backend with its node
-token. The resolved sing-box configuration is persisted as `last-good.json`,
+JSON, including normalized single-node VMess/VLESS payloads, and only fetches
+a large blob from its configured backend with its node token. The resolved
+sing-box configuration is persisted as `last-good.json`,
 so restart and rollback do not need historical blob access.
 
-When a site requires HTTP Basic authentication, the monitor validates the
-signed `proxy_auth` user list and renders only the username/password fields
-into its local HTTP inbound. Clash Trojan sources are converted to sing-box
-TLS objects, including SNI, certificate-validation mode, ALPN, and client
-fingerprint values. The control plane continues to own ACLs, routes, direct /
-block outbounds, and selectors.
+Deployed public HTTP inbounds are fixed to port `1080` and have no application
+credential list. The same-host test harness may use one explicit alternate
+public listener only when `test_ingress_override: true`, the control-plane URL
+is loopback HTTP, and firewall mode is `dry-run`; this lets its simulated nuc
+node bind `0.0.0.0:18081` without changing deployed-node behavior. Source CIDR
+policy is enforced by the rendered route rules and the monitor-owned nftables
+policy. Clash Trojan sources are converted to sing-box TLS objects, including
+SNI, certificate-validation mode, ALPN, and client fingerprint values. The
+control plane continues to own ACLs, routes, direct / block outbounds, and
+selectors.
 
 The monitor also samples its loopback Clash `/proxies` endpoint and posts a
 bounded proxy-group snapshot to `/agent/v1/proxy-config`. It actively measures

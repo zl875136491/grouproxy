@@ -5,8 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,29 +78,6 @@ func TestReadProxyGroupsProjectsOnlySafeFields(t *testing.T) {
 	nodes := group["nodes"].([]any)
 	if len(nodes) != 2 {
 		t.Fatalf("node count = %d, want 2", len(nodes))
-	}
-}
-
-func TestProbeProxyURLUsesCurrentLocalInboundCredentials(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "sing-box.json")
-	if err := os.WriteFile(configPath, []byte(`{"inbounds":[{"type":"http","tag":"grouproxy-http","users":[{"username":"monitor","password":"local-secret"}]}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	proxyURL, err := (&agent{cfg: config.Config{ListenPort: 18080, SingboxConfig: configPath}}).probeProxyURL()
-	if err != nil {
-		t.Fatalf("probeProxyURL() error = %v", err)
-	}
-	if proxyURL.Host != "127.0.0.1:18080" {
-		t.Fatalf("proxy host = %q", proxyURL.Host)
-	}
-	if proxyURL.User == nil || proxyURL.User.Username() != "monitor" {
-		t.Fatalf("proxy credentials were not loaded")
-	}
-	password, present := proxyURL.User.Password()
-	if !present || password != "local-secret" {
-		t.Fatalf("proxy password was not loaded")
 	}
 }
 
@@ -323,6 +298,11 @@ func TestSelectedSubscriptionOutboundUsesControlPlaneChoice(t *testing.T) {
 	if got := selectedSubscriptionOutbound(map[string]any{}, []string{"edge-a", "edge-b"}); got != "edge-a" {
 		t.Fatalf("fallback outbound = %q, want edge-a", got)
 	}
+	if got := selectedSubscriptionOutbound(map[string]any{
+		"proxy_selection": map[string]any{"group": "subscription", "outbound": "retired"},
+	}, []string{"edge-a", "edge-b"}); got != "edge-a" {
+		t.Fatalf("stale selection fallback = %q, want edge-a", got)
+	}
 }
 
 func TestValidateProxySelectionRejectsUnmappableChoice(t *testing.T) {
@@ -332,12 +312,29 @@ func TestValidateProxySelectionRejectsUnmappableChoice(t *testing.T) {
 		t.Fatalf("valid selection rejected: %v", err)
 	}
 
+	if err := validateProxySelection(map[string]any{
+		"proxy_selection": map[string]any{"group": "GLOBAL", "outbound": "edge-a"},
+	}, []string{"edge-a"}); err == nil || err.Error() != "proxy_group_not_selectable" {
+		t.Fatalf("invalid group accepted: %v", err)
+	}
+	// A subscription refresh may remove a previously selected tag. The
+	// renderer intentionally falls back to the first current outbound instead
+	// of rejecting the entire release.
+	if err := validateProxySelection(map[string]any{
+		"proxy_selection": map[string]any{"group": "subscription", "outbound": "missing"},
+	}, []string{"edge-a"}); err != nil {
+		t.Fatalf("stale selection rejected: %v", err)
+	}
+}
+
+func TestValidateProxySelectionAllowsEmptySelection(t *testing.T) {
 	for _, value := range []map[string]any{
-		{"proxy_selection": map[string]any{"group": "GLOBAL", "outbound": "edge-a"}},
-		{"proxy_selection": map[string]any{"group": "subscription", "outbound": "missing"}},
+		{"proxy_selection": map[string]any{"group": "subscription", "outbound": ""}},
+		{"proxy_selection": map[string]any{"group": "subscription"}},
 	} {
 		if err := validateProxySelection(value, []string{"edge-a"}); err == nil {
-			t.Fatalf("invalid selection accepted: %#v", value)
+			continue
 		}
+		t.Fatalf("empty selection rejected: %#v", value)
 	}
 }

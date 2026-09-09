@@ -5,8 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TESTENV_DIR="${GROUPROXY_TESTENV_DIR:-$ROOT_DIR/testenv}"
 BACKEND_PORT="${GROUPROXY_TEST_BACKEND_PORT:-8000}"
 FRONTEND_PORT="${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
-PUBLIC_PORT="${GROUPROXY_TEST_PUBLIC_PORT:-80}"
-DASHBOARD_BASE_PATH="${GROUPROXY_TEST_DASHBOARD_BASE_PATH:-/dashboard}"
+FRONTEND_LISTEN_ADDRESS="0.0.0.0"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 MONGODB_URL_OVERRIDE="${GROUPROXY_TEST_MONGODB_URL:-}"
 MONGODB_DATABASE_OVERRIDE="${GROUPROXY_TEST_MONGODB_DATABASE:-grouproxy_test}"
@@ -14,6 +13,7 @@ GQUAN_DELIVERY_MODE="${GROUPROXY_TEST_GQUAN_DELIVERY_MODE:-app}"
 GQUAN_APP_TOKEN="${GROUPROXY_TEST_GQUAN_APP_TOKEN:-}"
 GQUAN_TEST_CODE="${GROUPROXY_TEST_GQUAN_CODE:-123456}"
 PROXY_ACCESS_FQDN="${GROUPROXY_TEST_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}"
+TEST_CLIENT_CIDR="${GROUPROXY_TEST_CLIENT_CIDR:-10.32.12.0/24}"
 
 case "$GQUAN_DELIVERY_MODE" in
   app)
@@ -40,7 +40,7 @@ if [[ "${GROUPROXY_TESTENV_RESET:-0}" == "1" ]]; then
   if [[ -x "$ROOT_DIR/scripts/testenv-down.sh" && -d "$TESTENV_DIR" ]]; then
     GROUPROXY_TESTENV_DIR="$TESTENV_DIR" "$ROOT_DIR/scripts/testenv-down.sh" >/dev/null 2>&1 || true
   fi
-  for port in "$BACKEND_PORT" "$FRONTEND_PORT" 18080 18081 19090 19091; do
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT" 1080 18081 19090 19091; do
     if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
       printf 'Test port %s is still in use after cleanup; choose another port or stop its owner.\n' "$port" >&2
       exit 1
@@ -63,7 +63,6 @@ if [[ ! -f "$ENV_FILE" ]]; then
   umask 077
   management_token="${GROUPROXY_TEST_MANAGEMENT_TOKEN:-$(openssl rand -hex 24)}"
   bundle_secret="${GROUPROXY_TEST_BUNDLE_HMAC_SECRET:-$(openssl rand -hex 32)}"
-  proxy_credential_secret="${GROUPROXY_TEST_PROXY_CREDENTIAL_SECRET:-$(openssl rand -hex 32)}"
   backup_encryption_key="${GROUPROXY_TEST_BACKUP_ENCRYPTION_KEY:-$(openssl rand -hex 32)}"
   admin_password="${GROUPROXY_TEST_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
   {
@@ -73,9 +72,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_HOST=127.0.0.1\n'
     printf 'GROUPROXY_PORT=%s\n' "$BACKEND_PORT"
     printf 'GROUPROXY_BACKEND_PUBLIC_URL=%s\n' "$BACKEND_URL"
-    printf 'GROUPROXY_PROXY_ACCESS_FQDN=%s\n' "$PROXY_ACCESS_FQDN"
     printf 'GROUPROXY_BUNDLE_HMAC_SECRET=%s\n' "$bundle_secret"
-    printf 'GROUPROXY_PROXY_CREDENTIAL_SECRET=%s\n' "$proxy_credential_secret"
     printf 'GROUPROXY_BACKUP_DIRECTORY=%q\n' "$TESTENV_DIR/backups"
     printf 'GROUPROXY_BACKUP_ENCRYPTION_KEY=%q\n' "$backup_encryption_key"
     # Keep archive creation explicit in the shared test database. Phase 4
@@ -84,6 +81,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_ADMIN_USERNAME=admin\n'
     printf 'GROUPROXY_ADMIN_PASSWORD=%s\n' "$admin_password"
     printf 'GROUPROXY_MANAGEMENT_TOKEN=%s\n' "$management_token"
+    printf 'GROUPROXY_AUTH_SESSION_TTL_MINUTES=43200\n'
     printf 'GROUPROXY_ALLOW_INSECURE_AGENT_HTTP=true\n'
     printf 'GROUPROXY_SUBSCRIPTION_INLINE_MAX_BYTES=64\n'
     # Keep shared test data-plane validation operator-driven. Automatic probes
@@ -97,18 +95,6 @@ if [[ ! -f "$ENV_FILE" ]]; then
   } > "$ENV_FILE"
 fi
 
-# Phase 4 credentials must remain derivable after a test environment restart.
-# Existing runtime files predate this setting, so add one once without printing
-# or replacing any of their protected values.
-if ! rg -q '^GROUPROXY_PROXY_CREDENTIAL_SECRET=' "$ENV_FILE"; then
-  umask 077
-  printf 'GROUPROXY_PROXY_CREDENTIAL_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
-fi
-if ! rg -q '^GROUPROXY_PROXY_ACCESS_FQDN=' "$ENV_FILE"; then
-  printf 'GROUPROXY_PROXY_ACCESS_FQDN=%s\n' "$PROXY_ACCESS_FQDN" >> "$ENV_FILE"
-elif [[ "$(sed -n 's/^GROUPROXY_PROXY_ACCESS_FQDN=//p' "$ENV_FILE")" != "$PROXY_ACCESS_FQDN" ]]; then
-  sed -i -E "s|^GROUPROXY_PROXY_ACCESS_FQDN=.*|GROUPROXY_PROXY_ACCESS_FQDN=${PROXY_ACCESS_FQDN}|" "$ENV_FILE"
-fi
 if ! rg -q '^GROUPROXY_PROBE_AUTO_ENABLED=' "$ENV_FILE"; then
   printf 'GROUPROXY_PROBE_AUTO_ENABLED=false\n' >> "$ENV_FILE"
 fi
@@ -121,6 +107,9 @@ if ! rg -q '^GROUPROXY_BACKUP_ENCRYPTION_KEY=' "$ENV_FILE"; then
 fi
 if ! rg -q '^GROUPROXY_BACKUP_AUTO_ENABLED=' "$ENV_FILE"; then
   printf 'GROUPROXY_BACKUP_AUTO_ENABLED=false\n' >> "$ENV_FILE"
+fi
+if ! rg -q '^GROUPROXY_AUTH_SESSION_TTL_MINUTES=' "$ENV_FILE"; then
+  printf 'GROUPROXY_AUTH_SESSION_TTL_MINUTES=43200\n' >> "$ENV_FILE"
 fi
 
 set -a
@@ -204,9 +193,27 @@ done
 curl -fsS "$BACKEND_URL/readyz" >/dev/null
 
 bootstrap_node() {
-  local slug="$1" name="$2" port="$3" cidr="$4" extra_cidr="$5" api_port="$6"
-  local firewall_port="$7" firewall_mode="$8"
+  local slug="$1" name="$2" port="$3" cidr="$4" extra_cidr="$5" client_cidr="$6" api_port="$7"
+  local firewall_port="$8" firewall_mode="$9" listen_address="${10:-}" ingress_overrides="" allow_cidrs
   local sites site_id nodes node_id response draft draft_id release
+
+  if [[ "$port" != "1080" ]]; then
+    [[ "$listen_address" == "127.0.0.1" || "$listen_address" == "0.0.0.0" ]] || {
+      printf 'Alternate test listeners must bind either 127.0.0.1 or 0.0.0.0.\n' >&2
+      exit 2
+    }
+    printf -v ingress_overrides 'listen_port_override: %s\nlisten_address_override: "%s"\nfirewall_port_override: %s' "$port" "$listen_address" "$firewall_port"
+    if [[ "$listen_address" == "0.0.0.0" ]]; then
+      ingress_overrides+=$'\ntest_ingress_override: true'
+    fi
+  elif [[ "$firewall_port" != "1080" ]]; then
+    printf 'The public test proxy must use TCP 1080 for both listener and firewall.\n' >&2
+    exit 2
+  elif [[ -n "$listen_address" ]]; then
+    printf 'The primary test proxy uses its default 0.0.0.0:1080 listener.\n' >&2
+    exit 2
+  fi
+  allow_cidrs="$(jq -nc --arg cidr "$cidr" --arg extra "$extra_cidr" --arg client "$client_cidr" '[ $cidr, $extra, $client ] | map(select(length > 0))')"
   sites="$(curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites")"
   site_id="$(jq -r --arg slug "$slug" '.[] | select(.slug == $slug) | .id' <<<"$sites" | head -n 1)"
   [[ -n "$site_id" && "$site_id" != "null" ]] || { printf 'site %s not found\n' "$slug" >&2; exit 1; }
@@ -225,16 +232,17 @@ bootstrap_node() {
   fi
   printf '%s\n' "$node_id" > "$TESTENV_DIR/node-${name}.id"
 
-  for policy_cidr in "$cidr" "$extra_cidr"; do
+  for policy_cidr in "$cidr" "$extra_cidr" "$client_cidr"; do
+    [[ -n "$policy_cidr" ]] || continue
     if ! curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites/${site_id}/cidrs" | jq -e --arg cidr "$policy_cidr" '.[] | select(.cidr == $cidr)' >/dev/null; then
       curl -fsS -X POST "$BACKEND_URL/api/v1/sites/${site_id}/cidrs" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg cidr "$policy_cidr" '{cidr:$cidr,comment:"phase1 test policy"}')" >/dev/null
     fi
   done
 
-  draft="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/drafts" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg site "$site_id" --arg node "$node_id" --arg c1 "$cidr" --arg c2 "$extra_cidr" '{site_id:$site,node_ids:[$node],diff:{allow_cidrs:[$c1,$c2],http_only:true},note:"phase1 local validation"}')")"
+  draft="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/drafts" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg site "$site_id" --arg node "$node_id" --argjson cidrs "$allow_cidrs" '{site_id:$site,node_ids:[$node],diff:{allow_cidrs:$cidrs,http_only:true},note:"phase1 network validation"}')")"
   draft_id="$(jq -r '.id' <<<"$draft")"
   jq . <<<"$draft" > "$TESTENV_DIR/draft-${name}.json"
-  release="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-${name}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
+  release="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-network-${name}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
   jq . <<<"$release" > "$TESTENV_DIR/release-${name}.json"
 
   local state_dir="$TESTENV_DIR/monitor-${name}"
@@ -246,10 +254,8 @@ token_file: "$TESTENV_DIR/${name}.token"
 state_dir: "$state_dir/state"
 singbox_bin: "$ROOT_DIR/singbox/sing-box"
 singbox_config: "$state_dir/state/sing-box.json"
-listen_port: $port
-listen_port_override: $port
-listen_address_override: "127.0.0.1"
-firewall_port_override: $firewall_port
+listen_port: 1080
+$ingress_overrides
 firewall_mode: $firewall_mode
 poll_interval_seconds: 2
 heartbeat_interval_seconds: 2
@@ -275,17 +281,18 @@ if [[ ! -x "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" ]] || \
   (cd "$ROOT_DIR/monitor" && make dist)
 fi
 
-bootstrap_node north codedev 18080 10.32.12.0/24 127.0.0.1/32 19090 "$PUBLIC_PORT" dry-run
-# A second :80 listener cannot exist on the same test host. The simulated nuc
-# stays loopback-only and dry-runs its own firewall; on 10.32.12.110 it uses
-# the normal direct :80 deployment instead.
-bootstrap_node east nuc 18081 10.32.13.0/24 127.0.0.1/32 19091 0 dry-run
+# The primary node matches the deployed :1080 listener. The same-host nuc
+# simulation uses a distinct, network-visible test port. Both still enforce
+# their signed source-CIDR policy in sing-box; nftables stays dry-run so this
+# harness never rewrites the developer host firewall.
+bootstrap_node north codedev 1080 "$TEST_CLIENT_CIDR" 127.0.0.1/32 "" 19090 1080 dry-run ""
+bootstrap_node east nuc 18081 10.32.13.0/24 "$TEST_CLIENT_CIDR" 127.0.0.1/32 19091 18081 dry-run 0.0.0.0
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND_PORT" >/dev/null 2>&1; then
   (
     cd "$ROOT_DIR/frontend"
     if [[ ! -d node_modules ]]; then npm install --no-audit --no-fund; fi
-    nohup setsid env GROUPROXY_FRONTEND_BASE_PATH="$DASHBOARD_BASE_PATH" NEXT_PUBLIC_API_BASE_URL="${DASHBOARD_BASE_PATH}/backend-api" GROUPROXY_BACKEND_API_URL="$BACKEND_URL" NEXT_DIST_DIR=.next-dev npm run dev -- --hostname 127.0.0.1 --port "$FRONTEND_PORT" \
+    nohup setsid env GROUPROXY_BACKEND_API_URL="$BACKEND_URL" NEXT_DIST_DIR=.next-dev npm run dev -- --hostname "$FRONTEND_LISTEN_ADDRESS" --port "$FRONTEND_PORT" \
       </dev/null >"$TESTENV_DIR/logs/frontend.log" 2>&1 &
     printf '%s\n' "$!" > "$TESTENV_DIR/frontend.pid"
   )
@@ -293,17 +300,13 @@ fi
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]]; then
   for _ in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}${DASHBOARD_BASE_PATH}" >/dev/null 2>&1; then break; fi
+    if curl -fsS "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  curl -fsS "http://127.0.0.1:${FRONTEND_PORT}${DASHBOARD_BASE_PATH}" >/dev/null
+  curl -fsS "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null
 fi
 
-if [[ "${GROUPROXY_CONFIGURE_TEST_NGINX:-1}" == "1" ]]; then
-  "$ROOT_DIR/scripts/setup-test-nginx.sh"
-fi
-
-printf 'Test environment is starting. Backend: %s  Frontend: http://127.0.0.1:%s%s\n' "$BACKEND_URL" "$FRONTEND_PORT" "$DASHBOARD_BASE_PATH"
-printf 'Unified public entrypoint: http://%s:%s/dashboard\n' "$PROXY_ACCESS_FQDN" "$PUBLIC_PORT"
+printf 'Test environment is starting. Backend: %s  Dashboard: http://%s:%s/\n' "$BACKEND_URL" "$PROXY_ACCESS_FQDN" "$FRONTEND_PORT"
+printf 'Proxy listeners: codedev 0.0.0.0:1080 (%s:1080), nuc 0.0.0.0:18081 (%s:18081)\n' "$PROXY_ACCESS_FQDN" "$PROXY_ACCESS_FQDN"
 printf 'Shared MongoDB database: %s\n' "$GROUPROXY_MONGODB_DATABASE"
 printf 'Run scripts/verify-phase1.sh after monitor ACKs arrive.\n'

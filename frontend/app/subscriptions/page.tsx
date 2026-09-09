@@ -1,26 +1,20 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  CircleAlert,
-  CirclePlus,
-  FileUp,
-  Play,
-  RotateCcw,
-} from "lucide-react";
+import { CirclePlus, Copy, Download, Play, WrapText } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   createSubscriptionSource,
+  createSingleNodeSubscription,
+  getSubscriptionVersionContent,
   getNodes,
   getSites,
   getSubscriptions,
   getTask,
   publishSubscriptionVersion,
   refreshSubscription,
-  rollbackSiteSubscription,
   uploadSubscription,
-  type SiteSubscription,
   type SubscriptionVersion,
   type Task,
 } from "../../lib/api";
@@ -29,9 +23,11 @@ import { shortHash } from "../../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { Button, ConfirmDialog, IconButton, Panel, RefreshButton, StatusBadge } from "../../components/ui";
+import { useToast } from "../../components/toast";
+import { Button, ConfirmDialog, DetailDialog, Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
-type FormMode = "source" | "upload" | null;
+type FormMode = "add" | null;
+type SourceType = "http" | "single_node" | "upload";
 
 function isFinishedRefreshTask(task: Task) {
   return ["succeeded", "failed", "cancelled", "dead_letter"].includes(task.status);
@@ -54,17 +50,17 @@ export default function SubscriptionsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [formMode, setFormMode] = useState<FormMode>(null);
+  const [sourceType, setSourceType] = useState<SourceType>("http");
   const [sourceName, setSourceName] = useState("");
   const [sourceURL, setSourceURL] = useState("");
   const [fetchInterval, setFetchInterval] = useState("21600");
-  const [uploadName, setUploadName] = useState("");
+  const [singleNodeURI, setSingleNodeURI] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>([]);
-  const [siteSelectionReady, setSiteSelectionReady] = useState(false);
   const [publishTarget, setPublishTarget] = useState<SubscriptionVersion | null>(null);
-  const [rollbackTarget, setRollbackTarget] = useState<SiteSubscription | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<SubscriptionVersion | null>(null);
 
   const catalog = useQuery({
     queryKey: ["subscriptions"],
@@ -83,6 +79,7 @@ export default function SubscriptionsPage() {
     onSuccess: async (result) => {
       setSourceName("");
       setSourceURL("");
+      setSingleNodeURI("");
       setFormMode(null);
       setSelectedSourceId(result.source.id);
       await Promise.all([
@@ -91,10 +88,21 @@ export default function SubscriptionsPage() {
       ]);
     },
   });
-  const upload = useMutation({
-    mutationFn: () => uploadSubscription(uploadName.trim(), uploadFile!),
+  const singleNodeCreate = useMutation({
+    mutationFn: () => createSingleNodeSubscription(sourceName.trim(), singleNodeURI.trim()),
     onSuccess: async (result) => {
-      setUploadName("");
+      setSourceName("");
+      setSingleNodeURI("");
+      setFormMode(null);
+      setSelectedSourceId(result.source.id);
+      setSelectedVersionId(result.version.id);
+      await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
+    },
+  });
+  const upload = useMutation({
+    mutationFn: () => uploadSubscription(sourceName.trim(), uploadFile!),
+    onSuccess: async (result) => {
+      setSourceName("");
       setUploadFile(null);
       setFormMode(null);
       setSelectedSourceId(result.source.id);
@@ -119,6 +127,7 @@ export default function SubscriptionsPage() {
     ),
     onSuccess: async (result) => {
       setPublishTarget(null);
+      setConfirmTarget(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["subscriptions"] }),
         queryClient.invalidateQueries({ queryKey: ["releases"] }),
@@ -128,19 +137,6 @@ export default function SubscriptionsPage() {
       if (result.releases[0]) router.push(`/releases?release=${result.releases[0].release_id}`);
     },
   });
-  const rollback = useMutation({
-    mutationFn: (siteId: string) => rollbackSiteSubscription(siteId),
-    onSuccess: async (result) => {
-      setRollbackTarget(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["subscriptions"] }),
-        queryClient.invalidateQueries({ queryKey: ["releases"] }),
-        queryClient.invalidateQueries({ queryKey: ["tasks"] }),
-      ]);
-      if (result.releases[0]) router.push(`/releases?release=${result.releases[0].release_id}`);
-    },
-  });
-
   const sourceItems = catalog.data?.sources || [];
   const versionItems = catalog.data?.versions || [];
   const siteItems = sites.data || [];
@@ -156,9 +152,6 @@ export default function SubscriptionsPage() {
   const currentVersion = currentVersions.find((item) => item.id === selectedVersionId)
     || currentVersions[0]
     || null;
-  const versionById = useMemo(() => new Map(versionItems.map((item) => [item.id, item])), [versionItems]);
-  const sourceById = useMemo(() => new Map(sourceItems.map((item) => [item.id, item])), [sourceItems]);
-  const siteById = useMemo(() => new Map(siteItems.map((item) => [item.id, item])), [siteItems]);
 
   useEffect(() => {
     if (!selectedSourceId && sourceItems[0]) setSelectedSourceId(sourceItems[0].id);
@@ -171,21 +164,22 @@ export default function SubscriptionsPage() {
     }
   }, [currentVersion, currentVersions, selectedVersionId]);
 
+  const previousVersionId = useRef("");
   useEffect(() => {
-    if (!siteSelectionReady && deployableSiteIds.length) {
-      setSelectedSiteIds(deployableSiteIds);
-      setSiteSelectionReady(true);
+    // Site targets are an explicit operator choice. Never carry a selection
+    // from another immutable version into the next publish operation.
+    if (!currentVersion) return;
+    if (previousVersionId.current !== currentVersion.id) {
+      previousVersionId.current = currentVersion.id;
+      setSelectedSiteIds([]);
     }
-  }, [deployableSiteIds, siteSelectionReady]);
+  }, [currentVersion]);
 
   function submitSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (sourceName.trim() && sourceURL.trim()) sourceCreate.mutate();
-  }
-
-  function submitUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (uploadName.trim() && uploadFile) upload.mutate();
+    if (sourceType === "http" && sourceName.trim() && sourceURL.trim()) sourceCreate.mutate();
+    if (sourceType === "single_node" && singleNodeURI.trim()) singleNodeCreate.mutate();
+    if (sourceType === "upload" && sourceName.trim() && uploadFile) upload.mutate();
   }
 
   function toggleSite(siteId: string) {
@@ -202,66 +196,190 @@ export default function SubscriptionsPage() {
     return <ErrorState error={error instanceof Error ? error.message : "Unable to load subscription state."} onRetry={() => void Promise.all([catalog.refetch(), sites.refetch(), nodes.refetch()])} />;
   }
 
-  const mutationError = sourceCreate.error || upload.error || refresh.error || publish.error || rollback.error;
-  const activeBindings = catalog.data?.site_subscriptions || [];
+  const sourcePending = sourceCreate.isPending || singleNodeCreate.isPending || upload.isPending;
 
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill subscriptions-page">
       <PageHeader
         eyebrow="DEPLOY"
         title="Subscriptions"
         description="Versioned upstream content is selected per site and released through the normal node ACK path."
-        actions={<><Button onClick={() => setFormMode(formMode === "upload" ? null : "upload")}><FileUp size={16} /> {t("Upload file")}</Button><Button variant="primary" onClick={() => setFormMode(formMode === "source" ? null : "source")}><CirclePlus size={16} /> {t("Add HTTP source")}</Button></>}
+        actions={<>
+          <Button
+            disabled={!currentVersion || !currentVersion.parse_ok}
+            onClick={() => {
+              if (!currentVersion) return;
+              setSelectedSiteIds([]);
+              setPublishTarget(currentVersion);
+            }}
+          >
+            <Play size={16} /> {t("Publish")}
+          </Button>
+          <Button variant="primary" onClick={() => { sourceCreate.reset(); singleNodeCreate.reset(); upload.reset(); setSourceType("http"); setFormMode("add"); }}><CirclePlus size={16} /> {t("Add source")}</Button>
+        </>}
       />
-      {mutationError ? <div className="inline-error" role="alert">{mutationError instanceof Error ? mutationError.message : "The subscription operation was not accepted."}</div> : null}
-      {formMode === "source" ? <Panel><form className="subscription-form" onSubmit={submitSource}><label><span>{t("Name")}</span><input autoFocus value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder={t("Regional upstream")} /></label><label><span>{t("HTTP URL")}</span><input type="url" value={sourceURL} onChange={(event) => setSourceURL(event.target.value)} placeholder="http://upstream.example/subscription" /></label><label><span>{t("Refresh interval")}</span><select value={fetchInterval} onChange={(event) => setFetchInterval(event.target.value)}><option value="3600">{t("1 hour")}</option><option value="21600">{t("6 hours")}</option><option value="86400">{t("24 hours")}</option></select></label><div className="form-actions"><Button type="button" onClick={() => setFormMode(null)}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={sourceCreate.isPending}>{sourceCreate.isPending ? t("Queueing...") : t("Queue refresh")}</Button></div></form></Panel> : null}
-      {formMode === "upload" ? <Panel><form className="subscription-form subscription-upload-form" onSubmit={submitUpload}><label><span>{t("Name")}</span><input autoFocus value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder={t("Imported upstream")} /></label><label><span>{t("Subscription file")}</span><input type="file" accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label><div className="form-actions"><Button type="button" onClick={() => setFormMode(null)}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={!uploadFile || upload.isPending}>{upload.isPending ? t("Importing...") : t("Import version")}</Button></div></form></Panel> : null}
+      <DetailDialog open={formMode === "add"} onOpenChange={(open) => { if (!open && !sourcePending) setFormMode(null); }} title="Add source" description="Choose a subscription site connection or paste one VLESS / VMess node." contentClassName="source-dialog-content">
+        <form className="source-dialog-form" onSubmit={submitSource}>
+          <fieldset className="source-type-radios">
+            <legend>{t("Source type")}</legend>
+            <label><input type="radio" name="source-type" checked={sourceType === "http"} onChange={() => setSourceType("http")} /><span><strong>{t("Subscription site connection")}</strong><small>HTTP</small></span></label>
+            <label><input type="radio" name="source-type" checked={sourceType === "single_node"} onChange={() => setSourceType("single_node")} /><span><strong>{t("Single node")}</strong><small>VLESS / VMess</small></span></label>
+            <label><input type="radio" name="source-type" checked={sourceType === "upload"} onChange={() => setSourceType("upload")} /><span><strong>{t("Subscription file")}</strong><small>YAML / JSON</small></span></label>
+          </fieldset>
+          <label><span>{t(sourceType === "single_node" ? "Name (optional)" : "Name")}</span><input autoFocus value={sourceName} maxLength={120} onChange={(event) => setSourceName(event.target.value)} placeholder={sourceType === "http" ? t("Regional upstream") : sourceType === "upload" ? t("Imported upstream") : t("VLESS Reality Vision")} /></label>
+          {sourceType === "http" ? <><label><span>{t("HTTP URL")}</span><input type="url" value={sourceURL} onChange={(event) => setSourceURL(event.target.value)} placeholder="http://upstream.example/subscription" /></label><label><span>{t("Refresh interval")}</span><select value={fetchInterval} onChange={(event) => setFetchInterval(event.target.value)}><option value="3600">{t("1 hour")}</option><option value="21600">{t("6 hours")}</option><option value="86400">{t("24 hours")}</option></select></label></> : sourceType === "single_node" ? <label><span>{t("Single-node URI")}</span><textarea value={singleNodeURI} onChange={(event) => setSingleNodeURI(event.target.value)} placeholder="vless://uuid@host:port?... or vmess://base64-json" spellCheck={false} /></label> : <label><span>{t("Subscription file")}</span><input type="file" accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>}
+          <div className="form-actions"><Button type="button" disabled={sourcePending} onClick={() => setFormMode(null)}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={sourcePending || (sourceType === "http" ? !sourceName.trim() || !sourceURL.trim() : sourceType === "single_node" ? !singleNodeURI.trim() : !sourceName.trim() || !uploadFile)}>{sourcePending ? t("Adding...") : t("Add source")}</Button></div>
+        </form>
+      </DetailDialog>
+      <div className="subscription-scroll-area">
       <section className="subscription-layout">
-        <Panel>
-          <div className="panel-heading"><div><span className="panel-kicker">{t("UPSTREAMS")}</span><h2>{t("Sources")}</h2></div><span className="count-label">{formatNumber(sourceItems.length)}</span></div>
-          {sourceItems.length ? <div className="subscription-source-list">{sourceItems.map((source) => <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}><button onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}><span><strong>{source.name}</strong><small>{source.url_hint} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span><StatusBadge status={source.last_refresh_error ? "failed" : source.last_refresh_at ? "current" : "pending"} /></button>{source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}</div>)}</div> : <EmptyState title="No subscription sources" detail="Add an HTTP source or import a supported file." />}
+        <Panel className="list-panel subscription-source-panel">
+          <div className="panel-heading"><div><span className="panel-kicker">{t("UPSTREAMS")}</span><h2>{t("Sources")}</h2></div></div>
+          {sourceItems.length ? <div className="subscription-source-list table-scroll">{sourceItems.map((source) => <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}><button onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}><span><strong>{source.name}</strong><small>{source.source_type === "http" ? source.url_hint : t(source.source_type === "single_node" ? "Single VLESS or VMess node" : "Imported file")} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span><StatusBadge status={source.last_refresh_error ? "failed" : source.last_refresh_at ? "current" : "pending"} /></button>{source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}</div>)}</div> : <EmptyState title="No subscription sources" detail="Add a subscription site or a single node." />}
         </Panel>
         <Panel className="subscription-detail-panel">
-          {currentVersion ? <VersionDetail version={currentVersion} siteItems={siteItems} deployableSiteIds={deployableSiteIds} selectedSiteIds={selectedSiteIds} onToggleSite={toggleSite} onPublish={() => setPublishTarget(currentVersion)} /> : <EmptyState title="Select a source version" detail="Parsed versions are available after a refresh or file import." />}
+          {currentVersion ? <VersionDetail version={currentVersion} sourceName={currentSource?.name || ""} /> : <EmptyState title="Select a source version" detail="Parsed versions are available after a refresh or file import." />}
         </Panel>
       </section>
-      <Panel>
-        <div className="panel-heading"><div><span className="panel-kicker">{t("IMMUTABLE HISTORY")}</span><h2>{t("Versions")}</h2></div><span className="count-label">{formatNumber(currentVersions.length)}</span></div>
-          {currentVersions.length ? <div className="table-wrap"><table><thead><tr><th>{t("Version")}</th><th>{t("Hash")}</th><th>{t("Format")}</th><th>{t("Nodes")}</th><th>{t("Parsed")}</th><th>{t("Fetched")}</th><th>{t("State")}</th></tr></thead><tbody>{currentVersions.map((version) => <tr className={currentVersion?.id === version.id ? "subscription-version-selected" : ""} key={version.id} onClick={() => setSelectedVersionId(version.id)}><td><strong>v{formatNumber(version.version)}</strong><span className="cell-secondary">{formatBytes(version.size_bytes)}</span></td><td className="mono" title={version.content_hash}>{shortHash(version.content_hash, 18)}</td><td><span className="type-tag">{version.format}</span></td><td>{formatNumber(version.node_count)}</td><td><StatusBadge status={version.parse_ok ? "valid" : "failed"} /></td><td>{formatDate(version.fetched_at)}</td><td><StatusBadge status={version.published ? "published" : "ready"} /></td></tr>)}</tbody></table></div> : <EmptyState title="No versions for this source" detail="Refresh or import content to create an immutable version." />}
-      </Panel>
-      <Panel>
-        <div className="panel-heading"><div><span className="panel-kicker">{t("SITE SELECTIONS")}</span><h2>{t("Active deployments")}</h2></div><span className="count-label">{formatNumber(activeBindings.length)}</span></div>
-        {activeBindings.length ? <div className="table-wrap"><table><thead><tr><th>{t("Site")}</th><th>{t("Source")}</th><th>{t("Current version")}</th><th>{t("Previous version")}</th><th>{t("Updated")}</th><th aria-label={t("Actions")} /></tr></thead><tbody>{activeBindings.map((binding) => <tr key={binding.site_id}><td><strong>{t(siteById.get(binding.site_id)?.name || binding.site_id)}</strong></td><td>{sourceById.get(binding.source_id)?.name || binding.source_id}</td><td className="mono">{versionLabel(versionById.get(binding.subscription_version_id), formatNumber)}</td><td className="mono">{versionLabel(binding.previous_subscription_version_id ? versionById.get(binding.previous_subscription_version_id) : undefined, formatNumber)}</td><td>{formatDate(binding.updated_at)}</td><td>{binding.previous_subscription_version_id ? <IconButton label={t("Roll back {name}", { name: t(siteById.get(binding.site_id)?.name || binding.site_id) })} disabled={rollback.isPending} onClick={() => setRollbackTarget(binding)}><RotateCcw size={16} /></IconButton> : null}</td></tr>)}</tbody></table></div> : <EmptyState title="No sites have a selected subscription" />}
-      </Panel>
-      <ConfirmDialog open={Boolean(publishTarget)} onOpenChange={(open) => !open && setPublishTarget(null)} title="Publish subscription version" description={publishTarget ? t("Release {version} to {count} selected sites. Each edge node validates and acknowledges the new outbound configuration independently.", { version: versionLabel(publishTarget, formatNumber), count: formatNumber(selectedSiteIds.length) }) : ""} confirmLabel="Publish version" busy={publish.isPending} onConfirm={() => publishTarget && publish.mutate(publishTarget)} />
-      <ConfirmDialog open={Boolean(rollbackTarget)} onOpenChange={(open) => !open && setRollbackTarget(null)} title="Roll back site subscription" description={rollbackTarget ? t("Restore the previous selected version for {site}. This creates a new release and waits for node ACKs.", { site: t(siteById.get(rollbackTarget.site_id)?.name || rollbackTarget.site_id) }) : ""} confirmLabel="Create rollback release" danger busy={rollback.isPending} onConfirm={() => rollbackTarget && rollback.mutate(rollbackTarget.site_id)} />
+      </div>
+      <PublishSitesDialog version={publishTarget} sourceName={currentSource?.name || ""} sites={siteItems} deployableSiteIds={deployableSiteIds} selectedSiteIds={selectedSiteIds} onToggleSite={toggleSite} open={Boolean(publishTarget)} onOpenChange={(open) => { if (!open) setPublishTarget(null); }} onContinue={() => { if (publishTarget) { setConfirmTarget(publishTarget); setPublishTarget(null); } }} />
+      <ConfirmDialog open={Boolean(confirmTarget)} onOpenChange={(open) => { if (!open) setConfirmTarget(null); }} title="Publish subscription version" description={confirmTarget ? t("Release {version} to {count} selected sites. Each edge node validates and acknowledges the new outbound configuration independently.", { version: versionLabel(confirmTarget, formatNumber), count: formatNumber(selectedSiteIds.length) }) : ""} confirmLabel="Publish version" busy={publish.isPending} onConfirm={() => confirmTarget && publish.mutate(confirmTarget)} />
     </div>
   );
 }
 
 function VersionDetail({
   version,
-  siteItems,
+  sourceName,
+}: {
+  version: SubscriptionVersion;
+  sourceName: string;
+}) {
+  const { t, formatBytes, formatDate, formatNumber } = usePreferences();
+  const { toast } = useToast();
+  const parseErrorKey = useRef("");
+
+  useEffect(() => {
+    if (version.parse_ok) {
+      parseErrorKey.current = "";
+      return;
+    }
+    const detail = version.parse_error || "Parsing did not produce usable outbounds.";
+    const key = `${version.id}:${detail}`;
+    if (parseErrorKey.current === key) return;
+    parseErrorKey.current = key;
+    toast({
+      title: t("Version cannot be published"),
+      description: t(detail),
+      variant: "destructive",
+    });
+  }, [t, toast, version.id, version.parse_error, version.parse_ok]);
+
+  return (
+    <div className="subscription-detail subscription-detail-split">
+      <section className="subscription-detail-summary">
+        <div className="release-detail-heading"><div><span className="panel-kicker">{t("SELECTED VERSION")}</span><h2>{sourceName}</h2><p>{version.format} · {formatBytes(version.size_bytes)} · {t("Fetched {date}", { date: formatDate(version.fetched_at) })}</p></div><StatusBadge status={version.parse_ok ? "valid" : "failed"} /></div>
+        <div className="detail-summary-grid"><div><span>{t("Version")}</span><strong>{versionLabel(version, formatNumber)}</strong></div><div><span>{t("Content hash")}</span><strong className="mono" title={version.content_hash}>{shortHash(version.content_hash, 18)}</strong></div><div><span>{t("Endpoint count")}</span><strong>{formatNumber(version.node_count)}</strong></div><div><span>{t("Publication")}</span><StatusBadge status={version.published ? "published" : "ready"} /></div></div>
+      </section>
+      <InlineVersionDocument version={version} />
+    </div>
+  );
+}
+
+function InlineVersionDocument({ version }: { version: SubscriptionVersion }) {
+  const { t } = usePreferences();
+  const { toast } = useToast();
+  const [wrapLines, setWrapLines] = useState(false);
+  const content = useQuery({
+    queryKey: ["subscription-version-content", version.source_id, version.id],
+    queryFn: () => getSubscriptionVersionContent(version.source_id, version.id),
+    staleTime: 5 * 60_000,
+  });
+
+  async function copyContent() {
+    if (!content.data?.content) return;
+    try {
+      await navigator.clipboard.writeText(content.data.content);
+      toast({ title: t("Copied"), variant: "success" });
+    } catch (error) {
+      toast({ title: t("Operation failed"), description: error instanceof Error ? error.message : t("Unable to copy source content."), variant: "destructive" });
+    }
+  }
+
+  function downloadContent() {
+    if (!content.data?.content) return;
+    const extension = version.format === "clash" ? "yaml" : version.format === "unknown" ? "txt" : "json";
+    const url = URL.createObjectURL(new Blob([content.data.content], { type: "text/plain;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `subscription-v${version.version}.${extension}`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return <section className="subscription-document-section"><div className="subscription-document-heading"><div><span className="panel-kicker">{t("Source content")}</span><strong>{version.format.toUpperCase()}</strong></div><div className="row-actions"><Button size="sm" aria-pressed={wrapLines} onClick={() => setWrapLines((value) => !value)}><WrapText size={14} />{t(wrapLines ? "No wrap" : "Wrap lines")}</Button><Button size="sm" disabled={!content.data?.content} onClick={() => void copyContent()}><Copy size={14} />{t("Copy")}</Button><Button size="sm" disabled={!content.data?.content} onClick={downloadContent}><Download size={14} />{t("Download")}</Button></div></div>{content.isLoading ? <LoadingState rows={8} /> : content.isError ? <ErrorState error={content.error instanceof Error ? content.error.message : t("Unable to load source content.")} onRetry={() => void content.refetch()} /> : content.data ? <HighlightedDocument content={content.data.content} format={version.format} wrapLines={wrapLines} /> : <EmptyState title={t("No source content")} />}</section>;
+}
+
+function PublishSitesDialog({
+  version,
+  sourceName,
+  sites,
   deployableSiteIds,
   selectedSiteIds,
   onToggleSite,
-  onPublish,
+  open,
+  onOpenChange,
+  onContinue,
 }: {
-  version: SubscriptionVersion;
-  siteItems: Array<{ id: string; name: string; slug: string }>;
+  version: SubscriptionVersion | null;
+  sourceName: string;
+  sites: Array<{ id: string; name: string; slug: string }>;
   deployableSiteIds: string[];
   selectedSiteIds: string[];
   onToggleSite: (siteId: string) => void;
-  onPublish: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onContinue: () => void;
 }) {
-  const { t, formatBytes, formatDate, formatNumber } = usePreferences();
-  return (
-    <div className="subscription-detail">
-      <div className="release-detail-heading"><div><span className="panel-kicker">{t("SELECTED VERSION")}</span><h2>{versionLabel(version, formatNumber)}</h2><p>{version.format} · {formatBytes(version.size_bytes)} · {t("Fetched {date}", { date: formatDate(version.fetched_at) })}</p></div><StatusBadge status={version.parse_ok ? "valid" : "failed"} /></div>
-      <div className="detail-summary-grid"><div><span>{t("Content hash")}</span><strong className="mono" title={version.content_hash}>{shortHash(version.content_hash, 18)}</strong></div><div><span>{t("Endpoint count")}</span><strong>{formatNumber(version.node_count)}</strong></div><div><span>{t("Publication")}</span><StatusBadge status={version.published ? "published" : "ready"} /></div></div>
-      {version.parse_ok ? <div className="subscription-site-selection"><div className="subscription-selection-heading"><div><span className="panel-kicker">{t("DEPLOY TARGETS")}</span><strong>{t("Sites")}</strong></div><span>{t("{count} selected", { count: formatNumber(selectedSiteIds.length) })}</span></div><div className="subscription-site-checks">{siteItems.map((site) => { const deployable = deployableSiteIds.includes(site.id); return <label className={!deployable ? "subscription-site-disabled" : ""} key={site.id}><input type="checkbox" checked={selectedSiteIds.includes(site.id)} disabled={!deployable} onChange={() => onToggleSite(site.id)} /><span><strong>{t(site.name)}</strong><small>{deployable ? site.slug : t("No edge node")}</small></span></label>; })}</div><Button variant="primary" disabled={!selectedSiteIds.length} onClick={onPublish}><Play size={16} /> {t("Publish to selected sites")}</Button></div> : <div className="subscription-parse-error"><CircleAlert size={18} /><div><strong>{t("Version cannot be published")}</strong><span>{version.parse_error || t("Parsing did not produce usable outbounds.")}</span></div></div>}
-    </div>
-  );
+  const { t, formatDate, formatNumber } = usePreferences();
+  return <DetailDialog open={open} onOpenChange={onOpenChange} title="Publish subscription version" description="Review the selected source and choose one or more deployment sites." contentClassName="publish-sites-dialog">
+    {version ? <div className="publish-sites-form">
+      <dl className="publish-source-facts"><div><dt>{t("Source")}</dt><dd>{sourceName}</dd></div><div><dt>{t("Fetched")}</dt><dd>{formatDate(version.fetched_at)}</dd></div><div><dt>{t("Publication")}</dt><dd><StatusBadge status={version.published ? "published" : "ready"} /></dd></div></dl>
+      <div className="subscription-selection-heading"><div><span className="panel-kicker">{t("DEPLOY TARGETS")}</span><strong>{t("Sites")}</strong></div><span>{t("{count} selected", { count: formatNumber(selectedSiteIds.length) })}</span></div>
+      <div className="subscription-site-checks publish-site-checks" role="group" aria-label={t("Deployment sites")}>{sites.map((site) => { const deployable = deployableSiteIds.includes(site.id); const selected = selectedSiteIds.includes(site.id); return <label className={`${!deployable ? "subscription-site-disabled" : ""} ${selected ? "subscription-site-selected" : ""}`} key={site.id}><input className="site-radio" type="checkbox" checked={selected} disabled={!deployable} onChange={() => onToggleSite(site.id)} /><span className="site-choice-copy"><strong>{t(site.name)}</strong><small>{deployable ? site.slug : t("No edge node")}</small></span></label>; })}</div>
+      <p className="subscription-selection-hint">{t("Choose one or more sites to create a release. No sites are selected by default.")}</p>
+      <div className="form-actions"><Button type="button" onClick={() => onOpenChange(false)}>{t("Cancel")}</Button><Button variant="primary" disabled={!selectedSiteIds.length} onClick={onContinue}><Play size={15} /> {t("Continue")}</Button></div>
+    </div> : null}
+  </DetailDialog>;
+}
+
+function HighlightedDocument({ content, format, wrapLines }: { content: string; format: string; wrapLines: boolean }) {
+  const language = format === "clash" ? "yaml" : format === "unknown" ? "text" : "json";
+  return <pre className={`source-document source-document-${language} ${wrapLines ? "source-document-wrap" : ""}`} data-language={language}><code>{content.split(/\r?\n/).map((line, index, lines) => <span className="source-code-line" key={`${index}-${line.slice(0, 12)}`}>{highlightLine(line, index)}{index < lines.length - 1 ? "\n" : null}</span>)}</code></pre>;
+}
+
+function highlightLine(line: string, lineIndex: number) {
+  const tokenPattern = /(#[^\n]*|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|\b(?:true|false|null|yes|no|on|off)\b|-?\b\d+(?:\.\d+)?\b|[A-Za-z_][A-Za-z0-9_.-]*(?=\s*:))/g;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(line))) {
+    if (match.index > cursor) parts.push(line.slice(cursor, match.index));
+    const token = match[0];
+    const className = token.startsWith("#") || token.startsWith("//")
+      ? "source-token-comment"
+      : token.startsWith("\"") || token.startsWith("'")
+        ? "source-token-string"
+        : /^(true|false|null|yes|no|on|off)$/i.test(token)
+          ? "source-token-bool"
+          : /^-?\d/.test(token)
+            ? "source-token-number"
+            : "source-token-key";
+    parts.push(<span className={className} key={`${lineIndex}-${match.index}`}>{token}</span>);
+    cursor = match.index + token.length;
+  }
+  if (cursor < line.length) parts.push(line.slice(cursor));
+  return parts;
 }
 
 function versionLabel(

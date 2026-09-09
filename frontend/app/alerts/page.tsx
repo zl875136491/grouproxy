@@ -51,7 +51,7 @@ export default function AlertsPage() {
   const nodeNames = new Map((nodes.data || []).map((node) => [node.agent_id, node.name]));
 
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill list-page">
       <PageHeader
         eyebrow="OBSERVE"
         title="Alerts"
@@ -60,7 +60,7 @@ export default function AlertsPage() {
           <RefreshButton label="Refresh" onRefresh={() => alerts.refetch()} />
         }
       />
-      <Panel>
+      <Panel className="list-panel">
         <div className="table-toolbar">
           <div className="segmented-control" role="group" aria-label={t("Alerts")}>
             {([
@@ -80,7 +80,7 @@ export default function AlertsPage() {
           <span className="toolbar-note">{t("{count} events", { count: formatNumber(entries.length) })}</span>
         </div>
         {entries.length ? (
-          <div className="table-wrap">
+          <div className="table-wrap table-scroll">
             <table>
               <thead>
                 <tr>

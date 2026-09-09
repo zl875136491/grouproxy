@@ -5,6 +5,7 @@ import * as Tooltip from "@radix-ui/react-tooltip";
 import { CircleCheck, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type PropsWithChildren, type ReactNode } from "react";
 import { usePreferences } from "../lib/preferences";
+import { notifyToast, toastErrorMessage } from "./toast";
 import { cn } from "../lib/utils";
 import refreshStyles from "./refresh-button.module.css";
 
@@ -75,6 +76,7 @@ export function RefreshButton({
   onRefresh: () => Promise<unknown> | unknown;
   successDurationMs?: number;
 }) {
+  const { t } = usePreferences();
   const [state, setState] = useState<RefreshState>("idle");
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshLock = useRef(false);
@@ -96,9 +98,14 @@ export function RefreshButton({
         refreshLock.current = false;
         setState("idle");
       }, successDurationMs);
-    } catch {
+    } catch (error) {
       refreshLock.current = false;
       setState("idle");
+      notifyToast({
+        title: t("Refresh failed"),
+        description: t(toastErrorMessage(error)),
+        variant: "destructive",
+      });
     }
   }
 

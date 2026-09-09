@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, LoadingState } from "../../components/data-stat
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
 import { Button, Panel, RefreshButton, StatusBadge } from "../../components/ui";
+import { notifyToast } from "../../components/toast";
 
 function isFinishedProbeTask(task: Task | undefined) {
   return Boolean(task && ["succeeded", "failed", "cancelled", "dead_letter"].includes(task.status));
@@ -56,11 +57,16 @@ export default function ProbesPage() {
   useEffect(() => {
     if (!trackedTask || !isFinishedProbeTask(trackedTask) || completedTaskRef.current === trackedTask.task_id) return;
     completedTaskRef.current = trackedTask.task_id;
+    notifyToast({
+      title: t(trackedTask.status === "succeeded" ? "Probe completed" : "Probe failed"),
+      description: trackedTask.error ? t(trackedTask.error) : undefined,
+      variant: trackedTask.status === "succeeded" ? "success" : "destructive",
+    });
     void Promise.all([
       probes.refetch(),
       queryClient.invalidateQueries({ queryKey: ["tasks"] }),
     ]);
-  }, [probes, queryClient, trackedTask]);
+  }, [probes, queryClient, t, trackedTask]);
 
   if (session === null) return <LoadingState rows={7} />;
   if (!session) return <SessionGate />;
@@ -69,15 +75,13 @@ export default function ProbesPage() {
   const nodeItems = nodes.data || [];
   const selectedNode = nodeItems.find((node) => node.id === selectedNodeId);
   const data = probes.data;
-  const taskIcon = trackedTask?.status === "succeeded" ? <CircleCheck size={16} /> : isFinishedProbeTask(trackedTask) ? <CircleX size={16} /> : <Gauge size={16} />;
-  const taskError = runProbe.error || probeTask.error;
   function startProbe() {
     if (probeStartLock.current || runProbe.isPending || probeIsActive || !selectedNodeId) return;
     probeStartLock.current = true;
     runProbe.mutate();
   }
 
-  return <div className="page-stack"><PageHeader eyebrow="OBSERVE" title="Outbound probes" description="Per-outbound health and circuit-breaker state." actions={<RefreshButton label="Refresh" disabled={!selectedNodeId} onRefresh={() => Promise.all([probes.refetch(), nodes.refetch()])} />} /><Panel className="probe-controls"><div className="inline-form"><label><span>{t("Node")}</span><select value={selectedNodeId} onChange={(event) => setSelectedNodeId(event.target.value)}><option value="">{t("No node selected.")}</option>{nodeItems.map((node) => <option value={node.id} key={node.id}>{node.name}</option>)}</select></label><label><span>{t("Target URL")}</span><input value={targetURL} onChange={(event) => setTargetURL(event.target.value)} /></label><Button variant="primary" disabled={!selectedNodeId || runProbe.isPending || probeIsActive} onClick={startProbe}><Play size={15} />{runProbe.isPending || probeIsActive ? t("Working...") : t("Run probe")}</Button></div>{trackedTask ? <div className="change-summary" role="status">{taskIcon}<span>{t("Probe state")}</span><StatusBadge status={trackedTask.status} /></div> : null}{taskError ? <div className="inline-error" role="alert">{taskError instanceof Error ? t(taskError.message) : t("The probe task could not be created.")}</div> : null}</Panel>{selectedNode && data ? <ProbeDetails node={selectedNode} data={data} formatDate={formatDate} formatDuration={formatDuration} formatNumber={formatNumber} t={t} /> : selectedNode && probes.isError ? <ErrorState error={probes.error instanceof Error ? probes.error.message : "Unable to load probe results."} onRetry={() => void probes.refetch()} /> : <Panel><EmptyState title="No node selected." /></Panel>}</div>;
+  return <div className="page-stack"><PageHeader eyebrow="OBSERVE" title="Outbound probes" description="Per-outbound health and circuit-breaker state." actions={<RefreshButton label="Refresh" disabled={!selectedNodeId} onRefresh={() => Promise.all([probes.refetch(), nodes.refetch()])} />} /><Panel className="probe-controls"><div className="inline-form"><label><span>{t("Node")}</span><select value={selectedNodeId} onChange={(event) => setSelectedNodeId(event.target.value)}><option value="">{t("No node selected.")}</option>{nodeItems.map((node) => <option value={node.id} key={node.id}>{node.name}</option>)}</select></label><label><span>{t("Target URL")}</span><input value={targetURL} onChange={(event) => setTargetURL(event.target.value)} /></label><Button variant="primary" disabled={!selectedNodeId || runProbe.isPending || probeIsActive} onClick={startProbe}><Play size={15} />{runProbe.isPending || probeIsActive ? t("Working...") : t("Run probe")}</Button></div></Panel>{selectedNode && data ? <ProbeDetails node={selectedNode} data={data} formatDate={formatDate} formatDuration={formatDuration} formatNumber={formatNumber} t={t} /> : selectedNode && probes.isError ? <ErrorState error={probes.error instanceof Error ? probes.error.message : "Unable to load probe results."} onRetry={() => void probes.refetch()} /> : <Panel><EmptyState title="No node selected." /></Panel>}</div>;
 }
 
 function ProbeDetails({ node, data, formatDate, formatDuration, formatNumber, t }: { node: Node; data: ProbeOverview; formatDate: (value: string | null | undefined, withTime?: boolean) => string; formatDuration: (value: number | null | undefined) => string; formatNumber: (value: number | null | undefined, options?: Intl.NumberFormatOptions) => string; t: (key: string, values?: Record<string, string | number>) => string }) {

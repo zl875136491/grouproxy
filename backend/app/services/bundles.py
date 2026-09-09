@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from ..config import Settings
+from ..config import PROXY_LISTEN_PORT, Settings
 from ..models import (
     DesiredRelease,
     DestinationBlacklist,
@@ -13,7 +13,7 @@ from ..models import (
 )
 from .cidr import effective_cidrs
 from .crypto import sign_bundle
-from .proxy_credentials import proxy_auth_bundle
+from .subscriptions import subscription_outbound_tags
 
 
 def iso(value: datetime) -> str:
@@ -60,6 +60,75 @@ async def selected_subscription_bundle(
     return payload
 
 
+async def _selected_subscription_tags(site_id: str) -> set[str]:
+    """Resolve tags without exposing subscription content in the bundle."""
+
+    selected = await SiteSubscription.find_one(SiteSubscription.site_id == site_id)
+    if selected is None:
+        return set()
+    version = await SubscriptionVersion.get(selected.subscription_version_id)
+    if version is None or not version.parse_ok:
+        return set()
+    return subscription_outbound_tags(version.content, version.format)
+
+
+async def _bundle_subscription_tags(bundle: dict[str, Any]) -> set[str]:
+    """Resolve the immutable outbound tags carried by an existing bundle.
+
+    Desired bundles may inline small subscriptions or point at an immutable
+    blob.  Reading the bundle's own version is important here: the selected
+    site subscription can already have moved on while an older desired release
+    is still being retried by a monitor.
+    """
+
+    subscription = bundle.get("subscription")
+    if not isinstance(subscription, dict):
+        return set()
+    content = subscription.get("content")
+    if isinstance(content, str):
+        raw = content.encode("utf-8")
+    else:
+        content_hash = str(subscription.get("hash", ""))
+        if not content_hash:
+            return set()
+        version = await SubscriptionVersion.find_one(
+            SubscriptionVersion.content_hash == content_hash
+        )
+        if version is None:
+            return set()
+        raw = version.content
+    return subscription_outbound_tags(raw, str(subscription.get("format", "")))
+
+
+async def repair_stale_proxy_selection(
+    desired: DesiredRelease,
+    settings: Settings,
+) -> bool:
+    """Remove a selector preference that cannot exist in the desired bundle.
+
+    A subscription publication can replace dozens of old outbounds while a
+    queued release still carries a selection from the previous version.  The
+    monitor must be able to apply that release using its normal first-outbound
+    fallback, including when the bundle was created by an older backend.
+    """
+
+    selection = desired.bundle.get("proxy_selection")
+    if not isinstance(selection, dict):
+        return False
+    group = str(selection.get("group", "")).strip()
+    outbound = str(selection.get("outbound", "")).strip()
+    tags = await _bundle_subscription_tags(desired.bundle)
+    if group == "subscription" and outbound and outbound in tags:
+        return False
+    repaired = dict(desired.bundle)
+    repaired.pop("proxy_selection", None)
+    signed = sign_bundle(repaired, settings.bundle_hmac_secret)
+    desired.bundle = signed
+    desired.bundle_hash = signed["bundle_hash"]
+    await desired.save()
+    return True
+
+
 async def build_signed_bundle(
     *,
     site: Site,
@@ -75,23 +144,20 @@ async def build_signed_bundle(
     ).to_list()
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
-    proxy_auth = await proxy_auth_bundle(
-        site_id=str(site.id), required=site.proxy_auth_required, settings=settings
+    selected_tags = (
+        await _selected_subscription_tags(str(site.id)) if subscription is not None else set()
     )
     bundle: dict[str, Any] = {
         "schema_version": 1,
         "release_id": release_id,
         "desired_version": desired_version,
-        # HTTP Basic authentication must never be silently ignored by an old
-        # monitor, so credential-bearing bundles require the matching parser.
-        "min_monitor_version": "0.3.0",
+        "min_monitor_version": "0.4.0",
         "site_id": str(site.id),
         "node_id": node.agent_id,
         "shutdown": site.shutdown,
-        "listen": {"http_port": site.http_port},
+        "listen": {"http_port": PROXY_LISTEN_PORT},
         "allow_cidrs": allow_cidrs,
         "deny_destinations": [{"pattern": item.pattern, "kind": item.kind} for item in blacklist],
-        "proxy_auth": proxy_auth,
         "subscription": subscription,
         "acl_note": sources,
         "issued_at": iso(now),
@@ -100,10 +166,13 @@ async def build_signed_bundle(
     if proxy_selection:
         # The selection is metadata for the monitor's generated selector. It
         # never contains endpoint credentials or a user supplied URL.
-        bundle["proxy_selection"] = {
-            "group": str(proxy_selection.get("group", "subscription"))[:255],
-            "outbound": str(proxy_selection.get("outbound", ""))[:255],
-        }
+        group = str(proxy_selection.get("group", "subscription"))[:255]
+        outbound = str(proxy_selection.get("outbound", ""))[:255]
+        # A subscription refresh can remove the tag selected in an older
+        # release.  Omitting the stale preference lets both current and
+        # pre-0.4 monitors use their normal first-outbound fallback.
+        if group != "subscription" or outbound in selected_tags:
+            bundle["proxy_selection"] = {"group": group, "outbound": outbound}
     return sign_bundle(bundle, settings.bundle_hmac_secret)
 
 

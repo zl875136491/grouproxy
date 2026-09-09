@@ -3,11 +3,14 @@ package config
 import (
 	"errors"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
+
+const ProxyListenPort = 1080
 
 type Config struct {
 	BackendURL                 string `yaml:"backend_url"`
@@ -20,6 +23,7 @@ type Config struct {
 	ListenPortOverride         int    `yaml:"listen_port_override"`
 	ListenAddressOverride      string `yaml:"listen_address_override"`
 	FirewallPortOverride       int    `yaml:"firewall_port_override"`
+	TestIngressOverride        bool   `yaml:"test_ingress_override"`
 	FirewallMode               string `yaml:"firewall_mode"` // dry-run or apply
 	PollIntervalSeconds        int    `yaml:"poll_interval_seconds"`
 	HeartbeatIntervalSeconds   int    `yaml:"heartbeat_interval_seconds"`
@@ -44,7 +48,7 @@ func (c *Config) Defaults() {
 		c.SingboxConfig = filepath.Join(c.StateDir, "sing-box.json")
 	}
 	if c.ListenPort == 0 {
-		c.ListenPort = 80
+		c.ListenPort = ProxyListenPort
 	}
 	if c.ListenPortOverride < 0 || c.ListenPortOverride > 65535 {
 		c.ListenPortOverride = 0
@@ -90,6 +94,18 @@ func (c *Config) Defaults() {
 	}
 }
 
+func (c Config) permitsPublicTestIngress() bool {
+	if !c.TestIngressOverride || !c.AllowInsecureHTTP {
+		return false
+	}
+	endpoint, err := url.Parse(c.BackendURL)
+	if err != nil || endpoint.Scheme != "http" {
+		return false
+	}
+	address := net.ParseIP(endpoint.Hostname())
+	return address != nil && address.IsLoopback()
+}
+
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -109,14 +125,38 @@ func Load(path string) (Config, error) {
 	if cfg.FirewallMode != "dry-run" && cfg.FirewallMode != "apply" {
 		return Config{}, errors.New("firewall_mode must be dry-run or apply")
 	}
-	if cfg.ListenPort < 1 || cfg.ListenPort > 65535 {
-		return Config{}, errors.New("listen_port must be between 1 and 65535")
+	if cfg.ListenPort != ProxyListenPort {
+		return Config{}, errors.New("listen_port must be 1080")
 	}
 	if cfg.ListenAddressOverride != "" {
 		address := net.ParseIP(cfg.ListenAddressOverride)
 		if address == nil {
 			return Config{}, errors.New("listen_address_override must be an IP address")
 		}
+	}
+	if cfg.ListenPortOverride > 0 || cfg.FirewallPortOverride > 0 || cfg.ListenAddressOverride != "" {
+		if cfg.ListenPortOverride == 0 || cfg.FirewallPortOverride != cfg.ListenPortOverride {
+			return Config{}, errors.New("ingress overrides must use one alternate port")
+		}
+		if cfg.FirewallMode != "dry-run" {
+			return Config{}, errors.New("ingress overrides require dry-run mode")
+		}
+		switch cfg.ListenAddressOverride {
+		case "127.0.0.1":
+			if cfg.TestIngressOverride {
+				return Config{}, errors.New("test_ingress_override requires a public test bind")
+			}
+		case "0.0.0.0":
+			// The sole public alternate listener is for the same-host test
+			// harness. A deployed node remains pinned to its normal :1080 ingress.
+			if !cfg.permitsPublicTestIngress() {
+				return Config{}, errors.New("public ingress override requires explicit loopback test mode")
+			}
+		default:
+			return Config{}, errors.New("ingress overrides require loopback or explicit public test bind")
+		}
+	} else if cfg.TestIngressOverride {
+		return Config{}, errors.New("test_ingress_override requires ingress overrides")
 	}
 	host, port, err := net.SplitHostPort(cfg.ClashAPIListen)
 	if err != nil || host == "" || port == "" {

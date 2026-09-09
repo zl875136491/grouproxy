@@ -1,8 +1,8 @@
 "use client";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { BadgeCheck, Braces, Download, ShieldCheck } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Braces, Download, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { getAudit, getAuditExport, verifyAudit, type AuditEvent } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { shortHash } from "../../lib/utils";
@@ -11,18 +11,41 @@ import { ListFilters, timeRangeStart, type TimeRange } from "../../components/li
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
 import { Button, DetailDialog, Panel, StatusBadge } from "../../components/ui";
+import { notifyToast, toastErrorMessage, useToast } from "../../components/toast";
 
 export default function AuditPage() {
   const { t, formatDate, formatNumber } = usePreferences();
   const session = useManagementSession();
+  const { toast } = useToast();
   const [selected, setSelected] = useState<AuditEvent | null>(null);
   const [exporting, setExporting] = useState(false);
   const [action, setAction] = useState("");
   const [actor, setActor] = useState("");
   const [timeRange, setTimeRange] = useState<TimeRange>("30d");
   const since = useMemo(() => timeRangeStart(timeRange), [timeRange]);
+  useEffect(() => {
+    if (!selected?.error) return;
+    toast({
+      title: t("Audit event reports an error"),
+      description: t(selected.error),
+      variant: "destructive",
+    });
+  }, [selected?.error, t, toast]);
   const audit = useQuery({ queryKey: ["audit", action, actor, since], queryFn: () => getAudit({ action: action || undefined, actor: actor.trim() || undefined, since }), enabled: session === true });
-  const verify = useMutation({ mutationFn: verifyAudit });
+  const verify = useMutation({
+    mutationFn: verifyAudit,
+    meta: { toast: false },
+    onSuccess: (result) => {
+      notifyToast({
+        title: t(result.valid ? "Audit chain is valid" : "Audit chain verification failed"),
+        description: t("{count} events checked", { count: formatNumber(result.event_count) }),
+        variant: result.valid ? "success" : "destructive",
+      });
+    },
+    onError: (error) => {
+      notifyToast({ title: t("Audit verification failed"), description: t(toastErrorMessage(error)), variant: "destructive" });
+    },
+  });
 
   async function downloadExport(exportFormat: "json" | "ndjson") {
     setExporting(true);
@@ -33,6 +56,8 @@ export default function AuditPage() {
       link.download = `grouproxy-audit.${exportFormat}`;
       link.click();
       URL.revokeObjectURL(link.href);
+    } catch (error) {
+      notifyToast({ title: t("Export failed"), description: t(toastErrorMessage(error)), variant: "destructive" });
     } finally {
       setExporting(false);
     }
@@ -45,16 +70,14 @@ export default function AuditPage() {
 
   const events = audit.data || [];
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill list-page">
       <PageHeader eyebrow="GOVERN" title="Audit" description="Append-only control-plane events with a verifiable hash chain." actions={<div className="page-action-group"><Button onClick={() => void downloadExport("json")} disabled={exporting}><Download size={16} /> {t("Export JSON")}</Button><Button onClick={() => void downloadExport("ndjson")} disabled={exporting}><Download size={16} /> {t("Export NDJSON")}</Button><Button variant="primary" onClick={() => verify.mutate()} disabled={verify.isPending}><ShieldCheck size={16} /> {verify.isPending ? t("Verifying...") : t("Verify chain")}</Button></div>} />
-      {verify.data ? <div className={`alert-strip ${verify.data.valid ? "alert-success" : "alert-danger"}`}><BadgeCheck size={18} /><div><strong>{t(verify.data.valid ? "Audit chain is valid" : "Audit chain verification failed")}</strong><span>{t("{count} events checked", { count: formatNumber(verify.data.event_count) })}{verify.data.error ? ` · ${verify.data.error}` : ""}</span></div></div> : null}
-      {verify.error ? <div className="inline-error" role="alert">{verify.error instanceof Error ? verify.error.message : "Audit verification failed."}</div> : null}
-      <Panel>
+      <Panel className="list-panel">
         <div className="table-toolbar"><div className="toolbar-title"><Braces size={18} /><span>{t("{count} events", { count: formatNumber(events.length) })}</span></div><span className="toolbar-note">{t("Sensitive values are redacted before storage.")}</span></div>
         <ListFilters search={actor} setSearch={setActor} searchPlaceholder="Filter by actor" timeRange={timeRange} setTimeRange={setTimeRange} selects={[{ label: "Action", value: action, setValue: setAction, options: [{ value: "", label: "All actions" }, { value: "config_release.create", label: "config release" }, { value: "config_draft.create", label: "config draft" }, { value: "proxy_selection.update", label: "proxy selection" }, { value: "node.rename", label: "node rename" }] }]} />
-        {events.length ? <div className="table-wrap"><table><thead><tr><th>{t("Time")}</th><th>{t("Action")}</th><th>{t("Target")}</th><th>{t("Actor")}</th><th>{t("Result")}</th><th>{t("Hash")}</th><th aria-label={t("Details")} /></tr></thead><tbody>{events.map((event) => <tr key={event.event_id}><td>{formatDate(event.at)}</td><td><strong>{event.action}</strong></td><td>{event.target_type}<span className="cell-secondary mono">{shortHash(event.target_id, 14)}</span></td><td>{event.actor}</td><td><StatusBadge status={event.result} /></td><td className="mono">{shortHash(event.immutable_hash, 14)}</td><td><Button variant="ghost" size="sm" onClick={() => setSelected(event)}>{t("View")}</Button></td></tr>)}</tbody></table></div> : <EmptyState title="No audit events recorded" />}
+        {events.length ? <div className="table-wrap table-scroll"><table><thead><tr><th>{t("Time")}</th><th>{t("Action")}</th><th>{t("Target")}</th><th>{t("Actor")}</th><th>{t("Result")}</th><th>{t("Hash")}</th><th aria-label={t("Details")} /></tr></thead><tbody>{events.map((event) => <tr key={event.event_id}><td>{formatDate(event.at)}</td><td><strong>{event.action}</strong></td><td>{event.target_type}<span className="cell-secondary mono">{shortHash(event.target_id, 14)}</span></td><td>{event.actor}</td><td><StatusBadge status={event.result} /></td><td className="mono">{shortHash(event.immutable_hash, 14)}</td><td><Button variant="ghost" size="sm" onClick={() => setSelected(event)}>{t("View")}</Button></td></tr>)}</tbody></table></div> : <EmptyState title="No audit events recorded" />}
       </Panel>
-      <DetailDialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)} title={selected?.action || "Audit event"} description={selected ? `${formatDate(selected.at)} · ${selected.actor}` : undefined}>{selected ? <div className="detail-stack"><dl className="detail-list"><div><dt>{t("Target")}</dt><dd>{selected.target_type} · <span className="mono">{selected.target_id}</span></dd></div><div><dt>{t("Request")}</dt><dd className="mono">{shortHash(selected.request_id, 20)}</dd></div><div><dt>{t("Immutable hash")}</dt><dd className="mono">{selected.immutable_hash}</dd></div><div><dt>{t("Previous hash")}</dt><dd className="mono">{selected.previous_hash || t("Chain origin")}</dd></div></dl><div className="audit-payload"><strong>{t("Before")}</strong><pre>{JSON.stringify(selected.before, null, 2)}</pre></div><div className="audit-payload"><strong>{t("After")}</strong><pre>{JSON.stringify(selected.after, null, 2)}</pre></div>{selected.error ? <div className="detail-error"><strong>{t("Error")}</strong><code>{selected.error}</code></div> : null}</div> : null}</DetailDialog>
+      <DetailDialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)} title={selected?.action || "Audit event"} description={selected ? `${formatDate(selected.at)} · ${selected.actor}` : undefined}>{selected ? <div className="detail-stack"><dl className="detail-list"><div><dt>{t("Target")}</dt><dd>{selected.target_type} · <span className="mono">{selected.target_id}</span></dd></div><div><dt>{t("Request")}</dt><dd className="mono">{shortHash(selected.request_id, 20)}</dd></div><div><dt>{t("Immutable hash")}</dt><dd className="mono">{selected.immutable_hash}</dd></div><div><dt>{t("Previous hash")}</dt><dd className="mono">{selected.previous_hash || t("Chain origin")}</dd></div></dl><div className="audit-payload"><strong>{t("Before")}</strong><pre>{JSON.stringify(selected.before, null, 2)}</pre></div><div className="audit-payload"><strong>{t("After")}</strong><pre>{JSON.stringify(selected.after, null, 2)}</pre></div></div> : null}</DetailDialog>
     </div>
   );
 }

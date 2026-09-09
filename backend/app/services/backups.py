@@ -8,6 +8,7 @@ be encrypted with an operator-provided key.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -27,8 +28,11 @@ from pymongo import ReplaceOne
 from ..config import Settings
 from ..models import DOCUMENT_MODELS, BackupRecord
 
-BACKUP_SCHEMA_VERSION = 1
+BACKUP_SCHEMA_VERSION = 2
+SUPPORTED_BACKUP_SCHEMA_VERSIONS = frozenset({1, BACKUP_SCHEMA_VERSION})
 MAX_MEMBER_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_BYTES = MAX_MEMBER_BYTES * 8
+RESTORE_BATCH_SIZE = 1_000
 _BACKUP_KEY_ENV = "GROUPROXY_INTERNAL_BACKUP_KEY"
 BACKUP_READY_STATUSES = frozenset({"verified", "rehearsed", "restored"})
 
@@ -156,6 +160,21 @@ def _secret(settings: Settings) -> str:
     return value.get_secret_value() if value is not None else ""
 
 
+def _member_limit(settings: Settings) -> int:
+    """Return the bounded member size while supporting pre-setting runtimes."""
+
+    return int(getattr(settings, "backup_member_max_bytes", MAX_MEMBER_BYTES))
+
+
+def _archive_limit(settings: Settings) -> int:
+    """Return a whole-archive expansion limit no smaller than one member."""
+
+    return max(
+        _member_limit(settings),
+        int(getattr(settings, "backup_archive_max_bytes", MAX_ARCHIVE_BYTES)),
+    )
+
+
 def _crypt(data: bytes, key: str, *, decrypt: bool = False) -> bytes:
     if not shutil.which("openssl"):
         raise BackupError("backup_openssl_unavailable")
@@ -193,72 +212,144 @@ def _crypt(data: bytes, key: str, *, decrypt: bool = False) -> bytes:
     return result.stdout
 
 
-def _json_lines(documents: list[dict[str, Any]]) -> bytes:
-    lines = [
-        json_util.dumps(document, sort_keys=True, separators=(",", ":"))
-        for document in documents
-    ]
-    return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
-
-
-async def _collect_collections() -> tuple[dict[str, bytes], dict[str, int]]:
-    files: dict[str, bytes] = {}
-    counts: dict[str, int] = {}
-    for model in DOCUMENT_MODELS:
-        collection = model.get_motor_collection()
-        name = collection.name
-        if name in files:
-            raise BackupError("backup_duplicate_collection")
-        documents: list[dict[str, Any]] = []
-        async for document in collection.find({}):
-            documents.append(document)
-        documents.sort(key=lambda document: str(document.get("_id", "")))
-        payload = _json_lines(documents)
-        if len(payload) > MAX_MEMBER_BYTES:
-            raise BackupError("backup_collection_too_large")
-        files[name] = payload
-        counts[name] = len(documents)
-    return files, counts
-
-
-def _tar_member(name: str, payload: bytes) -> tarfile.TarInfo:
+def _tar_member(name: str, payload: bytes | int) -> tarfile.TarInfo:
     info = tarfile.TarInfo(name)
-    info.size = len(payload)
+    info.size = payload if isinstance(payload, int) else len(payload)
     info.mode = 0o600
     info.mtime = 0
     return info
 
 
-def _archive_bytes(
-    files: dict[str, bytes], counts: dict[str, int], scope: str
-) -> tuple[bytes, dict[str, Any]]:
-    collections = {
-        name: {
-            "documents": counts[name],
-            "size_bytes": len(payload),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-        }
-        for name, payload in sorted(files.items())
-    }
-    manifest: dict[str, Any] = {
-        "schema_version": BACKUP_SCHEMA_VERSION,
-        "scope": scope,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "collections": collections,
-    }
-    manifest_payload = json.dumps(
-        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    stream = io.BytesIO()
-    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
-        for name, payload in sorted(files.items()):
-            archive.addfile(
-                _tar_member(f"collections/{name}.jsonl", payload), io.BytesIO(payload)
-            )
-        archive.addfile(
-            _tar_member("manifest.json", manifest_payload), io.BytesIO(manifest_payload)
+def _chunk_member_name(collection_name: str, index: int) -> str:
+    return f"collections/{collection_name}/{index:08d}.jsonl"
+
+
+def _document_line(document: dict[str, Any]) -> bytes:
+    return (
+        json_util.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+
+
+async def _write_collection_chunks(
+    archive: tarfile.TarFile,
+    *,
+    name: str,
+    collection: Any,
+    member_limit: int,
+) -> dict[str, Any]:
+    """Add a collection as bounded JSONL members and return its manifest entry."""
+
+    chunk_index = 0
+    chunk_size = 0
+    chunk_documents = 0
+    document_count = 0
+    total_size = 0
+    whole_hash = hashlib.sha256()
+    chunk_hash = hashlib.sha256()
+    chunks: list[dict[str, Any]] = []
+
+    def new_chunk_file() -> tempfile.SpooledTemporaryFile[bytes]:
+        # Keep small collections in memory and spill large telemetry chunks to
+        # disk before archive compression. This prevents collection growth from
+        # multiplying the backend's resident memory usage.
+        return tempfile.SpooledTemporaryFile(
+            max_size=min(member_limit, 8 * 1024 * 1024), mode="w+b"
         )
-    return stream.getvalue(), manifest
+
+    chunk_file = new_chunk_file()
+
+    def flush_chunk() -> None:
+        nonlocal chunk_documents, chunk_file, chunk_hash, chunk_index, chunk_size
+        if not chunk_documents:
+            return
+        member_name = _chunk_member_name(name, chunk_index)
+        chunk_file.seek(0)
+        archive.addfile(_tar_member(member_name, chunk_size), chunk_file)
+        chunks.append(
+            {
+                "member": member_name,
+                "documents": chunk_documents,
+                "size_bytes": chunk_size,
+                "sha256": chunk_hash.hexdigest(),
+            }
+        )
+        chunk_file.close()
+        chunk_file = new_chunk_file()
+        chunk_index += 1
+        chunk_size = 0
+        chunk_documents = 0
+        chunk_hash = hashlib.sha256()
+
+    try:
+        cursor = collection.find({}).sort("_id", 1)
+        async for document in cursor:
+            line = _document_line(document)
+            if len(line) > member_limit:
+                raise BackupError("backup_document_too_large")
+            if chunk_documents and chunk_size + len(line) > member_limit:
+                flush_chunk()
+            chunk_file.write(line)
+            chunk_hash.update(line)
+            whole_hash.update(line)
+            chunk_size += len(line)
+            chunk_documents += 1
+            document_count += 1
+            total_size += len(line)
+        flush_chunk()
+        if not chunks:
+            member_name = _chunk_member_name(name, 0)
+            archive.addfile(_tar_member(member_name, b""), io.BytesIO())
+            chunks.append(
+                {
+                    "member": member_name,
+                    "documents": 0,
+                    "size_bytes": 0,
+                    "sha256": hashlib.sha256(b"").hexdigest(),
+                }
+            )
+    finally:
+        chunk_file.close()
+
+    return {
+        "documents": document_count,
+        "size_bytes": total_size,
+        "sha256": whole_hash.hexdigest(),
+        "chunks": chunks,
+    }
+
+
+async def _archive_bytes(*, scope: str, settings: Settings) -> tuple[bytes, dict[str, Any]]:
+    collections: dict[str, dict[str, Any]] = {}
+    member_limit = _member_limit(settings)
+    with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as stream:
+        with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+            for model in DOCUMENT_MODELS:
+                collection = model.get_motor_collection()
+                name = collection.name
+                if name in collections:
+                    raise BackupError("backup_duplicate_collection")
+                collections[name] = await _write_collection_chunks(
+                    archive,
+                    name=name,
+                    collection=collection,
+                    member_limit=member_limit,
+                )
+            manifest: dict[str, Any] = {
+                "schema_version": BACKUP_SCHEMA_VERSION,
+                "scope": scope,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "collections": collections,
+            }
+            manifest_payload = json.dumps(
+                manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            archive.addfile(
+                _tar_member("manifest.json", manifest_payload),
+                io.BytesIO(manifest_payload),
+            )
+        stream.seek(0)
+        return stream.read(), manifest
 
 
 async def create_backup_artifact(
@@ -269,8 +360,7 @@ async def create_backup_artifact(
     encryption_key = _secret(settings)
     if settings.environment not in {"development", "test"} and not encryption_key:
         raise BackupError("backup_encryption_required")
-    files, counts = await _collect_collections()
-    archive, manifest = _archive_bytes(files, counts, scope)
+    archive, manifest = await _archive_bytes(scope=scope, settings=settings)
     encrypted = bool(encryption_key)
     output = _crypt(archive, encryption_key) if encrypted else archive
     root = backup_root(settings)
@@ -329,9 +419,113 @@ def delete_backup_artifact(*, settings: Settings, record: BackupRecord) -> None:
         raise BackupError("backup_retention_delete_failed") from exc
 
 
+def _collection_name_from_member(member_name: str) -> str | None:
+    if not member_name.startswith("collections/") or not member_name.endswith(".jsonl"):
+        return None
+    parts = member_name.removeprefix("collections/").split("/")
+    if len(parts) == 1:
+        name = parts[0].removesuffix(".jsonl")
+        return name or None
+    if len(parts) == 2:
+        name, chunk = parts
+        chunk_index = chunk.removesuffix(".jsonl")
+        if name and len(chunk_index) == 8 and chunk_index.isdecimal():
+            return name
+    return None
+
+
+def _validate_collection_metadata(
+    metadata: Any, *, documents: int, size_bytes: int, digest: str
+) -> None:
+    if not isinstance(metadata, dict):
+        raise BackupError("backup_manifest_invalid")
+    expected_documents = metadata.get("documents")
+    if not isinstance(expected_documents, int) or expected_documents < 0:
+        raise BackupError("backup_manifest_invalid")
+    if expected_documents != documents:
+        raise BackupError("backup_collection_count_mismatch")
+    if metadata.get("size_bytes") != size_bytes:
+        raise BackupError("backup_collection_size_mismatch")
+    if metadata.get("sha256") != digest:
+        raise BackupError("backup_collection_checksum_mismatch")
+
+
+def _validate_v1_archive(
+    collection_manifest: dict[str, Any], files: dict[str, bytes]
+) -> dict[str, list[str]]:
+    expected_members: set[str] = set()
+    members_by_collection: dict[str, list[str]] = {}
+    for name, metadata in collection_manifest.items():
+        if not isinstance(name, str) or not name or "/" in name:
+            raise BackupError("backup_manifest_invalid")
+        member_name = f"collections/{name}.jsonl"
+        expected_members.add(member_name)
+        content = files.get(member_name)
+        if content is None:
+            raise BackupError("backup_collection_missing")
+        _validate_collection_metadata(
+            metadata,
+            documents=sum(1 for line in content.splitlines() if line),
+            size_bytes=len(content),
+            digest=hashlib.sha256(content).hexdigest(),
+        )
+        members_by_collection[name] = [member_name]
+    if set(files) != expected_members:
+        raise BackupError("backup_collection_set_mismatch")
+    return members_by_collection
+
+
+def _validate_v2_archive(
+    collection_manifest: dict[str, Any], files: dict[str, bytes]
+) -> dict[str, list[str]]:
+    expected_members: set[str] = set()
+    members_by_collection: dict[str, list[str]] = {}
+    for name, metadata in collection_manifest.items():
+        if not isinstance(name, str) or not name or "/" in name or not isinstance(metadata, dict):
+            raise BackupError("backup_manifest_invalid")
+        chunks = metadata.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            raise BackupError("backup_manifest_invalid")
+        member_names: list[str] = []
+        collection_hash = hashlib.sha256()
+        collection_size = 0
+        collection_documents = 0
+        for index, chunk_metadata in enumerate(chunks):
+            if not isinstance(chunk_metadata, dict):
+                raise BackupError("backup_manifest_invalid")
+            member_name = _chunk_member_name(name, index)
+            if chunk_metadata.get("member") != member_name or member_name in expected_members:
+                raise BackupError("backup_manifest_invalid")
+            content = files.get(member_name)
+            if content is None:
+                raise BackupError("backup_collection_missing")
+            documents = sum(1 for line in content.splitlines() if line)
+            _validate_collection_metadata(
+                chunk_metadata,
+                documents=documents,
+                size_bytes=len(content),
+                digest=hashlib.sha256(content).hexdigest(),
+            )
+            expected_members.add(member_name)
+            member_names.append(member_name)
+            collection_hash.update(content)
+            collection_size += len(content)
+            collection_documents += documents
+        _validate_collection_metadata(
+            metadata,
+            documents=collection_documents,
+            size_bytes=collection_size,
+            digest=collection_hash.hexdigest(),
+        )
+        members_by_collection[name] = member_names
+    if set(files) != expected_members:
+        raise BackupError("backup_collection_set_mismatch")
+    return members_by_collection
+
+
 def _read_archive(
     settings: Settings, record: BackupRecord
-) -> tuple[dict[str, Any], dict[str, bytes]]:
+) -> tuple[dict[str, Any], dict[str, bytes], dict[str, list[str]]]:
     path = _artifact_path(settings, record)
     try:
         payload = path.read_bytes()
@@ -342,31 +536,29 @@ def _read_archive(
     if record.encrypted:
         payload = _crypt(payload, _secret(settings), decrypt=True)
     files: dict[str, bytes] = {}
+    member_limit = _member_limit(settings)
+    archive_limit = _archive_limit(settings)
     try:
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
             members = archive.getmembers()
             total_size = 0
             for member in members:
                 is_manifest = member.name == "manifest.json"
-                is_collection = (
-                    member.name.startswith("collections/")
-                    and member.name.endswith(".jsonl")
-                    and "/" not in member.name.removeprefix("collections/")
-                )
+                is_collection = _collection_name_from_member(member.name) is not None
                 if not member.isreg() or not (is_manifest or is_collection):
                     raise BackupError("backup_member_invalid")
                 if member.name in files:
                     raise BackupError("backup_member_duplicate")
-                if member.size > MAX_MEMBER_BYTES:
+                if member.size > member_limit:
                     raise BackupError("backup_member_too_large")
                 total_size += member.size
-                if total_size > MAX_MEMBER_BYTES * 8:
+                if total_size > archive_limit:
                     raise BackupError("backup_archive_too_large")
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise BackupError("backup_member_invalid")
-                files[member.name] = extracted.read(MAX_MEMBER_BYTES + 1)
-                if len(files[member.name]) > MAX_MEMBER_BYTES:
+                files[member.name] = extracted.read(member_limit + 1)
+                if len(files[member.name]) > member_limit:
                     raise BackupError("backup_member_too_large")
     except (tarfile.TarError, OSError) as exc:
         raise BackupError("backup_archive_invalid") from exc
@@ -374,38 +566,30 @@ def _read_archive(
         manifest = json.loads(files.pop("manifest.json"))
     except (KeyError, TypeError, ValueError) as exc:
         raise BackupError("backup_manifest_invalid") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(schema_version, int)
+        or schema_version not in SUPPORTED_BACKUP_SCHEMA_VERSIONS
+    ):
         raise BackupError("backup_manifest_invalid")
     collection_manifest = manifest.get("collections")
     if not isinstance(collection_manifest, dict):
         raise BackupError("backup_manifest_invalid")
-    expected_members = {f"collections/{name}.jsonl" for name in collection_manifest}
-    if set(files) != expected_members:
-        raise BackupError("backup_collection_set_mismatch")
-    for name, metadata in collection_manifest.items():
-        member_name = f"collections/{name}.jsonl"
-        content = files.get(member_name)
-        if content is None or not isinstance(metadata, dict):
-            raise BackupError("backup_collection_missing")
-        if hashlib.sha256(content).hexdigest() != metadata.get("sha256"):
-            raise BackupError("backup_collection_checksum_mismatch")
-        if metadata.get("size_bytes") != len(content):
-            raise BackupError("backup_collection_size_mismatch")
-        expected_documents = metadata.get("documents")
-        if not isinstance(expected_documents, int) or expected_documents < 0:
-            raise BackupError("backup_manifest_invalid")
-        actual_documents = sum(1 for line in content.splitlines() if line)
-        if actual_documents != expected_documents:
-            raise BackupError("backup_collection_count_mismatch")
-    return manifest, files
+    if schema_version == 1:
+        members_by_collection = _validate_v1_archive(collection_manifest, files)
+    else:
+        members_by_collection = _validate_v2_archive(collection_manifest, files)
+    return manifest, files, members_by_collection
 
 
 async def verify_backup(*, settings: Settings, record: BackupRecord) -> dict[str, Any]:
-    manifest, files = _read_archive(settings, record)
+    manifest, _, members_by_collection = await asyncio.to_thread(
+        _read_archive, settings, record
+    )
     return {
         "scope": manifest.get("scope", ""),
         "schema_version": manifest.get("schema_version"),
-        "collections": len(files),
+        "collections": len(members_by_collection),
         "documents": sum(
             int(item.get("documents", 0))
             for item in manifest.get("collections", {}).values()
@@ -414,51 +598,64 @@ async def verify_backup(*, settings: Settings, record: BackupRecord) -> dict[str
     }
 
 
+async def _apply_restore_batch(collection: Any, operations: list[ReplaceOne]) -> int:
+    result = await collection.bulk_write(operations, ordered=False)
+    return result.matched_count + result.upserted_count
+
+
 async def restore_backup(
     *, settings: Settings, record: BackupRecord, apply_changes: bool
 ) -> dict[str, Any]:
-    manifest, files = _read_archive(settings, record)
+    manifest, files, members_by_collection = await asyncio.to_thread(
+        _read_archive, settings, record
+    )
     model_by_collection = {
         model.get_motor_collection().name: model for model in DOCUMENT_MODELS
     }
     summary: dict[str, Any] = {
         "mode": "restore" if apply_changes else "rehearsal",
-        "collections": len(files),
+        "collections": len(members_by_collection),
         "documents": 0,
         "applied": 0,
         "skipped": [],
     }
-    for member_name, content in sorted(files.items()):
-        collection_name = member_name.removeprefix("collections/").removesuffix(".jsonl")
+    for collection_name, member_names in sorted(members_by_collection.items()):
         model = model_by_collection.get(collection_name)
         if model is None:
             raise BackupError("backup_collection_unknown")
-        documents: list[dict[str, Any]] = []
-        for line in content.splitlines():
-            if not line:
-                continue
-            value = json_util.loads(line)
-            if not isinstance(value, dict) or "_id" not in value:
-                raise BackupError("backup_document_invalid")
-            documents.append(value)
-        summary["documents"] += len(documents)
-        if not apply_changes:
-            continue
         # Do not overwrite the live task or backup record that is executing the
         # restore. Other collections are upserted by their stable Mongo _id;
         # this is intentionally non-destructive and leaves newer documents
         # available for an operator to reconcile.
-        if collection_name in {TaskCollectionName, BackupCollectionName}:
+        should_apply = apply_changes and collection_name not in {
+            TaskCollectionName,
+            BackupCollectionName,
+        }
+        if apply_changes and not should_apply:
             summary["skipped"].append(collection_name)
-            continue
-        collection = model.get_motor_collection()
-        operations = [
-            ReplaceOne({"_id": document["_id"]}, document, upsert=True)
-            for document in documents
-        ]
-        if operations:
-            result = await collection.bulk_write(operations, ordered=False)
-            summary["applied"] += result.matched_count + result.upserted_count
+        collection = model.get_motor_collection() if should_apply else None
+        operations: list[ReplaceOne] = []
+
+        for member_name in member_names:
+            for line in files[member_name].splitlines():
+                if not line:
+                    continue
+                value = json_util.loads(line)
+                if not isinstance(value, dict) or "_id" not in value:
+                    raise BackupError("backup_document_invalid")
+                summary["documents"] += 1
+                if should_apply:
+                    operations.append(ReplaceOne({"_id": value["_id"]}, value, upsert=True))
+                    if len(operations) >= RESTORE_BATCH_SIZE:
+                        summary["applied"] += await _apply_restore_batch(collection, operations)
+                        operations.clear()
+                elif summary["documents"] % RESTORE_BATCH_SIZE == 0:
+                    # A rehearsal parses potentially millions of documents
+                    # without database writes. Yield between batches so agent
+                    # heartbeats and API requests stay responsive.
+                    await asyncio.sleep(0)
+        if operations and collection is not None:
+            summary["applied"] += await _apply_restore_batch(collection, operations)
     summary["manifest_scope"] = manifest.get("scope", "")
     return summary
 

@@ -56,7 +56,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
     label: "POLICY",
     items: [
       { href: "/sites", label: "Sites & CIDRs", icon: Network, matches: ["/sites"] },
-      { href: "/exceptions", label: "Exceptions", icon: KeyRound },
+      { href: "/exceptions", label: "Policy exceptions", icon: KeyRound },
       { href: "/cross-site", label: "Cross-site", icon: ArrowLeftRight },
       { href: "/blacklist", label: "Destination deny", icon: Ban },
     ],

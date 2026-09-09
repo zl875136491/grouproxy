@@ -100,41 +100,9 @@ class Site(Document):
     slug: Indexed(str, unique=True)
     name: str
     dns_note: str = ""
-    proxy_auth_required: bool = False
-    http_port: int = 80
     shutdown: bool = False
     config_revision: int = 0
     created_at: datetime = Field(default_factory=utcnow)
-
-
-class ProxyCredential(Document):
-    """One derived HTTP Basic credential for an employee at one site.
-
-    ``password_hash`` proves that the configured control-plane secret still
-    derives the expected value. The clear-text password is never stored here.
-    """
-
-    credential_id: Indexed(str, unique=True)
-    site_id: str
-    itcode: str
-    username: str
-    password_hash: str
-    active: bool = True
-    created_at: datetime = Field(default_factory=utcnow)
-    rotated_at: datetime = Field(default_factory=utcnow)
-
-    class Settings:
-        indexes = [
-            IndexModel(
-                [("site_id", ASCENDING), ("itcode", ASCENDING)],
-                name="unique_proxy_credential_user_site",
-                unique=True,
-            ),
-            IndexModel(
-                [("site_id", ASCENDING), ("active", ASCENDING)],
-                name="proxy_credential_site_active",
-            ),
-        ]
 
 
 class Node(Document):
@@ -203,6 +171,7 @@ class SubscriptionSource(Document):
     """
 
     name: Indexed(str, unique=True)
+    source_type: Literal["http", "upload", "single_node"] = "http"
     url: str = ""
     secret_ref: str = ""
     fetch_interval_sec: int = 21_600
@@ -680,7 +649,6 @@ DOCUMENT_MODELS: list[type[Document]] = [
     AuthVerificationChallenge,
     ManagementSession,
     Site,
-    ProxyCredential,
     Node,
     SiteCIDR,
     TravelException,

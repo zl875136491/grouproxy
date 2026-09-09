@@ -12,7 +12,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..config import Settings
 from ..models import BackupRecord, Task, utcnow
-from .alerts import set_alert
+from .alerts import resolve_open_alerts, set_alert
 from .audit import append_audit
 from .backups import (
     BACKUP_READY_STATUSES,
@@ -285,6 +285,16 @@ class BackupWorker:
             # Alert persistence must not hide the primary task result.
             return
 
+    async def _resolve_backup_alerts(self) -> None:
+        """Close historical backup alarms after a current snapshot is recoverable."""
+
+        try:
+            await resolve_open_alerts(category="backup")
+        except Exception:
+            # A successful backup remains successful even if alert persistence
+            # is temporarily unavailable; the next recovered backup retries it.
+            return
+
     async def execute(self, task: Task) -> None:
         backup_id = str(task.payload.get("backup_id", ""))
         record = await BackupRecord.find_one(BackupRecord.backup_id == backup_id)
@@ -333,6 +343,7 @@ class BackupWorker:
                     },
                 )
                 await self._set_backup_alert(record, active=False, detail="")
+                await self._resolve_backup_alerts()
                 return
 
             apply_changes = bool(task.payload.get("confirm", False))
@@ -364,6 +375,7 @@ class BackupWorker:
                 after={"status": record.status, **summary},
             )
             await self._set_backup_alert(record, active=False, detail="")
+            await self._resolve_backup_alerts()
         except BackupError as exc:
             record.status = "failed"
             record.error = exc.code

@@ -16,10 +16,9 @@ func testBundle() Bundle {
 		"min_monitor_version": "0.1.0",
 		"site_id":             "site-1",
 		"node_id":             "node-1",
-		"listen":              map[string]any{"http_port": 80},
+		"listen":              map[string]any{"http_port": 1080},
 		"allow_cidrs":         []string{"10.0.0.0/8"},
 		"deny_destinations":   []any{},
-		"proxy_auth":          map[string]any{"required": false, "users": []any{}},
 		"shutdown":            false,
 		"issued_at":           time.Now().UTC().Format(time.RFC3339),
 		"expires_at":          time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
@@ -63,38 +62,6 @@ func TestValidateMinimumMonitorVersion(t *testing.T) {
 	value["min_monitor_version"] = "not-semver"
 	if err := ValidateMinimumMonitorVersion(value, "0.1.0"); err == nil || err.Error() != "invalid_min_monitor_version" {
 		t.Fatalf("invalid requirement error = %v", err)
-	}
-}
-
-func TestValidateProxyAuth(t *testing.T) {
-	value := testBundle()
-	value["proxy_auth"] = map[string]any{
-		"required": true,
-		"users": []any{map[string]any{"username": "example.user", "password": "derived-secret"}},
-	}
-	signed := signForTest(value, "secret")
-	if _, err := Validate(signed, "secret", 0); err != nil {
-		t.Fatalf("valid proxy auth rejected: %v", err)
-	}
-
-	value = testBundle()
-	value["proxy_auth"] = map[string]any{"required": true, "users": []any{}}
-	signed = signForTest(value, "secret")
-	if _, err := Validate(signed, "secret", 0); err == nil || err.Error() != "proxy_auth_requires_user" {
-		t.Fatalf("empty required users error = %v", err)
-	}
-
-	value = testBundle()
-	value["proxy_auth"] = map[string]any{
-		"required": true,
-		"users": []any{
-			map[string]any{"username": "example.user", "password": "first"},
-			map[string]any{"username": "example.user", "password": "second"},
-		},
-	}
-	signed = signForTest(value, "secret")
-	if _, err := Validate(signed, "secret", 0); err == nil || err.Error() != "duplicate_proxy_auth_username" {
-		t.Fatalf("duplicate user error = %v", err)
 	}
 }
 

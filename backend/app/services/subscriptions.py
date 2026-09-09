@@ -7,14 +7,18 @@ payload needs the upstream URL, credential, or raw subscription content.
 """
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
+import re
 import socket
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 import yaml
@@ -39,6 +43,7 @@ SUPPORTED_OUTBOUND_TYPES = {
 MAX_SUBSCRIPTION_NODES = 128
 MAX_FIELD_LENGTH = 8_192
 MAX_VALUE_DEPTH = 12
+SINGLE_NODE_MAX_BYTES = 16_384
 
 
 class SubscriptionError(Exception):
@@ -58,6 +63,398 @@ class ParsedSubscription:
 class RefreshResult:
     version: SubscriptionVersion
     changed: bool
+
+
+def _single_node_payload(outbound: dict[str, Any]) -> bytes:
+    return json.dumps(
+        {"outbounds": [outbound]},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _single_node_scheme(value: str) -> str:
+    match = re.match(r"^\s*([A-Za-z][A-Za-z0-9+.-]*)://", value)
+    return match.group(1).lower() if match else ""
+
+
+def _normalize_vless_node(raw: str) -> bytes:
+    """Convert a VLESS URI into one canonical sing-box outbound."""
+
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise SubscriptionError("single_node_invalid_uri") from exc
+    if parsed.scheme.lower() != "vless" or not parsed.hostname or port is None:
+        raise SubscriptionError("single_node_invalid_uri")
+    if parsed.password is not None:
+        raise SubscriptionError("single_node_invalid_uri")
+    try:
+        node_uuid = str(uuid.UUID(unquote(parsed.username or "")))
+    except (ValueError, AttributeError) as exc:
+        raise SubscriptionError("single_node_invalid_uuid") from exc
+    if port < 1 or port > 65_535:
+        raise SubscriptionError("single_node_invalid_port")
+    host = parsed.hostname.strip()
+    if not host or any(character.isspace() for character in host):
+        raise SubscriptionError("single_node_invalid_host")
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise SubscriptionError("single_node_invalid_parameters") from exc
+
+    allowed_keys = {
+        "encryption",
+        "security",
+        "type",
+        "sni",
+        "fp",
+        "pbk",
+        "sid",
+        "flow",
+        "packetEncoding",
+    }
+    unknown = set(query) - allowed_keys
+    if unknown:
+        raise SubscriptionError("single_node_parameter_unsupported")
+
+    def parameter(name: str, *, required: bool = False) -> str:
+        values = query.get(name, [])
+        if len(values) > 1 or (required and (not values or not values[0].strip())):
+            raise SubscriptionError("single_node_invalid_parameters")
+        result = unquote(values[0]).strip() if values else ""
+        if len(result) > MAX_FIELD_LENGTH:
+            raise SubscriptionError("single_node_invalid_parameters")
+        return result
+
+    encryption = parameter("encryption") or "none"
+    if encryption.lower() != "none":
+        raise SubscriptionError("single_node_encryption_unsupported")
+    security = (parameter("security") or "none").lower()
+    if security not in {"none", "tls", "reality"}:
+        raise SubscriptionError("single_node_security_unsupported")
+    transport = (parameter("type") or "tcp").lower()
+    if transport != "tcp":
+        raise SubscriptionError("single_node_transport_unsupported")
+
+    tag = unquote(parsed.fragment).strip() or "vless-node"
+    if len(tag) > 255:
+        raise SubscriptionError("single_node_name_too_long")
+    outbound: dict[str, Any] = {
+        "type": "vless",
+        "tag": tag,
+        "server": host,
+        "server_port": port,
+        "uuid": node_uuid,
+    }
+    flow = parameter("flow")
+    if flow:
+        outbound["flow"] = flow
+    packet_encoding = parameter("packetEncoding")
+    if packet_encoding:
+        outbound["packet_encoding"] = packet_encoding
+
+    if security != "none":
+        server_name = parameter("sni", required=security == "reality")
+        tls: dict[str, Any] = {"enabled": True}
+        if server_name:
+            tls["server_name"] = server_name
+        fingerprint = parameter("fp")
+        if fingerprint:
+            tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+        if security == "reality":
+            public_key = parameter("pbk", required=True)
+            short_id = parameter("sid", required=True)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", public_key):
+                raise SubscriptionError("single_node_invalid_reality_key")
+            if not re.fullmatch(r"(?:[0-9a-fA-F]{2}){0,8}", short_id):
+                raise SubscriptionError("single_node_invalid_reality_short_id")
+            tls["reality"] = {
+                "enabled": True,
+                "public_key": public_key,
+                "short_id": short_id,
+            }
+        outbound["tls"] = tls
+
+    return _single_node_payload(outbound)
+
+
+def _vmess_payload_document(raw: str) -> dict[str, Any]:
+    """Decode the standard ``vmess://<base64-json>`` representation.
+
+    Subscription applications emit both padded standard Base64 and unpadded
+    URL-safe Base64.  Decode strictly after restoring padding so malformed or
+    unexpectedly large values cannot be accepted as a node definition.
+    """
+
+    _, separator, payload = raw.partition("://")
+    if not separator:
+        raise SubscriptionError("single_node_invalid_uri")
+    payload = unquote(payload.strip())
+    if not payload:
+        raise SubscriptionError("single_node_invalid_vmess")
+    if payload.lstrip().startswith("{"):
+        decoded = payload.encode("utf-8")
+    else:
+        compact = re.sub(r"\s+", "", payload)
+        if not compact or len(compact.encode("ascii", errors="ignore")) > SINGLE_NODE_MAX_BYTES:
+            raise SubscriptionError("single_node_too_large")
+        compact += "=" * (-len(compact) % 4)
+        try:
+            decoded = base64.b64decode(compact, altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SubscriptionError("single_node_invalid_vmess") from exc
+    if len(decoded) > SINGLE_NODE_MAX_BYTES:
+        raise SubscriptionError("single_node_too_large")
+    try:
+        document = json.loads(decoded.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SubscriptionError("single_node_invalid_vmess") from exc
+    if not isinstance(document, dict):
+        raise SubscriptionError("single_node_invalid_vmess")
+    return document
+
+
+def _vmess_text(
+    document: dict[str, Any],
+    *keys: str,
+    default: str = "",
+    required: bool = False,
+) -> str:
+    value: Any = None
+    present = False
+    for key in keys:
+        if key in document:
+            value = document[key]
+            present = True
+            break
+    if not present or value is None:
+        result = default
+    elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        result = unquote(str(value)).strip()
+    else:
+        raise SubscriptionError("single_node_invalid_parameters")
+    if (required and not result) or len(result) > MAX_FIELD_LENGTH:
+        raise SubscriptionError("single_node_invalid_parameters")
+    return result
+
+
+def _vmess_int(
+    document: dict[str, Any],
+    *keys: str,
+    default: int | None = None,
+) -> int:
+    value: Any = None
+    present = False
+    for key in keys:
+        if key in document:
+            value = document[key]
+            present = True
+            break
+    if not present or value is None or value == "":
+        if default is None:
+            raise SubscriptionError("single_node_invalid_parameters")
+        return default
+    if isinstance(value, bool):
+        raise SubscriptionError("single_node_invalid_parameters")
+    try:
+        result = int(str(value).strip(), 10)
+    except (TypeError, ValueError) as exc:
+        raise SubscriptionError("single_node_invalid_parameters") from exc
+    return result
+
+
+def _vmess_bool(document: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        if key not in document:
+            continue
+        value = document[key]
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in {0, 1}:
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off", ""}:
+                return False
+        raise SubscriptionError("single_node_invalid_parameters")
+    return False
+
+
+def _vmess_alpn(document: dict[str, Any]) -> list[str]:
+    value = document.get("alpn", "")
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        values = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, list):
+        values = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise SubscriptionError("single_node_invalid_parameters")
+            values.append(item.strip())
+    else:
+        raise SubscriptionError("single_node_invalid_parameters")
+    if len(values) > 16 or any(len(item) > MAX_FIELD_LENGTH for item in values):
+        raise SubscriptionError("single_node_invalid_parameters")
+    return values
+
+
+def _normalize_vmess_node(raw: str) -> bytes:
+    document = _vmess_payload_document(raw)
+    host = _vmess_text(document, "add", "server", required=True)
+    if not host or any(character.isspace() for character in host):
+        raise SubscriptionError("single_node_invalid_host")
+    port = _vmess_int(document, "port", "server_port")
+    if port < 1 or port > 65_535:
+        raise SubscriptionError("single_node_invalid_port")
+    try:
+        node_uuid = str(uuid.UUID(_vmess_text(document, "id", "uuid", required=True)))
+    except (ValueError, AttributeError) as exc:
+        raise SubscriptionError("single_node_invalid_uuid") from exc
+
+    tag = _vmess_text(document, "ps", "name", "remark", default="vmess-node") or "vmess-node"
+    if len(tag) > 255:
+        raise SubscriptionError("single_node_name_too_long")
+    security = _vmess_text(document, "scy", "security", default="auto").lower() or "auto"
+    if security not in {"auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"}:
+        raise SubscriptionError("single_node_security_unsupported")
+    alter_id = _vmess_int(document, "aid", "alterId", "alter_id", default=0)
+    if alter_id < 0 or alter_id > 65_535:
+        raise SubscriptionError("single_node_invalid_parameters")
+
+    network = _vmess_text(document, "net", "network", default="tcp").lower() or "tcp"
+    camouflage = _vmess_text(document, "type", default="none").lower() or "none"
+    if network in {"raw", "none"}:
+        network = "tcp"
+    if network in {"tcp", "http"} and camouflage in {"http", "h2"}:
+        network = "http"
+    if network not in {"tcp", "ws", "websocket", "http", "h2", "grpc", "httpupgrade"}:
+        raise SubscriptionError("single_node_transport_unsupported")
+
+    transport_host = _vmess_text(document, "host", "Host", default="")
+    if any(character in transport_host for character in "\r\n"):
+        raise SubscriptionError("single_node_invalid_parameters")
+    path = _vmess_text(document, "path", default="")
+    transport: dict[str, Any] | None = None
+    if network in {"ws", "websocket"}:
+        transport = {"type": "ws", "path": path or "/"}
+        if transport_host:
+            transport["headers"] = {"Host": transport_host.split(",", 1)[0].strip()}
+    elif network in {"http", "h2"}:
+        transport = {"type": "http", "path": path or "/"}
+        if transport_host:
+            transport["host"] = [item.strip() for item in transport_host.split(",") if item.strip()]
+    elif network == "grpc":
+        service_name = path.lstrip("/") or _vmess_text(
+            document, "serviceName", "service_name", default=""
+        )
+        transport = {"type": "grpc"}
+        if service_name:
+            transport["service_name"] = service_name
+    elif network == "httpupgrade":
+        transport = {"type": "httpupgrade", "path": path or "/"}
+        if transport_host:
+            transport["host"] = transport_host.split(",", 1)[0].strip()
+
+    outbound: dict[str, Any] = {
+        "type": "vmess",
+        "tag": tag,
+        "server": host,
+        "server_port": port,
+        "uuid": node_uuid,
+        "security": security,
+        "alter_id": alter_id,
+    }
+    packet_encoding = _vmess_text(
+        document, "packetEncoding", "packet_encoding", default=""
+    )
+    if packet_encoding:
+        outbound["packet_encoding"] = packet_encoding
+    if transport is not None:
+        outbound["transport"] = transport
+
+    tls_value = document.get("tls", "")
+    if isinstance(tls_value, bool):
+        tls_enabled = tls_value
+    elif isinstance(tls_value, (int, float)) and not isinstance(tls_value, bool):
+        tls_enabled = tls_value != 0
+    elif isinstance(tls_value, str):
+        tls_enabled = tls_value.strip().lower() not in {"", "none", "false", "0", "off"}
+    else:
+        raise SubscriptionError("single_node_invalid_parameters")
+    if tls_enabled:
+        server_name = _vmess_text(document, "sni", "servername", "server_name", default="")
+        tls: dict[str, Any] = {"enabled": True}
+        if server_name:
+            tls["server_name"] = server_name
+        fingerprint = _vmess_text(document, "fp", "fingerprint", default="")
+        if fingerprint:
+            tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+        alpn = _vmess_alpn(document)
+        if alpn:
+            tls["alpn"] = alpn
+        if _vmess_bool(document, "allowInsecure", "allow_insecure", "skip-cert-verify"):
+            tls["insecure"] = True
+        outbound["tls"] = tls
+
+    return _single_node_payload(outbound)
+
+
+def normalize_single_node(value: str) -> bytes:
+    """Convert a VLESS or VMess URI into one canonical sing-box outbound."""
+
+    raw = value.strip()
+    if not raw or len(raw.encode("utf-8")) > SINGLE_NODE_MAX_BYTES:
+        raise SubscriptionError("single_node_too_large")
+    scheme = _single_node_scheme(raw)
+    if scheme == "vless":
+        return _normalize_vless_node(raw)
+    if scheme == "vmess":
+        return _normalize_vmess_node(raw)
+    raise SubscriptionError("single_node_invalid_uri")
+
+
+def single_node_source_name(value: str) -> str:
+    """Derive an operator-facing source label for a VLESS or VMess URI."""
+
+    raw = value.strip()
+    scheme = _single_node_scheme(raw)
+    if scheme == "vmess":
+        try:
+            document = _vmess_payload_document(raw)
+            label = _vmess_text(document, "ps", "name", "remark", default="")
+            if label:
+                return label[:120]
+            host = _vmess_text(document, "add", "server", default="node")
+            port = _vmess_int(document, "port", "server_port", default=0)
+            return (f"vmess-{host}:{port}" if port else f"vmess-{host}")[:120]
+        except SubscriptionError:
+            return "vmess-node"
+    parsed = urlsplit(raw)
+    label = unquote(parsed.fragment).strip()
+    if not label:
+        host = parsed.hostname or "node"
+        try:
+            port = parsed.port
+        except ValueError:  # pragma: no cover - normalize_single_node validates first
+            port = None
+        label = f"vless-{host}:{port}" if port else f"vless-{host}"
+    return label[:120]
+
+
+def _canonical_subscription_content(content: bytes) -> bytes:
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return content
+    if _single_node_scheme(text) in {"vless", "vmess"}:
+        return normalize_single_node(text)
+    return content
 
 
 def normalize_source_url(value: str) -> str:
@@ -326,6 +723,9 @@ def inspect_subscription(content: bytes) -> ParsedSubscription:
         raise SubscriptionError("subscription_content_not_utf8") from exc
     if not text.strip():
         raise SubscriptionError("subscription_response_empty")
+    if _single_node_scheme(text) in {"vless", "vmess"}:
+        normalize_single_node(text)
+        return ParsedSubscription("sing-box", 1)
     try:
         decoded = json.loads(text)
     except json.JSONDecodeError:
@@ -339,6 +739,48 @@ def inspect_subscription(content: bytes) -> ParsedSubscription:
     except yaml.YAMLError as exc:
         raise SubscriptionError("subscription_format_unrecognized") from exc
     return _parse_clash(yaml_value)
+
+
+def subscription_outbound_tags(content: bytes, format: str) -> set[str]:
+    """Return the selector tags a monitor will derive from a version.
+
+    This is deliberately a small, read-only projection.  It lets bundle
+    construction discard a stale proxy selection before it reaches older
+    monitors, while the monitor remains the authority that parses and applies
+    the endpoint payload.
+    """
+
+    try:
+        text = content.decode("utf-8-sig")
+        if format == "sing-box":
+            value = json.loads(text)
+            items = value if isinstance(value, list) else value.get("outbounds", [])
+        elif format == "sip008":
+            value = json.loads(text)
+            items = value.get("servers", []) if isinstance(value, dict) else []
+        elif format == "clash":
+            value = yaml.safe_load(text)
+            items = value.get("proxies", []) if isinstance(value, dict) else []
+        else:
+            return set()
+    except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError, AttributeError):
+        return set()
+
+    if not isinstance(items, list):
+        return set()
+    tags: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        if format == "sing-box":
+            raw_tag = item.get("tag")
+        elif format == "sip008":
+            raw_tag = item.get("remarks")
+        else:
+            raw_tag = item.get("name")
+        tag = str(raw_tag).strip() if raw_tag is not None else ""
+        tags.add(tag or f"subscription-{index + 1}")
+    return tags
 
 
 async def _next_version(source_id: str) -> int:
@@ -355,6 +797,7 @@ async def record_subscription_version(
     *,
     fetched_at: datetime | None = None,
 ) -> tuple[SubscriptionVersion, bool]:
+    content = _canonical_subscription_content(content)
     content_hash = hashlib.sha256(content).hexdigest()
     source_id = str(source.id)
     existing = await SubscriptionVersion.find_one(
@@ -437,7 +880,10 @@ async def record_uploaded_subscription(
         raise SubscriptionError("subscription_response_empty")
     if len(content) > min(source.max_body_bytes, settings.subscription_max_body_bytes):
         raise SubscriptionError("subscription_response_too_large")
-    version, changed = await record_subscription_version(source, content)
+    version, changed = await record_subscription_version(
+        source,
+        _canonical_subscription_content(content),
+    )
     source.last_refresh_attempt_at = utcnow()
     source.updated_at = utcnow()
     if version.parse_ok:

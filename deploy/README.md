@@ -1,62 +1,126 @@
 # Grouproxy Deployment
 
-One control plane runs on `codedev`; both `codedev` and `nuc` are agent nodes
-that run monitor and sing-box. The test environment uses HTTP between monitor
-and backend with a node Bearer token and bundle HMAC.
+One control plane runs on `codedev`; `codedev` and `nuc` can both run a monitor
+and its sing-box child process. The monitor fetches signed Desired Bundles over
+the configured agent channel and owns both sing-box and the proxy-port
+nftables policy.
 
-The employee path is HTTP CONNECT on port `80`. This phase has no HTTPS proxy
-listener, certificate material, client certificate handling, mTLS, or port
-`443` configuration. `linux-setup-proxy.sh` persists the shell proxy variables
-for a user, updates GNOME/KDE when their settings tools are available, and can
-remove only its own changes with `--uninstall`. `--system` writes only system
-shell/environment defaults and requires root. All HTTPS destination traffic
-remains inside the HTTP CONNECT tunnel.
+## Direct Listeners
 
-On the resource-constrained codedev test host, Nginx owns public `:80` and
-inspects only enough of the initial HTTP bytes to choose an upstream. Requests
-for `test-proxy.1oa.com.cn/dashboard` go to the loopback control plane; all
-other requests remain byte-for-byte forward-proxy traffic and go to sing-box
-at `127.0.0.1:18080`. Because the checked-in sing-box 1.13 binary removed
-inbound PROXY protocol, the test Nginx stream guard applies the configured
-proxy CIDRs before forwarding; sing-box itself sees the loopback hop. This is
-an explicit test-host limitation: a production shared-IP deployment must keep
-sing-box directly on `:80`, place the console on another listener, or use a
-PROXY-aware data-plane build. The co-located test profile validates but does
-not apply its nft candidate because a packet-level `dport 80` rule would also
-gate `/dashboard`; SSH, MongoDB, control-plane, and Clash API ports are outside
-both controls.
+No forwarding layer is used.
 
-Where a site has HTTP Basic authentication enabled, users obtain their
-per-site proxy credentials from the control-plane access page. The proxy
-password is shown only on create or rotation and must not be stored in shell
-profiles, deployment files, or support tickets. The node applies it through a
-normal signed release; it remains available from its last-good configuration
-while the control plane is unavailable.
+- Each proxy domain points directly at its node's HTTP CONNECT listener on
+  TCP `1080`.
+- The dashboard is a separate Next.js process exposed directly on TCP `80`.
+  Its built-in `/api/*` rewrite sends dashboard API calls to the private FastAPI
+  backend listener.
+- The proxy has no HTTP Basic authentication. Per-site source CIDRs are the
+  network access boundary.
+
+The access page serves immutable, pre-generated workstation assets. The
+`test` environment uses `test-proxy.1oa.com.cn`; production uses
+`proxy.1oa.com.cn`. Set `GROUPROXY_ENVIRONMENT=test` in the backend process to
+select the test pair; every other value selects production. The endpoint is
+always HTTP CONNECT on TCP `1080` and has no proxy authentication layer.
+
+`linux-setup-proxy.sh` and `linux-setup-proxy-test.sh` write proxy variables
+with port `1080`, update GNOME or KDE when their settings tools are available,
+and can remove only their own changes with `--uninstall`. The dashboard
+downloads the matching file from `GET /api/v1/access/linux-setup.sh` and the
+matching PowerShell file from `GET /api/v1/access/windows-setup.ps1`.
+Keep the `deploy/` directory beside the deployed backend package (for example
+`/opt/grouproxy/deploy`) because the backend reads these checked-in files
+directly; do not replace them with request-time templates.
+
+The Windows asset configures the current user's WinINET proxy and user-level
+`HTTP_PROXY`/`HTTPS_PROXY` variables, runs optional direct and proxy checks, and
+supports `-Disable` to restore the saved state. It does not install a
+certificate or proxy credentials. macOS uses the environment-specific iCloud
+shortcut shown on the access page.
+
+HTTPS destinations remain end-to-end inside the HTTP CONNECT tunnel.
+
+The monitor systemd unit retains `CAP_NET_BIND_SERVICE` for the proxy listener
+and `CAP_NET_ADMIN` for the proxy-port nftables policy. The dashboard service,
+if it is run as a non-root user, likewise needs permission to bind `:80`.
+
+## Dashboard Installation
+
+Build the dashboard with the private backend URL, then deploy its standalone
+artifact and enable the direct listener:
+
+```bash
+cd frontend
+GROUPROXY_BACKEND_API_URL=http://127.0.0.1:8000 npm ci
+GROUPROXY_BACKEND_API_URL=http://127.0.0.1:8000 npm run build
+
+sudo install -d -m 0755 /opt/grouproxy/dashboard
+sudo cp -a .next/standalone/. /opt/grouproxy/dashboard/
+sudo chmod -R a+rX /opt/grouproxy/dashboard
+sudo install -m 0644 ../deploy/grouproxy-dashboard.service /etc/systemd/system/grouproxy-dashboard.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now grouproxy-dashboard.service
+```
+
+The build copies `.next/static` and `public/` into the standalone artifact, so
+the service can run without `next start`, an external reverse proxy, or the
+source `node_modules` directory. `GROUPROXY_BACKEND_API_URL` is a build-time
+value because Next.js writes the `/api/*` rewrite into the production output.
+The dashboard also forwards `/healthz` and `/readyz`; after restarting both
+processes, `curl http://<dashboard-domain>/healthz` must report backend version
+`0.4.0`. A 404 from `/api/v1/subscriptions/single-node` means the running
+backend/dashboard artifact is older than this source tree, not that the URI
+failed validation.
+
+After updating the backend source or monitor artifact, restart every process
+that may still hold the previous version before testing a new publication:
+
+```bash
+sudo systemctl restart grouproxy-backend.service
+sudo systemctl restart grouproxy-dashboard.service
+sudo systemctl restart grouproxy-monitor.service
+```
+
+Use the actual backend unit name used by the host if it differs. A successful
+single-node request requires the management Bearer session and returns `201`;
+missing authentication returns `401`, while malformed VLESS/VMess data returns
+`422` with a `single_node_*` error code.
+
+Interactive management sessions last 30 days by default. Set
+`GROUPROXY_AUTH_SESSION_TTL_MINUTES=43200` explicitly in the backend environment
+when deployment configuration should pin that value. Changing it affects newly
+created sessions; an already expired or revoked session must sign in again.
+
+Remove the retired Grouproxy NGINX entrypoint only after the direct service is
+healthy on port `80`:
+
+```bash
+sudo systemctl disable --now nginx
+sudo rm -f /etc/nginx/conf.d/grouproxy-dashboard.conf \
+  /etc/nginx/modules-enabled/99-grouproxy-entrypoint.conf \
+  /etc/nginx/njs/grouproxy-stream.js
+```
 
 ## Local Validation
 
 From the repository root:
 
 ```bash
-GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<host>:<port>/?authSource=admin' \
+GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<codedev-host>:<port>/?authSource=admin' \
   GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>' \
   GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-phase1.sh
 ./scripts/verify-phase2.sh
+./scripts/verify-phase3.sh
 ./scripts/verify-phase4.sh
 ./scripts/testenv-down.sh
 ```
 
 Runtime state, tokens, and logs are created under `testenv/` and ignored by
-Git. The test script uses the configured codedev MongoDB URI and never starts
-or shuts down MongoDB itself. It sends real GQuan verification codes only
-after an operator requests one from the login UI. For deterministic auth
-regression, use a separate runtime created with
-`GROUPROXY_TEST_GQUAN_DELIVERY_MODE=stub`, then run `scripts/verify-auth.sh`.
-
-The test environment disables automatic public probe requests. Its Phase 4
-verification stays local unless `GROUPROXY_VERIFY_PROXY_EXTERNAL=1` is set;
-that opt-in performs one `HEAD https://www.google.com/ncr` through the proxy.
+Git. Its client-facing dashboard and both proxy simulations bind to network
+addresses: codedev uses `:1080` and the same-host nuc simulation uses `:18081`.
+The latter is an explicit test-only exception to avoid two processes binding
+the same port. A deployed nuc host uses its own address on `:1080`.
 
 ## Remote Node Installation
 
@@ -68,19 +132,13 @@ NUC_SSH_USER=operator NUC_SSH_KEY=/path/to/key \
 ```
 
 Use `DRY_RUN=1` to inspect the node commands. The script copies only monitor,
-sing-box, and systemd artifacts; the control plane is never installed remotely.
-Before enabling, it runs the monitor's local `-validate` mode as `grouproxy`;
-this checks `monitor.yaml` and the referenced non-empty token without contacting
-the backend. If validation fails, artifacts are left installed but the service
-is not enabled or started. Create the files, then run:
+sing-box, and systemd artifacts; it does not install the control plane or a
+dashboard. Before enabling, it runs the monitor's local `-validate` mode as
+`grouproxy`; this checks `monitor.yaml` and the referenced non-empty token
+without contacting the backend. If validation fails, artifacts are left
+installed but the service is not enabled or started. Create the files, then
+run:
 
 ```bash
 sudo systemctl enable --now grouproxy-monitor.service
 ```
-
-The monitor unit grants only the capabilities required by the data plane:
-`CAP_NET_BIND_SERVICE` for a direct proxy listener on port `80`, and
-`CAP_NET_ADMIN` for the proxy-port nftables policy. It enables only
-`grouproxy-monitor.service` because monitor owns the sing-box child lifecycle;
-starting the standalone `sing-box.service` as well would race for the proxy
-port.

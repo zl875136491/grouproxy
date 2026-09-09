@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && node scripts/prepare-standalone.mjs",
+    "start": "HOSTNAME=${GROUPROXY_FRONTEND_HOST:-0.0.0.0} PORT=${GROUPROXY_FRONTEND_PORT:-80} node ${NEXT_DIST_DIR:-.next}/standalone/server.js",
     "typecheck": "tsc --noEmit",
     "test:i18n": "node scripts/test-i18n-formatters.mjs",
     "test:i18n:browser": "node scripts/test-i18n-browser.mjs",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.15",
+    "@radix-ui/react-toast": "^1.2.15",
     "@radix-ui/react-tooltip": "1.2.8",
     "@tanstack/react-query": "5.102.8",
     "@xyflow/react": "12.11.6",

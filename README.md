@@ -4,12 +4,45 @@ Grouproxy is a regional proxy control plane. The backend computes signed
 Desired Bundles, while each monitor owns its local sing-box process and
 proxy-port firewall policy. User traffic never traverses the control plane.
 
-## Phase 0-4 Quickstart
+## Network Contract
 
-Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, root access for the test
-`:80` entrypoint, access to the codedev MongoDB test database, and the
-checked-in Linux amd64 sing-box binary. The startup script installs the Ubuntu
-Nginx stream and stream-njs modules when they are absent.
+The data plane and dashboard are separate direct listeners. No forwarding
+layer is part of this deployment.
+
+- The proxy domain serves HTTP CONNECT directly on TCP `1080`.
+- The dashboard is served directly by Next.js on TCP `80`.
+- The dashboard's `/api/*` requests are rewritten by Next.js to the backend;
+  the backend can remain on a private listener such as `127.0.0.1:8000`.
+- The dashboard forwards `/healthz` and `/readyz` to that backend, so
+  `curl http://<dashboard-domain>/healthz` exposes the running API version.
+- HTTP Basic proxy authentication is intentionally absent. Source CIDR policy
+  on each site is the proxy access boundary.
+
+The monitor validates signed bundles with `listen.http_port: 1080` and renders
+the public sing-box HTTP inbound on that port. The same-host two-node test
+harness has one explicit public test exception for its second node on `:18081`;
+deployed nodes remain on `:1080`.
+
+The `/access` dashboard page is the workstation runbook. It selects a pair of
+checked-in, pre-generated assets from `GROUPROXY_ENVIRONMENT`: `test` serves
+`test-proxy.1oa.com.cn`, while every other value serves production
+`proxy.1oa.com.cn`. Authenticated downloads are available at
+`/api/v1/access/linux-setup.sh` and `/api/v1/access/windows-setup.ps1`; the
+configuration response also returns the matching macOS iCloud Shortcut URL.
+The Windows script configures the current user's WinINET and environment
+proxy, runs the supplied connectivity checks, and accepts `-Disable` to
+restore its backup. No downloaded asset installs proxy credentials or a CA.
+
+The production dashboard is a Next.js standalone service. Its deployable
+systemd unit and replacement steps for retired Grouproxy NGINX files are in
+[`deploy/README.md`](deploy/README.md).
+
+## Quickstart
+
+Requirements: Python 3.12, Go 1.22+, Node.js, `nft`, access to the codedev
+MongoDB test database, and the checked-in Linux amd64 sing-box binary. Running
+the production dashboard directly on `:80` requires the service account to
+have permission to bind that port, for example `CAP_NET_BIND_SERVICE`.
 
 ```bash
 export GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@<codedev-host>:<port>/?authSource=admin'
@@ -22,50 +55,44 @@ GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-phase4.sh
 ```
 
-The script validates connectivity and authentication against the explicitly
-configured codedev MongoDB URI before it starts any local process. It does not
-start, reset, or shut down a local MongoDB process. Nginx owns the unified
-`http://test-proxy.1oa.com.cn:80` entrypoint: `/dashboard` goes to the control
-plane and all CONNECT or forward-proxy traffic goes to codedev sing-box. The
-backend stays on `127.0.0.1:8000`, the Next.js console stays on
-`127.0.0.1:3000/dashboard`, and the local agent simulations are:
+The script validates the configured MongoDB URI before it starts any local
+process. It does not create, reset, or stop MongoDB. All client-facing test
+listeners bind to the network; the backend and Clash APIs remain loopback-only.
+The same-host simulation uses a distinct public port for its second node:
 
-- `codedev` monitor + sing-box on `127.0.0.1:18080`, Clash API on `127.0.0.1:19090`
-- `nuc` monitor + sing-box on `127.0.0.1:18081`, Clash API on `127.0.0.1:19091`
-- `/proxies` presents each region's read-only strategy groups and outbound
-  health projection; administrators rename node display labels from `/nodes`.
+- dashboard on `0.0.0.0:3000`, with `/api/*` sent directly to the private backend
+- `codedev` monitor + sing-box on `0.0.0.0:1080`, Clash API on `127.0.0.1:19090`
+- `nuc` monitor + sing-box on `0.0.0.0:18081`, Clash API on `127.0.0.1:19091`
 
-Generated test credentials, state, and logs remain below the ignored
-`testenv/` directory. Stop the local processes without removing evidence:
+The test host must be permitted to bind TCP `1080`. Point a temporary hosts
+entry or the eventual DNS record for `test-proxy.1oa.com.cn` at the IP of this
+host, then use these client-facing endpoints:
+
+- console: `http://test-proxy.1oa.com.cn:3000/`
+- codedev proxy: `http://test-proxy.1oa.com.cn:1080`
+- nuc proxy: `http://test-proxy.1oa.com.cn:18081`
+
+`GROUPROXY_TEST_CLIENT_CIDR` defaults to `10.32.12.0/24` and is included in
+both test sites so the workstation can exercise both public listeners. Set it
+to a narrower CIDR when the test client address is known. The `:18081` endpoint
+exists only because both simulations share one host; an actual `nuc` host uses
+its own address on `:1080`.
+
+Generated test state and logs remain below the ignored `testenv/` directory.
+Stop the local processes without removing evidence:
 
 ```bash
 ./scripts/testenv-down.sh
 ```
 
-Nginx is a host service and keeps the public `:80` entrypoint available across
-control-plane restarts. Reapply its idempotent test configuration with
-`./scripts/setup-test-nginx.sh`; validate the listener, `/dashboard`, and the
-backend route with `./scripts/verify-test-entrypoint.sh`.
-
 The default test profile delivers verification codes through the real One
-Login GQuan APP API. Its APP Token is required at process start and is not
-written to `testenv/backend.env`, logs, or Git. Use the login page to complete
-a real verification flow. The deterministic authentication regression remains
-available only in an explicitly isolated stub profile:
+Login GQuan APP API. Its APP token is supplied only at process start and is
+not written to `testenv/backend.env`, logs, or Git. The deterministic auth
+regression is available only in an explicitly isolated stub profile:
 
 ```bash
 GROUPROXY_TEST_GQUAN_DELIVERY_MODE=stub GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ./scripts/verify-auth.sh
-```
-
-When changing GQuan mode for an existing shared-database test runtime, stop
-the local processes and reconfigure only the non-sensitive mode value. This
-preserves the one-time node tokens that the shared database cannot reveal:
-
-```bash
-./scripts/testenv-down.sh
-GROUPROXY_TEST_GQUAN_APP_TOKEN='sat_<approved-app-token>' \
-  GROUPROXY_TESTENV_RECONFIGURE_GQUAN=1 ./scripts/testenv-up.sh
 ```
 
 Build the committed monitor artifact and checksum with:
@@ -74,96 +101,64 @@ Build the committed monitor artifact and checksum with:
 (cd monitor && make dist)
 ```
 
-## Phase 2 Subscription Delivery
+## Subscription Delivery
 
-The operations console at `/subscriptions` registers HTTP sources or uploads
-Clash YAML, SIP008, and sing-box outbound JSON. Every successful fetch or
-upload is stored as an immutable SHA-256 version. Invalid content remains
-visible for diagnosis but cannot be published.
+The operations console at `/subscriptions` supports three source types:
 
-- Source fetches validate every DNS result and redirect target, reject local
-  and non-global addresses, cap response size, and never return source URLs or
-  raw content to the management UI.
-- One active refresh task is allowed per source. The MongoDB worker uses a
-  lease, heartbeat, retry backoff, cancellation, and dead-letter state.
-- Publish and rollback requests accept `Idempotency-Key`; a duplicate request
-  returns the same per-site releases instead of creating another deployment.
-- A release selects one immutable version per site. Each monitor validates the
-  blob hash, renders its own outbounds, runs `sing-box check`, and preserves
-  the resolved last-good configuration on failure.
-- The monitor embeds pinned local `geoip-cn` and `geosite-cn` sing-box
-  rule-sets. Destination deny rules run first, Chinese domains and IPs route
-  direct, and other traffic uses the selected subscription. Nodes never fetch
-  routing data or subscription-provider URLs themselves.
+- an HTTP subscription site;
+- an immutable uploaded Clash YAML, SIP008, or sing-box outbound file;
+- one direct VLESS or VMess URI, including VLESS Reality Vision and the
+  standard `vmess://<base64-json>` format.
 
-## Phase 3 Observability
+Use **Add source** and select either **Subscription site connection** or
+**Single node**. A normal, unescaped VLESS URI contains all information needed
+for the supplied Reality example: UUID, server and port, SNI, fingerprint,
+Reality public key, short ID, and Vision flow. A VMess share link must contain
+the standard Base64-encoded JSON with its UUID, server, port, security mode,
+and transport settings. Paste the raw `vless://...` or `vmess://...` value,
+without Markdown escape backslashes. The control plane decodes and validates
+the URI, normalizes it into one immutable sing-box outbound, and publishes it
+through the same version, release, and node ACK flow as a multi-node
+subscription. No additional subscription URL or account metadata is required;
+the endpoint credentials and handshake parameters inside the link are the
+single node definition.
 
-`scripts/verify-phase3.sh` performs only local control-plane checks. It verifies
-canonical telemetry fields, alert and audit APIs, node probe summaries, PAC,
-and the HTTP-only Linux setup script. It does not create a probe, backup, or
-external proxy request.
+HTTP source fetches validate every DNS result and redirect target, reject local
+and non-global addresses, cap response size, and never return source URLs or
+raw content to the management UI. One active refresh task is allowed per HTTP
+source. Uploaded and single-node sources are immutable and are not refreshed.
 
-The frontend also provides two focused i18n checks:
+Each release selects one immutable version per site. Each monitor validates the
+blob hash, renders its own outbounds, runs `sing-box check`, and preserves the
+resolved last-good configuration on failure. Nodes never fetch routing data or
+subscription-provider URLs themselves.
+
+## Observability And Accounts
+
+`scripts/verify-phase3.sh` verifies local telemetry fields, alert and audit
+APIs, node probe summaries, PAC, environment-specific Linux and Windows setup
+assets, and the access configuration. The frontend also provides an i18n check:
 
 ```bash
 (cd frontend && npm run test:i18n)
 ```
 
-The browser check needs a local Chrome binary and the generated test admin
-credentials in the current process environment. It loads cached connection
-telemetry, switches Chinese, English, and Spanish, and asserts that no API
-request occurs during either locale switch.
-
-## Account Authentication
-
 The `/login` screen uses an `itcode` as the account identity. Password login,
-registration, password changes, and GQuan code login are backed by opaque,
-time-limited server sessions. New passwords use Argon2; pre-existing seeded
-password hashes are upgraded after a successful password login.
+registration, password changes, and GQuan code login use opaque server
+sessions with a 30-day lifetime by default
+(`GROUPROXY_AUTH_SESSION_TTL_MINUTES=43200`). Expired, revoked, invalid, and
+inactive-account sessions return distinct authentication errors so the console
+can clear stale credentials and ask the operator to sign in again. Verification
+codes are HMAC-digested, short-lived, and rate-limited. This management
+authentication is separate from the proxy data plane and does not create proxy
+credentials.
 
-- Registration, password changes, and GQuan login require a six-digit,
-  single-use verification code delivered with the documented One Login GQuan
-  APP Bearer token.
-- Verification codes are HMAC-digested, expire after a short interval, are
-  rate-limited per itcode and purpose, and lock after repeated failures. Raw
-  codes, APP tokens, and GQuan response bodies are not logged or audited.
-- Set `GROUPROXY_GQUAN_APP_TOKEN` in the backend environment. The default
-  test profile also uses a runtime-only APP Token and sends real GQuan
-  messages only after an operator requests a code from the login page.
-
-## Phase 4 HTTP Basic Credentials
-
-Phase 4 keeps the employee data path on HTTP CONNECT while adding optional
-per-site HTTP Basic authentication. An employee receives one credential per
-site from `/access`; creating or rotating one reveals the generated password
-exactly once. The backend stores an Argon2 verifier and a random credential
-identifier, never the clear-text password. A stable
-`GROUPROXY_PROXY_CREDENTIAL_SECRET` derives the password again only when the
-signed Desired Bundle is built, so it must be retained with other control-plane
-secrets for backups and restores.
-
-- An administrator enables site authentication only after at least one active
-  credential exists. Credential changes for an enabled site create a normal,
-  auditable release; nodes continue to accept their last-good user list during
-  a control-plane outage.
-- Administrators manage registered employee identities and per-site credential
-  metadata at `/employees`. `GET /api/v1/employees` and
-  `GET /api/v1/employees/{itcode}/proxy-credentials` intentionally return
-  metadata only; issuing or rotating a password remains a one-time reveal.
-- Credential responses use `Cache-Control: no-store`; passwords are omitted
-  from audit records, logs, ordinary APIs, and MongoDB documents.
-- Monitor `0.3.0` validates the signed `proxy_auth` object and renders the
-  users into the local sing-box HTTP inbound. It also translates Clash Trojan
-  SNI and certificate-validation fields to sing-box TLS settings for the
-  subscription's *outbound* connection.
-- `./scripts/verify-phase4.sh` exercises the local Basic-authentication flow.
-  It does not make an external request by default. Set
-  `GROUPROXY_VERIFY_PROXY_EXTERNAL=1` only for the single approved
-  `HEAD https://www.google.com/ncr` check.
+`scripts/verify-phase4.sh` creates an encrypted backup and runs a
+non-destructive restore rehearsal.
 
 ## Deployment Boundary
 
-`codedev` is the only control plane. Both `codedev` and `nuc` are agent nodes
+`codedev` is the control plane. `codedev` and `nuc` can both be agent nodes
 running monitor and sing-box. Remote installation is explicit and
 parameterized:
 
@@ -172,19 +167,17 @@ NUC_SSH_USER=operator NUC_SSH_KEY=/path/to/key \
   ./deploy/install-node.sh 10.32.12.110
 ```
 
-The supported path is deliberately HTTP-only: employee access is HTTP CONNECT
-on port `80`, and the test control channel is HTTP with Bearer authentication
-and bundle HMAC. This repository does not configure TLS, HTTPS proxy
-listeners, certificate material, client certificates, mTLS, port `443`, or
-CI/CD automation.
+The supported employee path is HTTP CONNECT on port `1080`. This repository
+does not configure TLS, HTTPS proxy listeners, certificate material, client
+certificates, mTLS, port `443`, or CI/CD automation.
 
 ## Layout
 
 | Directory | Responsibility |
 | --- | --- |
 | `backend/` | FastAPI control plane, MongoDB documents, auth and refresh workers |
-| `frontend/` | Next.js operations dashboard |
+| `frontend/` | Next.js operations dashboard served directly on `:80` |
 | `monitor/` | Go monitor, local routing data, runtime, and nftables |
 | `singbox/` | Pinned Linux amd64 sing-box executable |
 | `deploy/` | systemd units, employee setup, node installer |
-| `scripts/` | local development and Phase 0/1/2/auth validation |
+| `scripts/` | Local development and validation scripts |

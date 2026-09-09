@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # This helper configures the HTTP CONNECT path only. It never installs a
 # certificate, CA, HTTPS proxy listener, or endpoint TLS interception.
-PROXY_HOST="${GROUPROXY_PROXY_HOST:-proxy.1oa.com.cn}"
+PROXY_HOST="${GROUPROXY_PROXY_HOST:-test-proxy.1oa.com.cn}"
 PROXY_PORT="${GROUPROXY_PROXY_PORT:-1080}"
 NO_PROXY_VALUE="${GROUPROXY_NO_PROXY:-localhost,127.0.0.1,::1,.corp.internal,${PROXY_HOST},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
 

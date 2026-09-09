@@ -105,13 +105,19 @@
 
 .siteLink {
   display: grid;
+  width: 100%;
   min-height: 76px;
   grid-template-columns: 10px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 12px;
+  border: 0;
   border-radius: 5px;
   color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .siteLink:hover {
@@ -121,6 +127,11 @@
 .siteLink:focus-visible {
   outline: 2px solid var(--gp-green-dark);
   outline-offset: -2px;
+}
+
+.siteNodeSelected {
+  border-color: var(--gp-green-dark);
+  box-shadow: 0 0 0 2px var(--gp-green-soft), var(--gp-shadow);
 }
 
 .stateDot {

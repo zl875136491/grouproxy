@@ -48,7 +48,7 @@ for node in codedev nuc; do
   draft_id="$(jq -r '.id' "$TESTENV_DIR/draft-${node}.json")"
   node_id="$(<"$TESTENV_DIR/node-${node}.id")"
   site_id="$(<"$TESTENV_DIR/site-${site_slug}.id")"
-  retry="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "$AUTH_HEADER" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-${node}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
+  retry="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "$AUTH_HEADER" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-network-${node}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
   jq -e --arg release "$release_id" '.release_id == $release' <<<"$retry" >/dev/null
 done
 
@@ -69,10 +69,15 @@ codedev_release="$(jq -r '.release_id' "$TESTENV_DIR/release-codedev.json")"
 cross_node_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BACKEND_URL/agent/v1/ack" -H "Authorization: Bearer $(<"$TESTENV_DIR/nuc.token")" -H 'Content-Type: application/json' -d "$(jq -nc --arg release "$codedev_release" '{node_id:"nuc",release_id:$release,desired_version:999,applied_version:0,bundle_hash:"forged",applied_hash:"",ok:false,sequence:999999}')")"
 [[ "$cross_node_status" == "409" ]]
 
-for port in 18080 18081 19090 19091; do
+for port in 1080 18081 19090 19091; do
   nc -z 127.0.0.1 "$port"
 done
-frontend_html="$(curl -fsS "http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}/dashboard")"
+jq -e '.inbounds[0].listen == "0.0.0.0" and .inbounds[0].listen_port == 1080' \
+  "$TESTENV_DIR/monitor-codedev/state/sing-box.json" >/dev/null
+jq -e '.inbounds[0].listen == "0.0.0.0" and .inbounds[0].listen_port == 18081' \
+  "$TESTENV_DIR/monitor-nuc/state/sing-box.json" >/dev/null
+frontend_port="${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
+ss -ltnH "( sport = :${frontend_port} )" | awk -v port="$frontend_port" '$4 == "0.0.0.0:" port { found=1 } END { exit !found }'
+frontend_html="$(curl -fsS "http://127.0.0.1:${frontend_port}/")"
 rg -qi 'grouproxy' <<<"$frontend_html"
-"$ROOT_DIR/scripts/verify-test-entrypoint.sh"
 printf 'Phase 0/1 validation passed.\n%s\n' "$overview"

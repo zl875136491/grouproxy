@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   changeAccountPassword,
+  consumeAuthenticationNotice,
   loginWithGQuan,
   loginWithPassword,
   registerAccount,
@@ -16,6 +17,7 @@ import {
 } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { Button, DetailDialog } from "../../components/ui";
+import { notifyToast } from "../../components/toast";
 
 type LoginMode = "password" | "gquan";
 type AccountAction = "register" | "password-change";
@@ -115,8 +117,6 @@ export default function LoginPage() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginVerificationCode, setLoginVerificationCode] = useState("");
   const [loginChallenge, setLoginChallenge] = useState<VerificationChallenge | null>(null);
-  const [loginNotice, setLoginNotice] = useState("");
-  const [loginError, setLoginError] = useState("");
   const [loginBusy, setLoginBusy] = useState<AuthBusy>(null);
 
   const [accountAction, setAccountAction] = useState<AccountAction | null>(null);
@@ -125,10 +125,23 @@ export default function LoginPage() {
   const [accountConfirmation, setAccountConfirmation] = useState("");
   const [accountVerificationCode, setAccountVerificationCode] = useState("");
   const [accountChallenge, setAccountChallenge] = useState<VerificationChallenge | null>(null);
-  const [accountNotice, setAccountNotice] = useState("");
-  const [accountError, setAccountError] = useState("");
   const [accountBusy, setAccountBusy] = useState<AuthBusy>(null);
   const accountItcodeRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const queryReason = new URLSearchParams(window.location.search).get("reason") || "";
+    const reason = consumeAuthenticationNotice() || queryReason;
+    const messages: Record<string, string> = {
+      management_auth_required: "Authentication is required. Sign in again.",
+      management_session_expired: "Your management session has expired. Sign in again.",
+      management_session_revoked: "Your management session was revoked. Sign in again.",
+      management_session_invalid: "Your saved management session is invalid. Sign in again.",
+      management_account_inactive: "This account is no longer active. Contact an administrator.",
+    };
+    if (!messages[reason]) return;
+    notifyToast({ title: t(messages[reason]), variant: "destructive", duration: 8_000 });
+    window.history.replaceState(null, "", "/login");
+  }, [t]);
 
   useEffect(() => {
     if (!accountAction) return;
@@ -141,8 +154,6 @@ export default function LoginPage() {
     setLoginPassword("");
     setLoginVerificationCode("");
     setLoginChallenge(null);
-    setLoginNotice("");
-    setLoginError("");
   }
 
   function updateLoginItcode(value: string) {
@@ -157,8 +168,6 @@ export default function LoginPage() {
     setAccountConfirmation("");
     setAccountVerificationCode("");
     setAccountChallenge(null);
-    setAccountNotice("");
-    setAccountError("");
   }
 
   function openAccountAction(action: AccountAction) {
@@ -183,14 +192,12 @@ export default function LoginPage() {
     const purpose = loginModes[loginMode].purpose;
     if (!purpose || !loginItcode.trim()) return;
     setLoginBusy("send");
-    setLoginError("");
-    setLoginNotice("");
     try {
       const result = await requestAuthVerificationCode(loginItcode.trim(), purpose);
       setLoginChallenge(result);
-      setLoginNotice(t("Verification code sent through GQuan."));
+      notifyToast({ title: t("Verification code sent through GQuan."), variant: "success" });
     } catch (requestError) {
-      setLoginError(authErrorMessage(requestError, t));
+      notifyToast({ title: t("Operation failed"), description: authErrorMessage(requestError, t), variant: "destructive" });
     } finally {
       setLoginBusy(null);
     }
@@ -199,17 +206,15 @@ export default function LoginPage() {
   async function sendAccountCode() {
     if (!accountAction || !accountItcode.trim()) return;
     setAccountBusy("send");
-    setAccountError("");
-    setAccountNotice("");
     try {
       const result = await requestAuthVerificationCode(
         accountItcode.trim(),
         accountActions[accountAction].purpose,
       );
       setAccountChallenge(result);
-      setAccountNotice(t("Verification code sent through GQuan."));
+      notifyToast({ title: t("Verification code sent through GQuan."), variant: "success" });
     } catch (requestError) {
-      setAccountError(authErrorMessage(requestError, t));
+      notifyToast({ title: t("Operation failed"), description: authErrorMessage(requestError, t), variant: "destructive" });
     } finally {
       setAccountBusy(null);
     }
@@ -218,12 +223,10 @@ export default function LoginPage() {
   async function submitLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoginBusy("submit");
-    setLoginError("");
-    setLoginNotice("");
     try {
       if (loginMode === "password") {
         const result = await loginWithPassword(loginItcode.trim(), loginPassword);
-        saveManagementSession(result.access_token, result.role);
+        saveManagementSession(result.access_token, result.role, result.expires_at);
         router.replace(result.role === "admin" ? "/" : "/access");
         return;
       }
@@ -233,10 +236,10 @@ export default function LoginPage() {
         challenge_id: loginChallenge.challenge_id,
         verification_code: loginVerificationCode,
       });
-      saveManagementSession(result.access_token, result.role);
+      saveManagementSession(result.access_token, result.role, result.expires_at);
       router.replace(result.role === "admin" ? "/" : "/access");
     } catch (submitError) {
-      setLoginError(authErrorMessage(submitError, t));
+      notifyToast({ title: t("Sign in failed"), description: authErrorMessage(submitError, t), variant: "destructive" });
     } finally {
       setLoginBusy(null);
     }
@@ -246,8 +249,6 @@ export default function LoginPage() {
     event.preventDefault();
     if (!accountAction) return;
     setAccountBusy("submit");
-    setAccountError("");
-    setAccountNotice("");
     try {
       if (!accountChallenge) throw new Error("verification_code_invalid");
       if (accountPassword !== accountConfirmation) {
@@ -261,10 +262,10 @@ export default function LoginPage() {
       };
       if (accountAction === "register") {
         await registerAccount(payload);
-        setLoginNotice(t("Account registered. Sign in with the password you set."));
+        notifyToast({ title: t("Account registered. Sign in with the password you set."), variant: "success" });
       } else {
         await changeAccountPassword(payload);
-        setLoginNotice(t("Password reset. Sign in with the new password."));
+        notifyToast({ title: t("Password reset. Sign in with the new password."), variant: "success" });
       }
       setLoginItcode(accountItcode.trim());
       setLoginPassword("");
@@ -273,7 +274,7 @@ export default function LoginPage() {
       setAccountAction(null);
       resetAccountForm();
     } catch (submitError) {
-      setAccountError(authErrorMessage(submitError, t));
+      notifyToast({ title: t("Operation failed"), description: authErrorMessage(submitError, t), variant: "destructive" });
       setAccountBusy(null);
     }
   }
@@ -304,8 +305,6 @@ export default function LoginPage() {
           <label><span>{t("IT code")}</span><input value={loginItcode} onChange={(event) => updateLoginItcode(event.target.value)} autoComplete="username" required /></label>
           {!gquanLogin ? <label><span>{t("Password")}</span><input value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} type="password" autoComplete="current-password" minLength={12} required /></label> : null}
           {gquanLogin ? <VerificationCodeField code={loginVerificationCode} onChange={setLoginVerificationCode} onSend={() => void sendLoginCode()} canSend={Boolean(loginItcode.trim())} busy={loginBusy} challenge={loginChallenge} /> : null}
-          {loginNotice ? <div className="login-notice" role="status">{loginNotice}</div> : null}
-          {loginError ? <div className="inline-error" role="alert">{loginError}</div> : null}
           <Button className="login-submit" variant="primary" type="submit" disabled={loginBusy !== null || (gquanLogin && (!loginChallenge || loginVerificationCode.length !== 6))}>
             {loginMode === "password" ? <KeyRound size={16} /> : <LockKeyhole size={16} />}
             {loginBusy === "submit" ? t("Working...") : gquanLogin ? t("Sign in with code") : t("Sign in")}
@@ -331,8 +330,6 @@ export default function LoginPage() {
             <label><span>{t(accountAction === "register" ? "Password" : "New password")}</span><input value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} type="password" autoComplete="new-password" minLength={12} required /></label>
             <label><span>{t("Confirm password")}</span><input value={accountConfirmation} onChange={(event) => setAccountConfirmation(event.target.value)} type="password" autoComplete="new-password" minLength={12} required /></label>
             <VerificationCodeField code={accountVerificationCode} onChange={setAccountVerificationCode} onSend={() => void sendAccountCode()} canSend={Boolean(accountItcode.trim())} busy={accountBusy} challenge={accountChallenge} />
-            {accountNotice ? <div className="login-notice" role="status">{accountNotice}</div> : null}
-            {accountError ? <div className="inline-error" role="alert">{accountError}</div> : null}
             <Button className="auth-modal-submit" variant="primary" type="submit" disabled={accountBusy !== null || !accountChallenge || accountVerificationCode.length !== 6}>
               {accountAction === "register" ? <UserPlus size={16} /> : <LockKeyhole size={16} />}
               {accountBusy === "submit" ? t("Working...") : t(activeAccountAction.label)}

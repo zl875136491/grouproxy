@@ -43,15 +43,13 @@ export default function CrossSitePage() {
   }
 
   const siteItems = sites.data || [];
-  const error = update.error;
   return (
-    <div className="page-stack">
+    <div className="page-stack page-fill list-page">
       <PageHeader eyebrow="POLICY" title="Cross-site access" description="Source CIDRs from one site can be added to another site only through an explicit allow." />
-      {error ? <div className="inline-error" role="alert">{error instanceof Error ? error.message : "The cross-site policy was not accepted."}</div> : null}
-      <Panel>
+      <Panel className="list-panel">
         <div className="panel-heading"><div><span className="panel-kicker">{t("DEFAULT DENY")}</span><h2>{t("Source-to-destination matrix")}</h2></div><ArrowRightLeft size={19} /></div>
         <div className="matrix-legend"><span>{t("Row: source site")}</span><span>{t("Column: destination listener")}</span></div>
-        <div className="matrix-wrap"><table className="policy-matrix"><thead><tr><th>{t("From \\ To")}</th>{siteItems.map((site) => <th key={site.id}>{t(site.name)}</th>)}</tr></thead><tbody>{siteItems.map((from) => <tr key={from.id}><th>{t(from.name)}</th>{siteItems.map((to) => { if (from.id === to.id) return <td className="matrix-self" key={to.id}>-</td>; const allowed = matrix.get(`${from.id}:${to.id}`)?.enabled || false; const isUpdating = update.isPending && update.variables?.from.id === from.id && update.variables?.to.id === to.id; return <td key={to.id}><label className="matrix-toggle"><input type="checkbox" checked={allowed} disabled={isUpdating} onChange={(event) => setAccess(from, to, event.target.checked)} /><span aria-hidden="true" /><span className="sr-only">{t("Allow {from} CIDRs to access {to}", { from: t(from.name), to: t(to.name) })}</span></label></td>; })}</tr>)}</tbody></table></div>
+        <div className="matrix-wrap table-scroll"><table className="policy-matrix"><thead><tr><th>{t("From \\ To")}</th>{siteItems.map((site) => <th key={site.id}>{t(site.name)}</th>)}</tr></thead><tbody>{siteItems.map((from) => <tr key={from.id}><th>{t(from.name)}</th>{siteItems.map((to) => { if (from.id === to.id) return <td className="matrix-self" key={to.id}>-</td>; const allowed = matrix.get(`${from.id}:${to.id}`)?.enabled || false; const isUpdating = update.isPending && update.variables?.from.id === from.id && update.variables?.to.id === to.id; return <td key={to.id}><label className="matrix-toggle"><input type="checkbox" checked={allowed} disabled={isUpdating} onChange={(event) => setAccess(from, to, event.target.checked)} /><span aria-hidden="true" /><span className="sr-only">{t("Allow {from} CIDRs to access {to}", { from: t(from.name), to: t(to.name) })}</span></label></td>; })}</tr>)}</tbody></table></div>
       </Panel>
       <ConfirmDialog open={Boolean(pending)} onOpenChange={(open) => !open && setPending(null)} title="Enable cross-site access" description={pending ? t("Add {from} source CIDRs to the effective access policy for {to}. This expands the destination listener's allowed network scope.", { from: t(pending.from.name), to: t(pending.to.name) }) : ""} confirmLabel="Enable access" busy={update.isPending} onConfirm={() => pending && update.mutate(pending)} />
     </div>

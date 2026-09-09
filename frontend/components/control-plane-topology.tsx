@@ -12,8 +12,6 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { ServerCog } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { Site } from "../lib/api";
 import styles from "./control-plane-topology.module.css";
@@ -38,11 +36,13 @@ type ControlPlaneNode = Node<{
 
 type EdgeSiteNode = Node<{
   direction: Direction;
-  href: string;
+  siteId: string;
   name: string;
   detail: string;
   status: string;
   tone: Tone;
+  onSelect?: (siteId: string) => void;
+  selected?: boolean;
 }, "edgeSite">;
 
 type TopologyNode = ControlPlaneNode | EdgeSiteNode;
@@ -106,20 +106,18 @@ function ControlPlaneNodeView({ data }: NodeProps<ControlPlaneNode>) {
 }
 
 function EdgeSiteNodeView({ data }: NodeProps<EdgeSiteNode>) {
-  const router = useRouter();
   const targetPosition = data.direction === "vertical" ? Position.Top : Position.Left;
   return (
-    <div className={`${styles.node} ${styles.siteNode}`} data-testid="edge-site-node">
+    <div className={`${styles.node} ${styles.siteNode} ${data.selected ? styles.siteNodeSelected : ""}`} data-testid="edge-site-node">
       <Handle className={styles.handle} type="target" position={targetPosition} isConnectable={false} />
-      <Link
+      <button
         className={`${styles.siteLink} nodrag nopan`}
-        href={data.href}
         aria-label={data.name}
+        type="button"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
-          event.preventDefault();
           event.stopPropagation();
-          router.push(data.href);
+          data.onSelect?.(data.siteId);
         }}
       >
         <span className={`${styles.stateDot} ${toneClass(data.tone)}`} aria-hidden="true" />
@@ -128,7 +126,7 @@ function EdgeSiteNodeView({ data }: NodeProps<EdgeSiteNode>) {
           <span className={styles.nodeDetail}>{data.detail}</span>
         </span>
         <span className={`${styles.statusPill} ${statusClass(data.tone)}`}>{data.status}</span>
-      </Link>
+      </button>
     </div>
   );
 }
@@ -144,12 +142,16 @@ export function ControlPlaneTopology({
   totalNodes,
   formatNumber,
   t,
+  selectedSiteId,
+  onSiteSelect,
 }: {
   sites: TopologySite[];
   onlineNodes: number;
   totalNodes: number;
   formatNumber: (value: number) => string;
   t: Translator;
+  selectedSiteId?: string;
+  onSiteSelect?: (siteId: string) => void;
 }) {
   const compact = useCompactTopology();
   const direction: Direction = compact ? "vertical" : "horizontal";
@@ -177,11 +179,13 @@ export function ControlPlaneTopology({
         targetPosition: direction === "vertical" ? Position.Top : Position.Left,
         data: {
           direction,
-          href: `/sites/${site.slug}/cidrs`,
+          siteId: site.id,
           name: t(site.name),
           detail,
           status: t(state),
           tone,
+          onSelect: onSiteSelect,
+          selected: selectedSiteId === site.id,
         },
         style: { width: siteWidth },
       };
@@ -214,7 +218,7 @@ export function ControlPlaneTopology({
       };
     });
     return { flowNodes: [controlNode, ...siteNodes] as TopologyNode[], edges: topologyEdges, height: flowHeight };
-  }, [compact, direction, formatNumber, onlineNodes, sites, t, totalNodes]);
+  }, [compact, direction, formatNumber, onSiteSelect, onlineNodes, selectedSiteId, sites, t, totalNodes]);
 
   return (
     <div className={styles.flow} style={{ height }} aria-label={t("Control plane to edge sites")}>

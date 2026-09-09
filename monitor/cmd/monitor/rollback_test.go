@@ -38,7 +38,7 @@ func TestRollbackUsesPortOverrideAndKeepsLastGoodConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	lastGood := map[string]any{
-		"listen":      map[string]any{"http_port": 80},
+		"listen":      map[string]any{"http_port": 1080},
 		"allow_cidrs": []string{"10.32.12.0/24"},
 		"shutdown":    false,
 	}
@@ -85,10 +85,6 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 		map[string]any{
 			"allow_cidrs":       []string{"10.32.12.0/24"},
 			"deny_destinations": []any{map[string]any{"kind": "domain", "pattern": "blocked.test"}},
-			"proxy_auth": map[string]any{
-				"required": true,
-				"users":    []any{map[string]any{"username": "example.user", "password": "derived-password"}},
-			},
 		},
 		18080,
 		stateDir,
@@ -118,13 +114,8 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 		t.Fatal("subscription selector missing")
 	}
 	inbound := config["inbounds"].([]any)[0].(map[string]any)
-	users, ok := inbound["users"].([]any)
-	if !ok || len(users) != 1 {
-		t.Fatalf("inbound users = %#v", inbound["users"])
-	}
-	user := users[0].(map[string]any)
-	if user["username"] != "example.user" || user["password"] != "derived-password" {
-		t.Fatalf("rendered inbound user = %#v", user)
+	if _, exists := inbound["users"]; exists {
+		t.Fatalf("proxy authentication fields unexpectedly rendered: %#v", inbound["users"])
 	}
 	foundCNDirect := false
 	for _, raw := range route["rules"].([]any) {
@@ -204,27 +195,56 @@ func TestEnsureLastGoodConfigReappliesOperationalIngress(t *testing.T) {
 	}
 }
 
+func TestApplySingboxIngressRemovesRetiredProxyUsers(t *testing.T) {
+	configValue := map[string]any{
+		"inbounds": []any{
+			map[string]any{
+				"type": "http",
+				"users": []any{
+					map[string]any{"username": "legacy", "password": "secret"},
+				},
+			},
+		},
+	}
+
+	applySingboxIngress(configValue, 1080, false, "")
+	inbound := configValue["inbounds"].([]any)[0].(map[string]any)
+	if _, exists := inbound["users"]; exists {
+		t.Fatalf("retired proxy users were retained: %#v", inbound["users"])
+	}
+	if inbound["listen_port"] != 1080 {
+		t.Fatalf("listen port = %v, want 1080", inbound["listen_port"])
+	}
+}
+
+func TestSanitizeLegacyBundleRemovesAuthAndPinsPort(t *testing.T) {
+	bundleValue := map[string]any{
+		"proxy_auth": map[string]any{"required": true},
+		"listen":     map[string]any{"http_port": 80},
+	}
+
+	if !sanitizeLegacyBundle(bundleValue) {
+		t.Fatal("legacy bundle was not marked changed")
+	}
+	if _, exists := bundleValue["proxy_auth"]; exists {
+		t.Fatal("proxy_auth was retained")
+	}
+	if got := bundleValue["listen"].(map[string]any)["http_port"]; got != 1080 {
+		t.Fatalf("listen port = %v, want 1080", got)
+	}
+}
+
 func TestRestoreLastGoodFirewallUsesOverridePort(t *testing.T) {
-	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 80, FirewallMode: "dry-run"}}
+	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 18080, FirewallMode: "dry-run"}}
 	lastGood := map[string]any{
-		"listen":      map[string]any{"http_port": 80},
+		"listen":      map[string]any{"http_port": 1080},
 		"allow_cidrs": []string{"10.32.12.0/24"},
 	}
 	if err := agent.restoreLastGoodFirewallForBundle(lastGood); err != nil {
 		t.Fatalf("render last-good firewall: %v", err)
 	}
-	script := firewall.Render(agent.firewallPort(80), []string{"10.32.12.0/24"}, false)
-	if !strings.Contains(script, "tcp dport 80") || strings.Contains(script, "tcp dport 18080") {
+	script := firewall.Render(agent.firewallPort(1080), []string{"10.32.12.0/24"}, false)
+	if !strings.Contains(script, "tcp dport 18080") || strings.Contains(script, "tcp dport 1080") {
 		t.Fatalf("firewall override was not selected:\n%s", script)
-	}
-}
-
-func TestParseAccessLogClassifiesAuthenticationFailure(t *testing.T) {
-	entry, ok := parseAccessLog([]byte(`{"message":"inbound/http: authentication failed"}`))
-	if !ok {
-		t.Fatal("authentication failure was skipped")
-	}
-	if entry.Action != "deny" || entry.DenyReason != "auth_failed" {
-		t.Fatalf("parsed auth failure = %#v", entry)
 	}
 }

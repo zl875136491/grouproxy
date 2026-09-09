@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	monitorVersion                = "0.3.0"
+	monitorVersion                = "0.4.0"
 	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
@@ -111,6 +111,14 @@ func main() {
 	stateValue, err := state.Load(cfg.StateDir)
 	if err != nil {
 		log.Fatalf("load state: %v", err)
+	}
+	// Older monitor state may contain the retired proxy Basic-auth block and
+	// the former port 80 contract. Normalize it before any last-good restore so
+	// a restart cannot resurrect credentials or bind the old listener.
+	if sanitizeLegacyBundle(stateValue.LastGoodBundle) {
+		if err := state.Save(cfg.StateDir, stateValue); err != nil {
+			log.Printf("sanitize persisted monitor state: %v", err)
+		}
 	}
 	apiClient, err := client.New(cfg.BackendURL, cfg.TokenFile)
 	if err != nil {
@@ -440,13 +448,7 @@ func parseAccessLog(line []byte) (accessLogEntry, bool) {
 		entry.BytesDown = asInt64(raw["bytes_down"])
 		entry.DurationMS = asInt64(raw["duration_ms"])
 		message := strings.ToLower(stringValue(raw["message"]))
-		if entry.Action == "allow" && isAuthenticationFailure(message) {
-			entry.Action = "deny"
-			isDeny = true
-			if entry.DenyReason == "" {
-				entry.DenyReason = "auth_failed"
-			}
-		} else if entry.Action == "allow" && (strings.Contains(message, "deny") || strings.Contains(message, "reject") || strings.Contains(message, "blocked")) {
+		if entry.Action == "allow" && (strings.Contains(message, "deny") || strings.Contains(message, "reject") || strings.Contains(message, "blocked")) {
 			entry.Action = "deny"
 			isDeny = true
 			if entry.DenyReason == "" {
@@ -455,10 +457,7 @@ func parseAccessLog(line []byte) (accessLogEntry, bool) {
 		}
 	} else {
 		message := strings.ToLower(string(line))
-		if isAuthenticationFailure(message) {
-			entry.Action = "deny"
-			entry.DenyReason = "auth_failed"
-		} else if !strings.Contains(message, "deny") && !strings.Contains(message, "reject") && !strings.Contains(message, "blocked") {
+		if !strings.Contains(message, "deny") && !strings.Contains(message, "reject") && !strings.Contains(message, "blocked") {
 			// Allow logs are sampled to approximately one percent.
 			hash := sha256.Sum256(line)
 			if hash[0]%100 != 0 {
@@ -481,13 +480,6 @@ func parseAccessLog(line []byte) (accessLogEntry, bool) {
 	entry.Username = strings.Join(strings.Fields(entry.Username), "")[:minLen(len(strings.Join(strings.Fields(entry.Username), "")), 128)]
 	entry.DstHost = stripQuery(entry.DstHost)
 	return entry, true
-}
-
-func isAuthenticationFailure(message string) bool {
-	return strings.Contains(message, "authentication failed") ||
-		strings.Contains(message, "auth failed") ||
-		strings.Contains(message, "proxy authentication") ||
-		strings.Contains(message, "unauthorized")
 }
 
 func stripQuery(value string) string {
@@ -1109,9 +1101,7 @@ func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
 		return false, "connect_error", time.Since(started).Milliseconds()
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusProxyAuthRequired {
-		errorClass = "proxy_auth_required"
-	} else if resp.StatusCode >= 500 {
+	if resp.StatusCode >= 400 {
 		errorClass = fmt.Sprintf("http_%d", resp.StatusCode)
 	} else {
 		success = true
@@ -1120,44 +1110,8 @@ func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
 	return success, errorClass, time.Since(started).Milliseconds()
 }
 
-// probeProxyURL reads only the local HTTP inbound credentials that sing-box is
-// currently using. This lets monitor-originated checks exercise the same
-// authenticated proxy path as users without sending credentials anywhere.
 func (a *agent) probeProxyURL() (*url.URL, error) {
-	proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", a.cfg.ListenPort))
-	if err != nil {
-		return nil, err
-	}
-	configData, err := os.ReadFile(a.cfg.SingboxConfig)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return proxyURL, nil
-		}
-		return nil, err
-	}
-	var configValue struct {
-		Inbounds []struct {
-			Type  string `json:"type"`
-			Tag   string `json:"tag"`
-			Users []struct {
-				Username string `json:"username"`
-				Password string `json:"password"`
-			} `json:"users"`
-		} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(configData, &configValue); err != nil {
-		return nil, err
-	}
-	for _, inbound := range configValue.Inbounds {
-		if inbound.Type != "http" || (inbound.Tag != "" && inbound.Tag != "grouproxy-http") {
-			continue
-		}
-		if len(inbound.Users) > 0 && inbound.Users[0].Username != "" && inbound.Users[0].Password != "" {
-			proxyURL.User = url.UserPassword(inbound.Users[0].Username, inbound.Users[0].Password)
-		}
-		break
-	}
-	return proxyURL, nil
+	return url.Parse(fmt.Sprintf("http://127.0.0.1:%d", a.cfg.ListenPort))
 }
 
 func (a *agent) executeProbe(request client.ProbeRequest) {
@@ -1510,6 +1464,11 @@ func (a *agent) restoreLastGood() error {
 		if err == nil {
 			var persisted map[string]any
 			if json.Unmarshal(data, &persisted) == nil {
+				if sanitizeLegacyBundle(persisted) {
+					if writeErr := bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good-bundle.json"), persisted); writeErr != nil {
+						a.log.Printf("sanitize last-good bundle: %v", writeErr)
+					}
+				}
 				lastGood = persisted
 				a.stateMu.Lock()
 				a.state.LastGoodBundle = persisted
@@ -1849,8 +1808,29 @@ func applySingboxIngress(configValue map[string]any, port int, shutdown bool, li
 	}
 	inbound["listen"] = listenAddress
 	inbound["listen_port"] = port
+	// ``users`` was the old HTTP Basic-auth configuration. It must never be
+	// carried forward when an existing last-good sing-box file is restored.
+	delete(inbound, "users")
 	delete(inbound, "proxy_protocol")
 	delete(inbound, "proxy_protocol_accept_no_header")
+}
+
+func sanitizeLegacyBundle(value map[string]any) bool {
+	if value == nil {
+		return false
+	}
+	changed := false
+	if _, exists := value["proxy_auth"]; exists {
+		delete(value, "proxy_auth")
+		changed = true
+	}
+	if listen, ok := value["listen"].(map[string]any); ok {
+		if port, ok := asInt(listen["http_port"]); ok && port == 80 {
+			listen["http_port"] = config.ProxyListenPort
+			changed = true
+		}
+	}
+	return changed
 }
 
 func renderSingbox(
@@ -1866,9 +1846,6 @@ func renderSingbox(
 		"tag":              "grouproxy-http",
 		"listen_port":      port,
 		"set_system_proxy": false,
-	}
-	if users := proxyAuthUsers(value); len(users) > 0 {
-		inbound["users"] = users
 	}
 	configValue := map[string]any{"inbounds": []any{inbound}}
 	applySingboxIngress(configValue, port, boolValue(value["shutdown"]), listenAddress)
@@ -1991,14 +1968,19 @@ func validateProxySelection(value map[string]any, tags []string) error {
 	}
 	wanted := strings.TrimSpace(stringValue(selection["outbound"]))
 	if wanted == "" {
-		return errors.New("proxy_outbound_not_found")
+		return nil
 	}
 	for _, tag := range tags {
 		if tag == wanted {
 			return nil
 		}
 	}
-	return errors.New("proxy_outbound_not_found")
+	// A selection is a preference for the subscription version that was
+	// current when the draft was created.  Replacing that version can remove
+	// the selected tag, so an old preference must not reject an otherwise valid
+	// bundle.  selectedSubscriptionOutbound will choose the first current tag
+	// in this case.
+	return nil
 }
 
 // selectedSubscriptionOutbound converts the control-plane's safe selector
@@ -2022,34 +2004,6 @@ func selectedSubscriptionOutbound(value map[string]any, tags []string) string {
 		}
 	}
 	return tags[0]
-}
-
-func proxyAuthUsers(value map[string]any) []any {
-	rawAuth, ok := value["proxy_auth"].(map[string]any)
-	if !ok || !boolValue(rawAuth["required"]) {
-		return nil
-	}
-	rawUsers, ok := rawAuth["users"].([]any)
-	if !ok {
-		return nil
-	}
-	users := make([]any, 0, len(rawUsers))
-	for _, rawUser := range rawUsers {
-		user, ok := rawUser.(map[string]any)
-		if !ok {
-			continue
-		}
-		username, usernameOK := user["username"].(string)
-		password, passwordOK := user["password"].(string)
-		if !usernameOK || !passwordOK || username == "" || password == "" {
-			continue
-		}
-		// Only keep the sing-box HTTP inbound fields; the signed bundle is
-		// still validated earlier, but config rendering should never carry
-		// through incidental object keys.
-		users = append(users, map[string]any{"username": username, "password": password})
-	}
-	return users
 }
 
 func singboxVersion(binary string) string {

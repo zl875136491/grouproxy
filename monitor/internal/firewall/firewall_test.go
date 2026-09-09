@@ -6,14 +6,14 @@ import (
 )
 
 func TestRenderIsFailClosedAndScoped(t *testing.T) {
-	script := Render(80, []string{"10.0.0.0/8", "2001:db8::/32"}, false)
+	script := Render(1080, []string{"10.0.0.0/8", "2001:db8::/32"}, false)
 	if !strings.Contains(script, "destroy table inet grouproxy") {
 		t.Fatal("Render must be checkable on a fresh host")
 	}
 	for _, expected := range []string{
-		"ip saddr 10.0.0.0/8 tcp dport 80 accept",
-		"ip6 saddr 2001:db8::/32 tcp dport 80 accept",
-		"tcp dport 80 drop",
+		"ip saddr 10.0.0.0/8 tcp dport 1080 accept",
+		"ip6 saddr 2001:db8::/32 tcp dport 1080 accept",
+		"tcp dport 1080 drop",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("rendered firewall missing %q:\n%s", expected, script)

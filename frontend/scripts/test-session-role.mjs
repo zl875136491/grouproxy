@@ -13,24 +13,36 @@ const transpiled = typescript.transpileModule(source, {
 }).outputText;
 
 const storage = new Map();
+const sessionStorage = new Map();
+let redirectedTo = "";
 globalThis.window = {
   localStorage: {
     getItem: (key) => storage.get(key) || null,
     setItem: (key, value) => storage.set(key, value),
     removeItem: (key) => storage.delete(key),
   },
+  sessionStorage: {
+    getItem: (key) => sessionStorage.get(key) || null,
+    setItem: (key, value) => sessionStorage.set(key, value),
+    removeItem: (key) => sessionStorage.delete(key),
+  },
+  location: {
+    pathname: "/nodes",
+    replace: (value) => { redirectedTo = value; },
+  },
 };
 
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`;
 const {
   clearManagementSession,
+  consumeAuthenticationNotice,
   hasAuthenticatedSession,
   hasManagementSession,
   managementSessionRole,
   saveManagementSession,
 } = await import(moduleUrl);
 
-saveManagementSession("employee-token", "employee");
+saveManagementSession("employee-token", "employee", "2099-01-01T00:00:00Z");
 assert.equal(hasAuthenticatedSession(), true);
 assert.equal(hasManagementSession(), false);
 assert.equal(managementSessionRole(), "employee");
@@ -39,9 +51,16 @@ clearManagementSession();
 assert.equal(hasAuthenticatedSession(), false);
 assert.equal(managementSessionRole(), null);
 
-saveManagementSession("admin-token", "admin");
+saveManagementSession("admin-token", "admin", "2099-01-01T00:00:00Z");
 assert.equal(hasAuthenticatedSession(), true);
 assert.equal(hasManagementSession(), true);
 assert.equal(managementSessionRole(), "admin");
 
-console.log("Employee sessions remain authenticated without receiving management UI access.");
+saveManagementSession("expired-token", "admin", "2000-01-01T00:00:00Z");
+assert.equal(hasManagementSession(), false);
+assert.equal(managementSessionRole(), null);
+assert.equal(redirectedTo, "/login?reason=management_session_expired");
+assert.equal(consumeAuthenticationNotice(), "management_session_expired");
+assert.equal(consumeAuthenticationNotice(), "");
+
+console.log("Session roles and client-side expiration handling are valid.");

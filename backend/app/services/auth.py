@@ -96,13 +96,17 @@ async def create_session(user: AdminUser, settings: Settings) -> tuple[str, Mana
     return token, session
 
 
-async def resolve_session(token: str) -> tuple[ManagementSession, AdminUser] | None:
+async def resolve_session(token: str) -> tuple[ManagementSession, AdminUser]:
     session = await ManagementSession.find_one(ManagementSession.token_hash == _token_hash(token))
-    if session is None or session.revoked_at is not None or session.expires_at <= utcnow():
-        return None
+    if session is None:
+        raise AuthError("management_session_invalid")
+    if session.revoked_at is not None:
+        raise AuthError("management_session_revoked")
+    if session.expires_at <= utcnow():
+        raise AuthError("management_session_expired")
     user = await AdminUser.get(session.user_id)
     if user is None or not user.is_active or user.itcode != session.itcode:
-        return None
+        raise AuthError("management_account_inactive")
     session.last_seen_at = utcnow()
     await session.save()
     return session, user
