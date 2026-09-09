@@ -111,6 +111,8 @@ from app.schemas import (
     ProxySelectionRequest,
     RegistrationRequest,
     ReleaseCreate,
+    ReleaseDetailOut,
+    ReleaseEventOut,
     ReleaseOut,
     SiteNameUpdate,
     SiteOut,
@@ -2380,6 +2382,66 @@ async def get_release(release_id: str, _: str = Depends(require_management)) -> 
     if release is None:
         raise HTTPException(404, "release_not_found")
     return _release_out(release)
+
+
+@app.get("/api/v1/config/releases/{release_id}/detail", response_model=ReleaseDetailOut)
+async def get_release_detail(
+    release_id: str, _: str = Depends(require_management)
+) -> ReleaseDetailOut:
+    """Return the stable operator view used by the release workbench."""
+    release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
+    if release is None:
+        raise HTTPException(404, "release_not_found")
+    task = await Task.find_one(Task.task_id == release.task_id) if release.task_id else None
+    acks = _latest_ack_per_node(
+        await AgentAckDocument.find(AgentAckDocument.release_id == release_id).to_list()
+    )
+    events: list[ReleaseEventOut] = [
+        ReleaseEventOut(
+            timestamp=release.created_at,
+            source="orchestrator",
+            message=f"Release {release.release_id} created for {len(release.node_ids)} node(s).",
+        )
+    ]
+    if task:
+        events.append(
+            ReleaseEventOut(
+                timestamp=task.created_at,
+                source="task",
+                message=f"Task {task.task_id} entered {task.status} state.",
+                level="success" if task.status == "succeeded" else "info",
+            )
+        )
+    for ack in acks:
+        events.append(
+            ReleaseEventOut(
+                timestamp=ack.received_at,
+                source=f"agent:{ack.node_id}",
+                message=(
+                    f"Node ACK received: {ack.stage}; "
+                    f"sing-box={'pass' if ack.singbox_ok else 'fail'}, "
+                    f"nftables={'pass' if ack.nft_ok else 'fail'}, "
+                    f"health={'pass' if ack.health_ok else 'fail'}."
+                ),
+                level="success" if ack.ok and ack.health_ok else "error",
+            )
+        )
+    if release.finished_at:
+        events.append(
+            ReleaseEventOut(
+                timestamp=release.finished_at,
+                source="coordinator",
+                message=f"Release completed with status {release.status}.",
+                level="success" if release.status == "succeeded" else "error",
+            )
+        )
+    events.sort(key=lambda item: item.timestamp)
+    return ReleaseDetailOut(
+        release=_release_out(release),
+        task=_task_out(task) if task else None,
+        acknowledgements=[_ack_out(item) for item in acks],
+        events=events,
+    )
 
 
 @app.get("/api/v1/config/releases", response_model=list[ReleaseOut])

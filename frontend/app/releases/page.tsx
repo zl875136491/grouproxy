@@ -1,20 +1,20 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { CalendarRange, CheckCircle2, ChevronDown, CircleAlert, FileCheck2, FileDiff, Filter, MapPinned, Play, RotateCcw, Server, ShieldCheck } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CalendarRange, Check, Clipboard, FileCheck2, FileDiff, Filter, MapPinned, Play, RotateCcw, Server } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   getDrafts,
   getRelease,
-  getReleaseAcks,
+  getReleaseDetail,
   getReleases,
   getNodes,
   getSites,
   publishRelease,
-  type AgentAck,
   type Draft,
   type Release,
+  type ReleaseDetail as ReleaseDetailData,
 } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { shortHash } from "../../lib/utils";
@@ -101,7 +101,7 @@ function ReleasesWorkspace() {
     },
     [draftId, releaseId, releaseItems, requestedRelease.data],
   );
-  const acknowledgements = useQuery({ queryKey: ["release-acks", selectedRelease?.release_id], queryFn: () => getReleaseAcks(selectedRelease!.release_id), enabled: Boolean(selectedRelease), refetchInterval: selectedRelease?.status === "succeeded" || selectedRelease?.status === "failed" ? false : 2_000 });
+  const releaseDetail = useQuery({ queryKey: ["release-detail", selectedRelease?.release_id], queryFn: () => getReleaseDetail(selectedRelease!.release_id), enabled: Boolean(selectedRelease), refetchInterval: selectedRelease?.status === "succeeded" || selectedRelease?.status === "failed" ? false : 2_000 });
 
   useEffect(() => {
     if (draftId) setListView("drafts");
@@ -164,7 +164,7 @@ function ReleasesWorkspace() {
           </Panel>
         </div>
         <Panel className="release-detail-panel">
-          {selectedDraft ? <DraftDetail draft={selectedDraft} siteName={t(siteNames.get(selectedDraft.site_id) || selectedDraft.site_id)} onPublish={() => setPublishTarget(selectedDraft)} /> : selectedRelease ? <ReleaseDetail release={selectedRelease} siteName={t(siteNames.get(selectedRelease.site_id) || selectedRelease.site_id)} nodeLabels={nodeLabels} acknowledgements={acknowledgements} /> : releaseId ? <LoadingState rows={7} /> : <EmptyState title="Select a draft or release" detail="Its diff and node reconciliation appear here." />}
+          {selectedDraft ? <DraftDetail draft={selectedDraft} siteName={t(siteNames.get(selectedDraft.site_id) || selectedDraft.site_id)} onPublish={() => setPublishTarget(selectedDraft)} /> : selectedRelease ? <ReleaseDetail release={selectedRelease} detail={releaseDetail.data} siteName={t(siteNames.get(selectedRelease.site_id) || selectedRelease.site_id)} nodeLabels={nodeLabels} loading={releaseDetail.isLoading} error={releaseDetail.error} /> : releaseId ? <LoadingState rows={7} /> : <EmptyState title="Select a draft or release" detail="Its diff and node reconciliation appear here." />}
         </Panel>
       </section>
       <ConfirmDialog open={Boolean(publishTarget)} onOpenChange={(open) => !open && setPublishTarget(null)} title="Publish configuration draft" description={publishTarget ? t("Create a desired release for {site}. Nodes apply it independently and may still reject or roll back the change.", { site: t(siteNames.get(publishTarget.site_id) || publishTarget.site_id) }) : ""} confirmLabel="Publish release" busy={publish.isPending} onConfirm={() => publishTarget && publish.mutate(publishTarget)} />
@@ -190,147 +190,25 @@ const stageDescriptionKeys: Record<string, string> = {
   succeeded: "All targeted nodes acknowledged",
 };
 
-function AckCheck({ label, status }: { label: string; status: string }) {
-  return <span className="ack-check"><span>{label}</span><StatusBadge status={status} /></span>;
-}
-
-function ReleaseDetail({ release, siteName, nodeLabels, acknowledgements }: { release: Release; siteName: string; nodeLabels: Map<string, string>; acknowledgements: UseQueryResult<AgentAck[], Error> }) {
+function ReleaseDetail({ release, detail, siteName, nodeLabels, loading, error }: { release: Release; detail?: ReleaseDetailData; siteName: string; nodeLabels: Map<string, string>; loading: boolean; error: Error | null }) {
   const { t, formatDate, formatNumber, formatPercent, formatDuration } = usePreferences();
   const { toast } = useToast();
-  const failureToastKey = useRef("");
-  const ackItems = acknowledgements.data || [];
-  const ackByNode = new Map(ackItems.map((item) => [item.node_id, item]));
-  // The API records terminal failures as `stage: failed` after all node ACKs
-  // arrive. Keep the failure marker on the last operational checkpoint so it
-  // does not misleadingly point back to the initial draft step.
+  const [activeTab, setActiveTab] = useState<"nodes" | "trace" | "diff">("nodes");
+  const [copied, setCopied] = useState("");
+  const data = detail;
+  const ackItems = data?.acknowledgements || [];
   const position = release.status === "failed" ? releaseStages.length - 2 : stagePosition(release.stage);
   const desiredVersion = ackItems.find((item) => Number.isFinite(item.desired_version))?.desired_version;
-  const elapsedMs = release.started_at
-    ? Math.max(0, new Date(release.finished_at || Date.now()).getTime() - new Date(release.started_at).getTime())
-    : null;
-  const failedAcks = useMemo(
-    () => ackItems.filter((item) => !item.ok || !item.health_ok),
-    [ackItems],
-  );
-
-  useEffect(() => {
-    // A failed release is terminal, but ACK polling can render it several
-    // times. Wait for the final ACK response and identify the notification by
-    // its release plus error details so a refresh never spams the operator.
-    if (release.status !== "failed" || acknowledgements.isFetching || !acknowledgements.isFetched) return;
-    const fallback = t(release.rollback_reason || release.error || "One or more nodes returned a failed ACK.");
-    const details = failedAcks.slice(0, 3).map((ack) => {
-      const code = ack.error_code || "one_or_more_nodes_failed";
-      const message = ack.error_message && ack.error_message !== ack.error_code
-        ? `: ${ack.error_message.slice(0, 240)}`
-        : "";
-      return `${ack.node_id}: ${t(code)}${message}`;
-    });
-    const description = details.join("; ") || fallback;
-    const key = `${release.release_id}:${description}`;
-    if (failureToastKey.current === key) return;
-    failureToastKey.current = key;
-    toast({
-      title: t("Release did not complete"),
-      description,
-      variant: "destructive",
-      duration: 10_000,
-    });
-  }, [acknowledgements.isFetched, acknowledgements.isFetching, failedAcks, release.error, release.release_id, release.rollback_reason, release.status, t, toast]);
-
-  return (
-    <div className="release-detail">
-      <div className="release-detail-heading">
-        <div>
-          <span className="panel-kicker">{t("RELEASE")}</span>
-          <h2>{siteName}</h2>
-          <p>{formatDate(release.created_at)} · {t("Release ID")} <span className="mono">{shortHash(release.release_id, 16)}</span></p>
-        </div>
-        <StatusBadge status={release.status} />
-      </div>
-
-      <div className="release-summary-grid">
-        <div>
-          <span>{t("Target release")}</span>
-          <strong className="mono">{shortHash(release.desired_release_id, 16)}</strong>
-          {desiredVersion !== undefined ? <small>{t("Desired version v{version}", { version: formatNumber(desiredVersion) })}</small> : null}
-        </div>
-        <div>
-          <span>{t("Target nodes")}</span>
-          <strong>{t("{count} nodes", { count: formatNumber(release.node_ids.length) })}</strong>
-          <small>{t("{count} acknowledged", { count: formatNumber(ackItems.length) })}</small>
-        </div>
-        <div>
-          <span>{t("Progress")}</span>
-          <strong>{formatPercent(release.progress)}</strong>
-          <span className="release-progress"><span style={{ width: `${Math.max(0, Math.min(100, release.progress))}%` }} /></span>
-        </div>
-        <div>
-          <span>{t("Elapsed")}</span>
-          <strong>{elapsedMs === null ? "-" : formatDuration(elapsedMs)}</strong>
-          <small>{release.finished_at ? t("Finished {date}", { date: formatDate(release.finished_at) }) : release.started_at ? t("Started {date}", { date: formatDate(release.started_at) }) : t("Not started")}</small>
-        </div>
-      </div>
-
-      <ol className="release-stages">
-        {releaseStages.map((stage, index) => {
-          const complete = release.status === "succeeded" ? index <= position : index < position;
-          const current = !complete && index === position;
-          const failed = current && release.status === "failed";
-          return <li className={`${complete ? "stage-complete" : ""} ${current ? "stage-current" : ""} ${failed ? "stage-failed" : ""}`} key={stage}>
-            <span>{complete ? <CheckCircle2 size={15} /> : current ? <CircleAlert size={15} /> : index + 1}</span>
-            <div><strong>{t(stage.replaceAll("_", " "))}</strong><small>{t(stageDescriptionKeys[stage])}</small></div>
-          </li>;
-        })}
-      </ol>
-
-      <div className="ack-section">
-        <div className="panel-heading">
-          <div><span className="panel-kicker">{t("NODE RECONCILIATION")}</span><h3>{t("ACK status")}</h3></div>
-          <span className="ack-count">{formatNumber(ackItems.length)} / {formatNumber(release.node_ids.length)} {t("ACKs")}</span>
-        </div>
-        {acknowledgements.isLoading ? <LoadingState rows={3} /> : acknowledgements.isError ? <ErrorState error="ACK data is unavailable." onRetry={() => void acknowledgements.refetch()} /> : <div className="ack-table">
-          {release.node_ids.map((nodeId) => {
-            const ack = ackByNode.get(nodeId);
-            const hashMatches = ack ? Boolean(ack.bundle_hash && ack.applied_hash && ack.bundle_hash === ack.applied_hash) : false;
-            const outcome = ack ? (ack.ok ? "succeeded" : ack.rollback_ok ? "rolled_back" : "failed") : "pending";
-            return <div className="ack-row" key={nodeId}>
-              <div className="ack-row-main">
-                <div className="ack-node-heading"><span className="ack-node-icon"><Server size={15} /></span><div><strong>{nodeLabels.get(nodeId) || nodeId}</strong>{nodeLabels.get(nodeId) && nodeLabels.get(nodeId) !== nodeId ? <small className="mono">{nodeId}</small> : null}</div></div>
-                {ack ? <div className="ack-version-line"><span>{t("Desired v{version}", { version: formatNumber(ack.desired_version) })}</span><span>{t("Applied v{version}", { version: formatNumber(ack.applied_version) })}</span><span>{formatDate(ack.received_at)}</span></div> : <span className="ack-awaiting">{t("Awaiting node ACK")}</span>}
-                {ack?.error_message ? <span className="ack-error">{t(ack.error_code || "Node reported an error")}: {ack.error_message}</span> : null}
-              </div>
-              <div className="ack-checks">
-                <AckCheck label="sing-box" status={ack ? ack.singbox_ok ? "valid" : "failed" : "pending"} />
-                <AckCheck label="nftables" status={ack ? ack.nft_ok ? "valid" : "failed" : "pending"} />
-                <AckCheck label={t("Health")} status={ack ? ack.health_ok ? "healthy" : "failed" : "pending"} />
-                <AckCheck label={t("Bundle")} status={ack ? hashMatches ? "valid" : "failed" : "pending"} />
-              </div>
-              <div className="ack-row-result"><StatusBadge status={outcome} />{ack?.rollback_attempted ? <span className="ack-rollback"><RotateCcw size={13} />{t(ack.rollback_ok ? "Rollback applied" : "Rollback failed")}</span> : null}</div>
-            </div>;
-          })}
-        </div>}
-      </div>
-
-      <details className="release-coordination" open>
-        <summary className="release-summary-toggle">
-          <span className="release-summary-toggle-copy"><span className="panel-kicker">{t("COORDINATION")}</span><strong>{t("Release summary")}</strong><small>{t("Identifiers, timings, and node outcomes")}</small></span>
-          <span className="release-summary-toggle-icon" aria-hidden="true"><ShieldCheck size={17} /><ChevronDown size={16} /></span>
-        </summary>
-        <div className="release-summary-body">
-          <div className="release-meta">
-            <div><span>{t("Release ID")}</span><strong className="mono">{release.release_id || "-"}</strong></div>
-            <div><span>{t("Desired release")}</span><strong className="mono">{release.desired_release_id || "-"}</strong></div>
-            <div><span>{t("Task")}</span><strong className="mono">{release.task_id || "-"}</strong></div>
-            <div><span>{t("Previous release")}</span><strong className="mono">{release.previous_release_id || "-"}</strong></div>
-            <div><span>{t("Created")}</span><strong>{formatDate(release.created_at)}</strong></div>
-            <div><span>{t("Started")}</span><strong>{formatDate(release.started_at)}</strong></div>
-            <div><span>{t("Finished")}</span><strong>{formatDate(release.finished_at)}</strong></div>
-            <div><span>{t("Stage")}</span><strong>{t(release.stage.replaceAll("_", " "))}</strong></div>
-          </div>
-          {release.error || failedAcks.length ? <div className="release-failure-detail"><strong>{t("Failure details")}</strong>{release.error ? <p>{t(release.error)}</p> : null}{failedAcks.length ? <ul>{failedAcks.map((ack) => <li key={`${ack.node_id}-${ack.received_at}`}><span>{nodeLabels.get(ack.node_id) || ack.node_id}</span><code>{t(ack.error_code || "Node reported an error")}{ack.error_message && ack.error_message !== ack.error_code ? `: ${ack.error_message}` : ""}</code></li>)}</ul> : null}</div> : null}
-        </div>
-      </details>
-    </div>
-  );
+  const elapsedMs = release.started_at ? Math.max(0, new Date(release.finished_at || Date.now()).getTime() - new Date(release.started_at).getTime()) : null;
+  const ackRate = release.node_ids.length ? Math.round((ackItems.length / release.node_ids.length) * 100) : 0;
+  const copy = async (value: string, label: string) => { try { await navigator.clipboard.writeText(value); setCopied(label); window.setTimeout(() => setCopied(""), 1_500); toast({ title: t("Copied"), variant: "success" }); } catch (copyError) { toast({ title: t("Operation failed"), description: copyError instanceof Error ? copyError.message : t("Unable to copy."), variant: "destructive" }); } };
+  if (loading && !data) return <LoadingState rows={7} />;
+  if (error && !data) return <ErrorState error={error.message} />;
+  return <div className="release-workbench-detail">
+    <header className="release-workbench-header"><div className="release-workbench-title"><div><span className="panel-kicker">{t("RELEASE")}</span><div className="release-title-line"><h2>{siteName}</h2><StatusBadge status={release.status === "succeeded" ? "published" : release.status} /></div><p><span>{t("Version flow")}: <strong>v{formatNumber(Math.max(0, (desiredVersion || 0) - 1))} → v{formatNumber(desiredVersion || 0)}</strong></span><span>{t("Elapsed")}: {elapsedMs === null ? "-" : formatDuration(elapsedMs)}</span><span>{t("Release ID")}: <code>{shortHash(release.release_id, 16)}</code></span></p></div></div><div className="release-workbench-actions"><Button size="sm" onClick={() => toast({ title: t("Diff view"), description: t("The structured configuration diff is available from the draft workspace.") })}><FileDiff size={14} />{t("Config diff")}</Button><Button size="sm" onClick={() => toast({ title: t("Republish"), description: t("Republish from the original draft to preserve release history.") })}><RotateCcw size={14} />{t("Republish")}</Button><Button size="sm" variant="primary" onClick={() => toast({ title: t("Rollback history"), description: t("Choose a previous release from the release history list.") })}><RotateCcw size={14} />{t("Rollback history")}</Button></div></header>
+    <section className="release-kpi-strip"><div><span>{t("ACK rate")}</span><strong>{ackItems.length} / {release.node_ids.length} <em>{ackRate}% ACK</em></strong><small>{t("Target nodes acknowledged")}</small></div><div><span>{t("Target bundle hash")}</span><strong className="mono release-kpi-hash">{shortHash(ackItems[0]?.bundle_hash || release.desired_release_id, 16)}</strong><small>{t("Desired release bundle")}</small></div><div><span>{t("Core component status")}</span><strong className={release.status === "succeeded" ? "release-kpi-good" : ""}>{release.status === "succeeded" ? t("Healthy") : t(release.stage.replaceAll("_", " "))}</strong><small>sing-box · nftables · {t("health probe")}</small></div><div><span>{t("Completed at")}</span><strong>{release.finished_at ? formatDate(release.finished_at, true) : t("In progress")}</strong><small>{release.finished_at ? t("Release completed") : t("Awaiting final ACK")}</small></div></section>
+    <ol className="release-workbench-pipeline">{releaseStages.map((stage, index) => { const complete = release.status === "succeeded" ? index <= position : index < position; const current = !complete && index === position; return <li className={`${complete ? "stage-complete" : ""} ${current ? "stage-current" : ""}`} key={stage}><span>{complete ? <Check size={15} /> : index + 1}</span><strong>{t(stage.replaceAll("_", " "))}</strong><small>{t(stageDescriptionKeys[stage])}</small></li>; })}</ol>
+    <section className="release-workbench-main"><nav className="release-workbench-tabs" role="tablist"><button className={activeTab === "nodes" ? "active" : ""} onClick={() => setActiveTab("nodes")}>{t("Nodes and probes")} <b>{release.node_ids.length}</b></button><button className={activeTab === "trace" ? "active" : ""} onClick={() => setActiveTab("trace")}>{t("Full trace")}</button><button className={activeTab === "diff" ? "active" : ""} onClick={() => setActiveTab("diff")}>{t("Config diff")}</button><span>{t("Live coordination")}</span></nav>{activeTab === "nodes" ? <><div className="release-node-table"><div className="release-node-table-head"><span>{t("Target node")}</span><span>{t("Version state")}</span><span>{t("Component checks")}</span><span>{t("ACK")}</span><span>{t("Elapsed")}</span></div>{release.node_ids.map((nodeId) => { const ack = ackItems.find((item) => item.node_id === nodeId); const outcome = ack ? (ack.ok && ack.health_ok ? "succeeded" : "failed") : "pending"; return <div className="release-node-table-row" key={nodeId}><div className="release-node-name"><Server size={15} /><strong>{nodeLabels.get(nodeId) || nodeId}</strong><small className="mono">{nodeId}</small></div><div><strong>{ack ? `v${ack.applied_version}` : `v${desiredVersion || "-"}`}</strong><small>{ack ? t("Applied") : t("Desired")}</small></div><div className="release-node-checks"><StatusBadge status={ack ? ack.singbox_ok ? "valid" : "failed" : "pending"} /><StatusBadge status={ack ? ack.nft_ok ? "valid" : "failed" : "pending"} /><StatusBadge status={ack ? ack.health_ok ? "healthy" : "failed" : "pending"} /></div><StatusBadge status={outcome} /><span>{ack ? formatDate(ack.received_at, true) : "-"}</span></div>; })}</div><div className="release-terminal"><header><span>{t("Node execution and probe trace")}</span><StatusBadge status={release.status === "succeeded" ? "archived" : "running"} /></header><pre>{(data?.events || []).map((event) => `[${formatDate(event.timestamp, true)}] [${event.source}] ${event.message}`).join("\n") || t("Waiting for execution events...")}</pre></div></> : activeTab === "trace" ? <div className="release-trace-panel">{(data?.events || []).map((event) => <div className={`release-trace-event release-trace-${event.level}`} key={`${event.timestamp}-${event.source}`}><time>{formatDate(event.timestamp, true)}</time><strong>{event.source}</strong><span>{event.message}</span></div>)}</div> : <pre className="release-diff-panel">{JSON.stringify(data?.task?.result || { desired_release_id: release.desired_release_id, previous_release_id: release.previous_release_id }, null, 2)}</pre>}</section>
+    <footer className="release-workbench-footer"><span>{t("Release ID")} <code>{shortHash(release.release_id, 18)}</code><button onClick={() => void copy(release.release_id, "release")}>{copied === "release" ? <Check size={13} /> : <Clipboard size={13} />}</button></span><span>{t("Task ID")} <code>{shortHash(release.task_id || "-", 18)}</code><button onClick={() => void copy(release.task_id || "", "task")}>{copied === "task" ? <Check size={13} /> : <Clipboard size={13} />}</button></span><span>{t("Baseline")}: <code>{shortHash(release.previous_release_id || "-", 14)}</code></span><span>{t("Coordination")}: <strong className="release-kpi-good">{release.status === "succeeded" ? t("Converged") : t(release.status)}</strong></span><span>{t("Trigger")}: {data?.task?.task_type || t("Manual")}</span></footer>
+  </div>;
 }

@@ -286,6 +286,20 @@ export type AgentAck = {
   received_at: string;
 };
 
+export type ReleaseEvent = {
+  timestamp: string;
+  source: string;
+  message: string;
+  level: "info" | "success" | "warning" | "error";
+};
+
+export type ReleaseDetail = {
+  release: Release;
+  task: Task | null;
+  acknowledgements: AgentAck[];
+  events: ReleaseEvent[];
+};
+
 export type AuditEvent = {
   event_id: string;
   actor: string;
@@ -916,6 +930,10 @@ export function getReleases(filters: { siteId?: string; status?: string; since?:
 
 export function getRelease(releaseId: string) {
   return request<Release>(`/api/v1/config/releases/${releaseId}`);
+}
+
+export function getReleaseDetail(releaseId: string) {
+  return request<ReleaseDetail>(`/api/v1/config/releases/${releaseId}/detail`);
 }
 
 export function getReleaseAcks(releaseId: string) {

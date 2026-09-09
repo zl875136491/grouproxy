@@ -388,6 +388,20 @@ class AgentAckOut(BaseModel):
     received_at: datetime
 
 
+class ReleaseEventOut(BaseModel):
+    timestamp: datetime
+    source: str
+    message: str
+    level: Literal["info", "success", "warning", "error"] = "info"
+
+
+class ReleaseDetailOut(BaseModel):
+    release: ReleaseOut
+    task: TaskOut | None = None
+    acknowledgements: list[AgentAckOut] = Field(default_factory=list)
+    events: list[ReleaseEventOut] = Field(default_factory=list)
+
+
 class AuditEventOut(BaseModel):
     event_id: str
     actor: str
