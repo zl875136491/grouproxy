@@ -446,8 +446,8 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 
 .page-fill.subscriptions-page { grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
 .subscription-scroll-area { display: block; min-height: 0; height: 100%; overflow: hidden; overscroll-behavior: contain; }
-.subscription-layout { display: grid; height: 100%; min-height: 0; grid-template-columns: minmax(300px, 0.76fr) minmax(0, 1.24fr); gap: 16px; align-items: stretch; }
-.subscription-source-panel, .subscription-detail-panel { min-height: 0; max-height: none; }
+.subscription-layout { display: grid; height: 100%; min-width: 0; min-height: 0; grid-template-columns: minmax(300px, 0.76fr) minmax(0, 1.24fr); gap: 16px; align-items: stretch; }
+.subscription-source-panel, .subscription-detail-panel { min-width: 0; min-height: 0; max-height: none; }
 .subscription-source-panel { display: flex; flex-direction: column; }
 .subscription-detail-panel { overflow: hidden; }
 .subscription-version-panel .table-scroll, .subscription-binding-panel .table-scroll { max-height: min(42dvh, 440px); flex: 0 1 auto; }
@@ -464,11 +464,14 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .subscription-source-row small { overflow: hidden; color: var(--gp-steel); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .subscription-source-selected { background: var(--gp-surface); }
 .subscription-source-row .status-badge { min-width: 54px; justify-content: center; }
-.subscription-detail { display: grid; gap: 20px; min-height: 0; height: 100%; padding: 22px; }
+.subscription-detail { display: grid; min-width: 0; gap: 20px; min-height: 0; height: 100%; padding: 22px; }
 .subscription-detail-split { grid-template-rows: minmax(0, 1fr) minmax(0, 3fr); }
-.subscription-detail-summary { min-height: 0; overflow: auto; }
-.subscription-document-section { display: flex; min-height: 0; flex-direction: column; gap: 10px; }
-.subscription-document-heading { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 12px; }
+.subscription-detail-summary { min-width: 0; min-height: 0; overflow: auto; }
+.subscription-detail-summary .release-detail-heading > div:first-child { min-width: 0; }
+.subscription-detail-summary .release-detail-heading h2 { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-detail-summary .release-detail-heading p { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-document-section { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 10px; }
+.subscription-document-heading { display: flex; min-width: 0; min-height: 32px; align-items: center; justify-content: space-between; gap: 12px; }
 .subscription-document-heading > div:first-child { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .subscription-document-heading strong { color: var(--gp-steel); font-family: "Source Code Pro", monospace; font-size: 11px; }
 .subscription-document-section .source-document { min-height: 0; height: 100%; }
@@ -495,7 +498,7 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .subscription-content-dialog .dialog-body { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
 .subscription-content-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .subscription-content-toolbar > .mono { min-width: 0; overflow: hidden; color: var(--gp-steel); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
-.source-document { min-height: min(64dvh, 720px); flex: 1 1 auto; max-height: none; overflow: auto; margin: 0; border: 1px solid var(--gp-line); border-radius: 6px; padding: 14px 0; color: var(--gp-code-ink); background: #0b2932; font-size: 11px; line-height: 1.65; counter-reset: source-line; }
+.source-document { width: 100%; min-width: 0; min-height: min(64dvh, 720px); flex: 1 1 auto; box-sizing: border-box; max-height: none; overflow: auto; scrollbar-gutter: stable; margin: 0; border: 1px solid var(--gp-line); border-radius: 6px; padding: 14px 0; color: var(--gp-code-ink); background: #0b2932; font-size: 11px; line-height: 1.65; counter-reset: source-line; }
 .source-document code { display: block; min-width: max-content; padding: 0 14px; font-family: "Source Code Pro", "SFMono-Regular", Consolas, monospace; }
 .source-document-wrap code { min-width: 0; }
 .source-code-line { display: block; min-height: 1.65em; padding-left: 3.4em; white-space: pre; }
