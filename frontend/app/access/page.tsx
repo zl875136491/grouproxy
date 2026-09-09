@@ -15,7 +15,6 @@ import { useState, type ReactNode } from "react";
 import { getAccessConfig, getLinuxSetupScript, getProxyPAC, getWindowsSetupScript } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { ErrorState, LoadingState } from "../../components/data-state";
-import { SessionGate, useAuthenticatedSession } from "../../components/session-gate";
 import { notifyToast, toastErrorMessage } from "../../components/toast";
 import { Button, StatusBadge } from "../../components/ui";
 
@@ -89,12 +88,11 @@ async function writeClipboard(value: string) {
 
 export default function AccessPage() {
   const { t, formatNumber } = usePreferences();
-  const session = useAuthenticatedSession();
   const [copiedId, setCopiedId] = useState("");
-  const accessConfig = useQuery({ queryKey: ["access-config"], queryFn: getAccessConfig, enabled: session === true, staleTime: 60_000 });
-  const linuxScript = useQuery({ queryKey: ["linux-setup-script"], queryFn: getLinuxSetupScript, enabled: session === true, staleTime: 60_000 });
-  const windowsScript = useQuery({ queryKey: ["windows-setup-script"], queryFn: getWindowsSetupScript, enabled: session === true, staleTime: 60_000 });
-  const pac = useQuery({ queryKey: ["proxy-pac"], queryFn: getProxyPAC, enabled: session === true, staleTime: 60_000 });
+  const accessConfig = useQuery({ queryKey: ["access-config"], queryFn: getAccessConfig, staleTime: 60_000 });
+  const linuxScript = useQuery({ queryKey: ["linux-setup-script"], queryFn: getLinuxSetupScript, staleTime: 60_000 });
+  const windowsScript = useQuery({ queryKey: ["windows-setup-script"], queryFn: getWindowsSetupScript, staleTime: 60_000 });
+  const pac = useQuery({ queryKey: ["proxy-pac"], queryFn: getProxyPAC, staleTime: 60_000 });
 
   const config = accessConfig.data;
   const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:1080";
@@ -117,8 +115,6 @@ export default function AccessPage() {
 
   const snippets = { quick: quickCommand, verify: verificationCommand, enable: enableCommand, disable: disableCommand };
 
-  if (session === null) return <LoadingState rows={7} />;
-  if (!session) return <SessionGate />;
   if (accessConfig.isLoading || linuxScript.isLoading || windowsScript.isLoading || pac.isLoading) return <LoadingState rows={7} />;
   const issue = accessConfig.error || linuxScript.error || windowsScript.error || pac.error;
   if (accessConfig.isError || linuxScript.isError || windowsScript.isError || pac.isError) {

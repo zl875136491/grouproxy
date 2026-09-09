@@ -23,10 +23,11 @@ the public sing-box HTTP inbound on that port. The same-host two-node test
 harness has one explicit public test exception for its second node on `:18081`;
 deployed nodes remain on `:1080`.
 
-The `/access` dashboard page is the workstation runbook. It selects a pair of
+The `/` dashboard page is the public workstation runbook (also available at
+`/access`). It selects a pair of
 checked-in, pre-generated assets from `GROUPROXY_ENVIRONMENT`: `test` serves
 `test-proxy.1oa.com.cn`, while every other value serves production
-`proxy.1oa.com.cn`. Authenticated downloads are available at
+`proxy.1oa.com.cn`. Public downloads are available at
 `/api/v1/access/linux-setup.sh` and `/api/v1/access/windows-setup.ps1`; the
 configuration response also returns the matching macOS iCloud Shortcut URL.
 The Windows script configures the current user's WinINET and environment

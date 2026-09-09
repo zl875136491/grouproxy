@@ -3559,9 +3559,7 @@ async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
 
 
 @app.get("/api/v1/access/linux-setup.sh", response_class=PlainTextResponse)
-async def linux_setup(
-    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> PlainTextResponse:
+async def linux_setup() -> PlainTextResponse:
     return PlainTextResponse(
         load_linux_setup_script(_settings()),
         headers={"Content-Disposition": 'attachment; filename="grouproxy-linux-setup.sh"'},
@@ -3570,9 +3568,7 @@ async def linux_setup(
 
 
 @app.get("/api/v1/access/windows-setup.ps1", response_class=PlainTextResponse)
-async def windows_setup(
-    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> PlainTextResponse:
+async def windows_setup() -> PlainTextResponse:
     return PlainTextResponse(
         load_windows_setup_script(_settings()),
         headers={"Content-Disposition": 'attachment; filename="grouproxy-windows-setup.ps1"'},
@@ -3581,9 +3577,7 @@ async def windows_setup(
 
 
 @app.get("/api/v1/access/config", response_model=AccessConfigOut)
-async def access_config(
-    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> AccessConfigOut:
+async def access_config() -> AccessConfigOut:
     profile = access_profile(_settings())
     return AccessConfigOut(
         environment=profile.environment,
@@ -3594,9 +3588,7 @@ async def access_config(
 
 
 @app.get("/api/v1/access/proxy.pac", response_class=PlainTextResponse)
-async def proxy_pac(
-    _: AuthenticatedPrincipal = Depends(require_authenticated),  # noqa: B008 - FastAPI dependency declaration
-) -> PlainTextResponse:
+async def proxy_pac() -> PlainTextResponse:
     profile = access_profile(_settings())
     # PAC only chooses the single HTTP listener. It is not an authorization
     # layer and never embeds regional IP addresses.

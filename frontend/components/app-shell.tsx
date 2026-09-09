@@ -47,7 +47,8 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "OPERATE",
     items: [
-      { href: "/", label: "Overview", icon: Gauge },
+      { href: "/", label: "Access", icon: BookOpen },
+      { href: "/overview", label: "Overview", icon: Gauge },
       { href: "/nodes", label: "Nodes", icon: ServerCog },
       { href: "/proxies", label: "Outbound services", icon: Waypoints },
     ],
@@ -84,13 +85,12 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
       { href: "/employees", label: "Employees", icon: UsersRound },
       { href: "/audit", label: "Audit", icon: ScrollText },
       { href: "/backups", label: "Backups", icon: Archive },
-      { href: "/access", label: "Access", icon: BookOpen },
     ],
   },
 ];
 
 const employeeNavigation: Array<{ label: string; items: NavigationItem[] }> = [
-  { label: "GOVERN", items: [{ href: "/access", label: "Access", icon: BookOpen }] },
+  { label: "GOVERN", items: [{ href: "/", label: "Access", icon: BookOpen }] },
 ];
 
 function isCurrent(pathname: string, item: NavigationItem) {
@@ -98,6 +98,7 @@ function isCurrent(pathname: string, item: NavigationItem) {
 }
 
 function pageLabel(pathname: string) {
+  if (pathname === "/access") return "Access";
   for (const group of navigation) {
     const match = group.items.find((item) => isCurrent(pathname, item));
     if (match) return match.label;

@@ -61,7 +61,7 @@ boundary. The dashboard is expected to be served directly by Next.js on port
 `80`, whose `/api/*` rewrite reaches this backend without an external reverse
 proxy.
 
-The protected access endpoints expose immutable workstation assets selected by
+The public access endpoints expose immutable workstation assets selected by
 `GROUPROXY_ENVIRONMENT`: `GET /api/v1/access/linux-setup.sh`,
 `GET /api/v1/access/windows-setup.ps1`, `GET /api/v1/access/proxy.pac`, and
 `GET /api/v1/access/config`. The `test` profile uses the test proxy domain and

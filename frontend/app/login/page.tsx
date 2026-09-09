@@ -227,7 +227,7 @@ export default function LoginPage() {
       if (loginMode === "password") {
         const result = await loginWithPassword(loginItcode.trim(), loginPassword);
         saveManagementSession(result.access_token, result.role, result.expires_at);
-        router.replace(result.role === "admin" ? "/" : "/access");
+        router.replace(result.role === "admin" ? "/overview" : "/");
         return;
       }
       if (!loginChallenge) throw new Error("verification_code_invalid");
@@ -237,7 +237,7 @@ export default function LoginPage() {
         verification_code: loginVerificationCode,
       });
       saveManagementSession(result.access_token, result.role, result.expires_at);
-      router.replace(result.role === "admin" ? "/" : "/access");
+      router.replace(result.role === "admin" ? "/overview" : "/");
     } catch (submitError) {
       notifyToast({ title: t("Sign in failed"), description: authErrorMessage(submitError, t), variant: "destructive" });
     } finally {
