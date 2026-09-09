@@ -2376,14 +2376,6 @@ async def rollback_site_subscription(
     )
 
 
-@app.get("/api/v1/config/releases/{release_id}", response_model=ReleaseOut)
-async def get_release(release_id: str, _: str = Depends(require_management)) -> ReleaseOut:
-    release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
-    if release is None:
-        raise HTTPException(404, "release_not_found")
-    return _release_out(release)
-
-
 @app.get("/api/v1/config/releases/{release_id}/detail", response_model=ReleaseDetailOut)
 async def get_release_detail(
     release_id: str, _: str = Depends(require_management)
@@ -2480,6 +2472,14 @@ async def list_release_acks(
         .to_list()
     )
     return [_ack_out(item) for item in _latest_ack_per_node(acks)]
+
+
+@app.get("/api/v1/config/releases/{release_id}", response_model=ReleaseOut)
+async def get_release(release_id: str, _: str = Depends(require_management)) -> ReleaseOut:
+    release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
+    if release is None:
+        raise HTTPException(404, "release_not_found")
+    return _release_out(release)
 
 
 @app.get("/api/v1/tasks", response_model=list[TaskOut])

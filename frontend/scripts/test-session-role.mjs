@@ -63,4 +63,11 @@ assert.equal(redirectedTo, "/login?reason=management_session_expired");
 assert.equal(consumeAuthenticationNotice(), "management_session_expired");
 assert.equal(consumeAuthenticationNotice(), "");
 
+window.location.pathname = "/";
+redirectedTo = "";
+saveManagementSession("expired-public-token", "admin", "2000-01-01T00:00:00Z");
+assert.equal(hasAuthenticatedSession(), false);
+assert.equal(redirectedTo, "");
+assert.equal(managementSessionRole(), null);
+
 console.log("Session roles and client-side expiration handling are valid.");

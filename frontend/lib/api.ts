@@ -495,10 +495,24 @@ function redirectForAuthenticationFailure(detail: string) {
   }
 }
 
+function isPublicAccessPath() {
+  if (typeof window === "undefined") return false;
+  return window.location.pathname === "/" || window.location.pathname === "/access";
+}
+
 function activeManagementToken() {
   const token = managementToken();
   if (token && storedSessionExpired()) {
-    redirectForAuthenticationFailure("management_session_expired");
+    if (isPublicAccessPath()) {
+      clearManagementSession();
+      try {
+        window.sessionStorage.setItem(authNoticeKey, "management_session_expired");
+      } catch {
+        // Storage can be unavailable in hardened/private browser contexts.
+      }
+    } else {
+      redirectForAuthenticationFailure("management_session_expired");
+    }
     return "";
   }
   return token;
@@ -637,7 +651,7 @@ async function apiFetch(path: string, init: RequestInit): Promise<Response> {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  const token = managementToken();
+  const token = activeManagementToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await apiFetch(path, { ...init, headers });
   if (!response.ok) {
@@ -651,8 +665,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function requestPublic<T>(path: string): Promise<T> {
+  const response = await apiFetch(path, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new ApiError(response.status, await readError(response));
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+async function requestPublicText(path: string): Promise<string> {
+  const response = await apiFetch(path, { headers: { Accept: "text/plain" } });
+  if (!response.ok) throw new ApiError(response.status, await readError(response));
+  return response.text();
+}
+
 async function requestText(path: string): Promise<string> {
-  const token = managementToken();
+  const token = activeManagementToken();
   const response = await apiFetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -668,7 +695,7 @@ async function requestText(path: string): Promise<string> {
 
 async function requestForm<T>(path: string, form: FormData): Promise<T> {
   const headers = new Headers();
-  const token = managementToken();
+  const token = activeManagementToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await apiFetch(path, {
     method: "POST",
@@ -1055,17 +1082,17 @@ export function restoreBackup(backupId: string, confirm = false) {
 }
 
 export function getLinuxSetupScript() {
-  return requestText("/api/v1/access/linux-setup.sh");
+  return requestPublicText("/api/v1/access/linux-setup.sh");
 }
 
 export function getWindowsSetupScript() {
-  return requestText("/api/v1/access/windows-setup.ps1");
+  return requestPublicText("/api/v1/access/windows-setup.ps1");
 }
 
 export function getAccessConfig() {
-  return request<AccessConfig>("/api/v1/access/config");
+  return requestPublic<AccessConfig>("/api/v1/access/config");
 }
 
 export function getProxyPAC() {
-  return requestText("/api/v1/access/proxy.pac");
+  return requestPublicText("/api/v1/access/proxy.pac");
 }
