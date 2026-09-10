@@ -63,7 +63,7 @@ def test_access_assets_are_selected_from_immutable_environment_profiles() -> Non
     assert test_windows.replace("test-proxy.1oa.com.cn", "proxy.1oa.com.cn") == production_windows
 
 
-def test_access_scripts_remain_http_only_and_windows_script_is_reversible() -> None:
+def test_access_scripts_remain_http_only_and_windows_script_only_switches_proxy() -> None:
     script = load_linux_setup_script(SimpleNamespace(environment="test"))
     windows = load_windows_setup_script(SimpleNamespace(environment="test"))
 
@@ -74,9 +74,12 @@ def test_access_scripts_remain_http_only_and_windows_script_is_reversible() -> N
     assert "ca-certificates" not in script.lower()
     assert "update-ca-certificates" not in script.lower()
     assert "ProxyEnable" in windows
-    assert "-Disable" in windows
-    assert "https://ipinfo.io/json" in windows
-    assert "-Proxy $ProxyUrl" in windows
+    assert "ProxyServer" in windows
+    assert "$Disable" in windows
+    assert "ipinfo.io" not in windows
+    assert "Read-Host" not in windows
+    assert "proxy-backup" not in windows
+    assert "HTTP_PROXY" not in windows
 
 
 def test_bundle_signature_round_trip_is_deterministic() -> None:

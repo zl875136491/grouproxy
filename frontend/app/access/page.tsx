@@ -9,49 +9,101 @@ import {
   ExternalLink,
   FileCode2,
   Laptop,
-  Link2,
+  Monitor,
+  Network,
+  ShieldCheck,
+  Terminal,
 } from "lucide-react";
+import Link from "next/link";
 import { useState, type ReactNode } from "react";
-import { getAccessConfig, getLinuxSetupScript, getProxyPAC, getWindowsSetupScript } from "../../lib/api";
+import { getAccessConfig, getLinuxSetupScript, getWindowsSetupScript } from "../../lib/api";
 import { writeClipboard } from "../../lib/clipboard";
 import { usePreferences } from "../../lib/preferences";
 import { ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
 import { notifyToast, toastErrorMessage } from "../../components/toast";
-import { Button, StatusBadge } from "../../components/ui";
+import { IconButton, StatusBadge } from "../../components/ui";
+
+type CodeLanguage = "bash" | "powershell";
 
 type CodeSnippetProps = {
   id: string;
   filename: string;
-  language: string;
+  language: CodeLanguage;
   content: string;
   copiedId: string;
   onCopy: () => void;
   onDownload?: () => void;
-  t: (key: string, values?: Record<string, string | number>) => string;
 };
 
-function CodeSnippet({ id, filename, language, content, copiedId, onCopy, onDownload, t }: CodeSnippetProps) {
+const bashTokens = /(#.*$)|(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')|(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)|(\b(?:export|if|then|fi|for|in|do|done|case|esac|function|local)\b)|(--?[A-Za-z][A-Za-z0-9-]*)|(https?:\/\/[^\s\"'`]+)/gm;
+const powerShellTokens = /(#.*$)|(\"(?:`.|[^\"`])*\"|'(?:''|[^'])*')|(\$[A-Za-z_][A-Za-z0-9_:]*)|(\b(?:param|if|else|elseif|foreach|function|return|exit|switch)\b)|(-{1,2}[A-Za-z][A-Za-z0-9-]*)|(\[[A-Za-z][A-Za-z0-9.]*\])|(https?:\/\/[^\s\"'`]+)/gim;
+
+function tokenClass(match: RegExpMatchArray, language: CodeLanguage) {
+  if (match[1]) return "access-doc-token-comment";
+  if (match[2]) return "access-doc-token-string";
+  if (match[3]) return "access-doc-token-variable";
+  if (match[4]) return "access-doc-token-keyword";
+  if (match[5]) return "access-doc-token-option";
+  if (language === "powershell" && match[6]) return "access-doc-token-type";
+  return "access-doc-token-url";
+}
+
+function highlightCode(content: string, language: CodeLanguage) {
+  const pattern = language === "powershell" ? powerShellTokens : bashTokens;
+  const fragments: ReactNode[] = [];
+  let cursor = 0;
+  let tokenIndex = 0;
+
+  for (const match of content.matchAll(pattern)) {
+    const start = match.index ?? cursor;
+    if (start > cursor) fragments.push(content.slice(cursor, start));
+    fragments.push(<span className={tokenClass(match, language)} key={`${start}-${tokenIndex}`}>{match[0]}</span>);
+    cursor = start + match[0].length;
+    tokenIndex += 1;
+  }
+
+  if (cursor < content.length) fragments.push(content.slice(cursor));
+  return fragments;
+}
+
+function CodeSnippet({ id, filename, language, content, copiedId, onCopy, onDownload }: CodeSnippetProps) {
   const copied = copiedId === id;
   return (
     <div className="access-doc-codeblock">
       <div className="access-doc-codebar">
         <div className="access-doc-code-meta"><FileCode2 size={14} aria-hidden="true" /><code>{filename}</code><span>{language}</span></div>
         <div className="row-actions">
-          <Button size="sm" onClick={onCopy}>{copied ? <Check size={14} /> : <Clipboard size={14} />}{copied ? t("Copied") : t("Copy")}</Button>
-          {onDownload ? <Button size="sm" onClick={onDownload}><Download size={14} />{t("Download")}</Button> : null}
+          <IconButton className="access-doc-code-action" label={copied ? "Copied" : "Copy"} onClick={onCopy}>{copied ? <Check size={14} /> : <Clipboard size={14} />}</IconButton>
+          {onDownload ? <IconButton className="access-doc-code-action" label="Download" onClick={onDownload}><Download size={14} /></IconButton> : null}
         </div>
       </div>
-      <pre className="access-doc-code"><code>{content}</code></pre>
+      <pre className="access-doc-code"><code>{highlightCode(content, language)}</code></pre>
     </div>
   );
 }
 
-function SectionHeading({ id, eyebrow, title, description, children, t }: { id: string; eyebrow: string; title: string; description?: string; children?: ReactNode; t: (key: string, values?: Record<string, string | number>) => string }) {
+function SectionHeading({ id, title, description }: { id: string; title: string; description: string }) {
+  return <div className="access-doc-section-heading"><div><h2 id={id}>{title}</h2><p>{description}</p></div></div>;
+}
+
+function PlatformCard({ id, icon, title, description, children }: { id: string; icon: ReactNode; title: string; description: string; children: ReactNode }) {
   return (
-    <div className="access-doc-section-heading">
-      <div><span className="access-doc-eyebrow">{t(eyebrow)}</span><h2 id={id}>{t(title)}</h2>{description ? <p>{t(description)}</p> : null}</div>
-      {children}
+    <article className="access-doc-platform-card" aria-labelledby={id}>
+      <header>
+        <span className="access-doc-platform-icon" aria-hidden="true">{icon}</span>
+        <div><h3 id={id}>{title}</h3><p>{description}</p></div>
+      </header>
+      <div className="access-doc-card-body">{children}</div>
+    </article>
+  );
+}
+
+function MacOSShortcutLinks({ urls, t }: { urls: { test: string; production: string }; t: (key: string, values?: Record<string, string | number>) => string }) {
+  return (
+    <div className="access-doc-shortcut-links">
+      <a href={urls.test} target="_blank" rel="noreferrer"><span>{t("Test environment")}</span><ExternalLink size={14} aria-hidden="true" /></a>
+      <a href={urls.production} target="_blank" rel="noreferrer"><span>{t("Production environment")}</span><ExternalLink size={14} aria-hidden="true" /></a>
     </div>
   );
 }
@@ -71,21 +123,32 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// These reserved domains deliberately do not resolve. Replace them after the
+// macOS workflows are published for each environment.
+const macOSShortcutUrls = {
+  quickAccess: {
+    test: "https://shortcuts.example.invalid/grouproxy/test/quick-access",
+    production: "https://shortcuts.example.invalid/grouproxy/production/quick-access",
+  },
+  maintenance: {
+    test: "https://shortcuts.example.invalid/grouproxy/test/maintenance",
+    production: "https://shortcuts.example.invalid/grouproxy/production/maintenance",
+  },
+} as const;
+
 export default function AccessPage() {
   const { t, formatNumber } = usePreferences();
   const [copiedId, setCopiedId] = useState("");
   const accessConfig = useQuery({ queryKey: ["access-config"], queryFn: getAccessConfig, staleTime: 60_000 });
   const linuxScript = useQuery({ queryKey: ["linux-setup-script"], queryFn: getLinuxSetupScript, staleTime: 60_000 });
   const windowsScript = useQuery({ queryKey: ["windows-setup-script"], queryFn: getWindowsSetupScript, staleTime: 60_000 });
-  const pac = useQuery({ queryKey: ["proxy-pac"], queryFn: getProxyPAC, staleTime: 60_000 });
 
   const config = accessConfig.data;
   const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:1080";
-  const shellEndpoint = shellQuote(endpoint);
-  const quickCommand = `export http_proxy=${shellEndpoint} https_proxy=${shellEndpoint} HTTP_PROXY=${shellEndpoint} HTTPS_PROXY=${shellEndpoint}`;
-  const verificationCommand = `curl --fail --silent --show-error --proxy ${shellEndpoint} https://ipinfo.io/json`;
-  const enableCommand = "chmod +x ./grouproxy-linux-setup.sh && ./grouproxy-linux-setup.sh";
-  const disableCommand = "./grouproxy-linux-setup.sh --uninstall";
+  const windowsQuickCommand = "Set-ExecutionPolicy -Scope Process Bypass -Force\n.\\grouproxy-windows-setup.ps1\n\n.\\grouproxy-windows-setup.ps1 -Disable";
+  const linuxQuickCommand = "chmod +x ./grouproxy-linux-setup.sh\n./grouproxy-linux-setup.sh\n\n./grouproxy-linux-setup.sh --uninstall";
+  const windowsValidationCommand = config ? `$ProxyUrl = \"${endpoint}\"\nTest-NetConnection -ComputerName \"${config.fqdn}\" -Port ${config.port}\nInvoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl` : "";
+  const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
 
   const copyContent = async (id: string, content: string, label: string) => {
     try {
@@ -98,14 +161,12 @@ export default function AccessPage() {
     }
   };
 
-  const snippets = { quick: quickCommand, verify: verificationCommand, enable: enableCommand, disable: disableCommand };
-
-  if (accessConfig.isLoading || linuxScript.isLoading || windowsScript.isLoading || pac.isLoading) return <LoadingState rows={7} />;
-  const issue = accessConfig.error || linuxScript.error || windowsScript.error || pac.error;
-  if (accessConfig.isError || linuxScript.isError || windowsScript.isError || pac.isError) {
-    return <ErrorState error={issue instanceof Error ? issue.message : "Unable to load access configuration."} onRetry={() => void Promise.all([accessConfig.refetch(), linuxScript.refetch(), windowsScript.refetch(), pac.refetch()])} />;
+  if (accessConfig.isLoading || linuxScript.isLoading || windowsScript.isLoading) return <LoadingState rows={7} />;
+  const issue = accessConfig.error || linuxScript.error || windowsScript.error;
+  if (accessConfig.isError || linuxScript.isError || windowsScript.isError) {
+    return <ErrorState error={issue instanceof Error ? issue.message : "Unable to load access configuration."} onRetry={() => void Promise.all([accessConfig.refetch(), linuxScript.refetch(), windowsScript.refetch()])} />;
   }
-  if (!config || !linuxScript.data || !windowsScript.data || !pac.data) return <LoadingState rows={7} />;
+  if (!config || !linuxScript.data || !windowsScript.data) return <LoadingState rows={7} />;
 
   function copySnippet(id: string, content: string, label: string) {
     void copyContent(id, content, label);
@@ -120,56 +181,62 @@ export default function AccessPage() {
               className="access-docs-page-header"
               eyebrow="ACCESS GUIDE"
               title="Proxy access"
-              description="Configure the Grouproxy HTTP CONNECT endpoint on a workstation, verify the route, and return to a direct connection when finished."
+              description="Connect your workstation, verify the route, and maintain source access from one place."
               icon={<BookOpen size={18} />}
             />
             <div className="access-endpoint-bar"><div className="access-endpoint-status"><StatusBadge status="enabled" /><span>{t(config.environment === "test" ? "Test environment" : "Production environment")}</span></div><code>{endpoint}</code><span className="access-endpoint-port">{t("Port")} {formatNumber(config.port, { useGrouping: false })}</span></div>
           </section>
 
-          <section className="access-doc-section" aria-labelledby="access-overview">
-            <SectionHeading id="access-overview" eyebrow="OVERVIEW" title="Proxy endpoint" description="The proxy service is exposed directly on port 1080. Dashboard access is separate and does not require an NGINX forwarding layer." t={t} />
-            <div className="access-doc-callout"><Link2 size={17} /><div><strong>{t("HTTP CONNECT")}</strong><span>{t("Destination HTTPS remains end-to-end inside the HTTP CONNECT tunnel. No proxy credentials or TLS interception are used.")}</span></div></div>
-            <dl className="access-doc-facts"><div><dt>{t("Environment")}</dt><dd>{t(config.environment === "test" ? "Test environment" : "Production environment")}</dd></div><div><dt>{t("Host name")}</dt><dd className="mono">{config.fqdn}</dd></div><div><dt>{t("Port")}</dt><dd>{formatNumber(config.port, { useGrouping: false })}</dd></div><div><dt>{t("Protocol")}</dt><dd>{t("HTTP CONNECT")}</dd></div></dl>
+          <section className="access-doc-section" aria-labelledby="access-quick-access">
+            <SectionHeading id="access-quick-access" title={t("Quick access")} description={t("Choose an operating system and use the shortest supported setup path.")} />
+            <div className="access-doc-platform-grid">
+              <PlatformCard id="access-quick-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Use the downloaded script to turn the current user's Windows system proxy on or off.")}>
+                <CodeSnippet id="windows-quick" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-quick", windowsQuickCommand, t("Windows"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} />
+                <p className="access-doc-card-note">{t("Run without options to enable the proxy. Run with -Disable to turn it off.")}</p>
+              </PlatformCard>
+              <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders until the macOS workflows are published.")}>
+                <MacOSShortcutLinks urls={macOSShortcutUrls.quickAccess} t={t} />
+              </PlatformCard>
+              <PlatformCard id="access-quick-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Download the setup script and run it as the current user.")}>
+                <CodeSnippet id="linux-quick" filename="grouproxy-linux-setup.sh" language="bash" content={linuxQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-quick", linuxQuickCommand, t("Linux"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} />
+              </PlatformCard>
+            </div>
           </section>
 
-          <section className="access-doc-section" aria-labelledby="access-quick-start">
-            <SectionHeading id="access-quick-start" eyebrow="QUICK START" title="Configure a shell in one line" description="The variables apply to this terminal and the processes started from it." t={t} />
-            <CodeSnippet id="quick" filename="shell" language="bash" content={snippets.quick} copiedId={copiedId} onCopy={() => copySnippet("quick", snippets.quick, t("Configure a shell in one line"))} onDownload={() => downloadText(snippets.quick, "grouproxy-proxy-env.sh", "text/x-shellscript")} t={t} />
-            <ol className="access-doc-steps"><li>{t("Paste the command into a new terminal.")}</li><li>{t("Run the verification command below before opening applications.")}</li><li>{t("Close the terminal or run the disable command to return to direct access.")}</li></ol>
-          </section>
-
-          <section className="access-doc-section" aria-labelledby="access-windows">
-            <SectionHeading id="access-windows" eyebrow="WINDOWS" title="Windows one-click setup" description="The pre-generated PowerShell asset configures the current Windows user and keeps a backup for a reversible disable operation." t={t}><span className="access-doc-download-note"><Download size={14} />{t("Download ready")}</span></SectionHeading>
-            <CodeSnippet id="windows" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsScript.data} copiedId={copiedId} onCopy={() => copySnippet("windows", windowsScript.data, t("Windows one-click setup"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
-            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script, then open PowerShell in its download folder.")}</p><p><strong>2.</strong> <code>Set-ExecutionPolicy -Scope Process Bypass</code>{t(", then run")} <code>.\grouproxy-windows-setup.ps1</code>.</p><p><strong>3.</strong> {t("Use -SkipDirectTest to skip the optional direct-network checks, or -Disable to restore the previous Windows proxy settings.")}</p></div>
-          </section>
-
-          <section className="access-doc-section" aria-labelledby="access-macos">
-            <SectionHeading id="access-macos" eyebrow="MACOS" title="macOS shortcut" description="Use the shortcut prepared for the selected deployment environment." t={t} />
-            <div className="access-doc-action-row"><a className="access-doc-link-button" href={config.macos_shortcut_url} target="_blank" rel="noreferrer"><Laptop size={17} />{t("Get shortcut")}<ExternalLink size={14} /></a><span>{t("Opens Apple Shortcuts in a new tab.")}</span></div>
-            <ol className="access-doc-steps"><li>{t("Open the environment-specific iCloud link.")}</li><li>{t("Review the actions and add the shortcut to the Shortcuts app.")}</li><li>{t("Run it from Shortcuts and follow the prompts shown by macOS.")}</li></ol>
-          </section>
-
-          <section className="access-doc-section" aria-labelledby="access-linux">
-            <SectionHeading id="access-linux" eyebrow="LINUX" title="Linux desktop and shell setup" description="The repository-provided script configures shell variables and GNOME or KDE settings when available." t={t} />
-            <CodeSnippet id="linux" filename="grouproxy-linux-setup.sh" language="bash" content={linuxScript.data} copiedId={copiedId} onCopy={() => copySnippet("linux", linuxScript.data, t("Linux desktop and shell setup"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} t={t} />
-            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script and make it executable.")}</p><p><strong>2.</strong> {t("Run it as the current user for shell and desktop settings.")}</p><p><strong>3.</strong> {t("Use --no-desktop for shell-only setup, --system for system defaults as root, or --uninstall to remove only Grouproxy-managed settings.")}</p></div>
-          </section>
-
-          <section className="access-doc-section" aria-labelledby="access-verify">
-            <SectionHeading id="access-verify" eyebrow="VERIFY" title="Test the actual proxy route" description="These commands make a real HTTPS request through HTTP CONNECT and show the proxy exit address." t={t} />
-            <CodeSnippet id="verify" filename="verify-proxy.sh" language="bash" content={snippets.verify} copiedId={copiedId} onCopy={() => copySnippet("verify", snippets.verify, t("Test the actual proxy route"))} onDownload={() => downloadText(snippets.verify, "grouproxy-verify-proxy.sh", "text/x-shellscript")} t={t} />
-            <div className="access-doc-action-row"><button className="access-doc-link-button access-doc-link-secondary" type="button" onClick={() => downloadText(pac.data, "grouproxy-proxy.pac", "application/x-ns-proxy-autoconfig")}><Download size={16} />{t("Download PAC file")}</button><span>{t("PAC chooses the single HTTP listener and does not grant access.")}</span></div>
-          </section>
-
-          <section className="access-doc-section" aria-labelledby="access-notes">
-            <SectionHeading id="access-notes" eyebrow="NOTES" title="Connection behavior" description="Keep these details in mind when troubleshooting workstation access." t={t} />
-            <ul className="access-doc-notes"><li>{t("The proxy is HTTP CONNECT on TCP 1080; HTTPS destinations remain encrypted end-to-end.")}</li><li>{t("The endpoint has no proxy authentication layer. Network policy and site CIDRs control access.")}</li><li>{t("Existing applications may need to be restarted after enabling or disabling environment variables.")}</li></ul>
-            <div className="access-doc-command-pair"><CodeSnippet id="enable" filename={t("Linux enable")} language="bash" content={snippets.enable} copiedId={copiedId} onCopy={() => copySnippet("enable", snippets.enable, t("Linux enable"))} t={t} /><CodeSnippet id="disable" filename={t("Linux disable")} language="bash" content={snippets.disable} copiedId={copiedId} onCopy={() => copySnippet("disable", snippets.disable, t("Linux disable"))} t={t} /></div>
+          <section className="access-doc-section" aria-labelledby="access-operations">
+            <SectionHeading id="access-operations" title={t("Testing, validation, and allowlist")} description={t("Confirm the listener and proxy route, then use the returned address to maintain source access.")} />
+            <div className="access-doc-platform-grid">
+              <PlatformCard id="access-operations-windows" icon={<ShieldCheck size={19} />} title={t("Windows")} description={t("Check the listener and return the address seen through the proxy.")}>
+                <CodeSnippet id="windows-validation" filename="grouproxy-check.ps1" language="powershell" content={windowsValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-validation", windowsValidationCommand, t("Windows"))} />
+                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
+                <p className="access-doc-card-note">{t("Use the returned address to locate or add the matching source CIDR.")}</p>
+              </PlatformCard>
+              <PlatformCard id="access-operations-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
+                <MacOSShortcutLinks urls={macOSShortcutUrls.maintenance} t={t} />
+              </PlatformCard>
+              <PlatformCard id="access-operations-linux" icon={<ShieldCheck size={19} />} title={t("Linux")} description={t("Check the listener and return the address seen through the proxy.")}>
+                <CodeSnippet id="linux-validation" filename="grouproxy-check.sh" language="bash" content={linuxValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-validation", linuxValidationCommand, t("Linux"))} />
+                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
+                <p className="access-doc-card-note">{t("Use the returned address to locate or add the matching source CIDR.")}</p>
+              </PlatformCard>
+            </div>
           </section>
         </main>
 
-        <aside className="access-docs-rail" aria-label={t("On this page")}><div className="access-docs-rail-sticky"><div className="access-docs-rail-title">{t("On this page")}</div>{[["access-overview", "Overview"], ["access-quick-start", "Quick start"], ["access-windows", "Windows"], ["access-macos", "macOS"], ["access-linux", "Linux"], ["access-verify", "Verification"], ["access-notes", "Notes"]].map(([id, label]) => <a href={`#${id}`} key={id}>{t(label)}</a>)}<div className="access-docs-rail-endpoint"><span>{t("Environment")}</span><strong>{t(config.environment === "test" ? "Test environment" : "Production environment")}</strong><code>{config.fqdn}:{config.port}</code></div></div></aside>
+        <aside className="access-docs-rail" aria-label={t("On this page")}>
+          <nav className="access-docs-rail-sticky">
+            <div className="access-docs-rail-title">{t("On this page")}</div>
+            <div className="access-docs-rail-group">
+              <a className="access-docs-rail-parent" href="#access-quick-access">{t("Quick access")}</a>
+              <div className="access-docs-rail-children"><a href="#access-quick-windows">{t("Windows")}</a><a href="#access-quick-macos">{t("macOS")}</a><a href="#access-quick-linux">{t("Linux")}</a></div>
+            </div>
+            <div className="access-docs-rail-group">
+              <a className="access-docs-rail-parent" href="#access-operations">{t("Testing, validation, and allowlist")}</a>
+              <div className="access-docs-rail-children"><a href="#access-operations-windows">{t("Windows")}</a><a href="#access-operations-macos">{t("macOS")}</a><a href="#access-operations-linux">{t("Linux")}</a></div>
+            </div>
+            <div className="access-docs-rail-endpoint"><span>{t("Environment")}</span><strong>{t(config.environment === "test" ? "Test environment" : "Production environment")}</strong><code>{config.fqdn}:{config.port}</code></div>
+          </nav>
+        </aside>
       </div>
     </div>
   );

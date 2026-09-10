@@ -2340,6 +2340,61 @@ Object.assign(messages.es, {
   "Notes": "Notas",
 });
 
+Object.assign(messages["zh-CN"], {
+  "Connect your workstation, verify the route, and maintain source access from one place.": "在一个页面完成工作站接入、链路验证和来源访问维护。",
+  "Quick access": "快速接入",
+  "Choose an operating system and use the shortest supported setup path.": "选择操作系统，并使用最精简的支持方式完成接入。",
+  "Windows": "Windows",
+  "macOS": "macOS",
+  "Linux": "Linux",
+  "Use the downloaded script to turn the current user's Windows system proxy on or off.": "使用下载的脚本开启或关闭当前 Windows 用户的系统代理。",
+  "Run without options to enable the proxy. Run with -Disable to turn it off.": "不带参数运行即可开启代理；使用 -Disable 参数即可关闭。",
+  "Shortcut links are placeholders until the macOS workflows are published.": "快捷指令尚未发布，目前展示的是占位链接。",
+  "Download the setup script and run it as the current user.": "下载配置脚本后，以当前用户身份运行。",
+  "Testing, validation, and allowlist": "测试、验证与白名单维护",
+  "Confirm the listener and proxy route, then use the returned address to maintain source access.": "确认监听器和代理链路后，使用返回的地址维护来源访问。",
+  "Check the listener and return the address seen through the proxy.": "检测监听器，并返回代理链路实际看到的地址。",
+  "Manage source CIDRs": "管理来源 CIDR",
+  "Use the returned address to locate or add the matching source CIDR.": "使用返回的地址查找或添加对应的来源 CIDR。",
+  "Shortcut links are placeholders for the test and production workflows.": "测试和生产环境的快捷指令目前均为占位链接。",
+});
+Object.assign(messages.en, {
+  "Connect your workstation, verify the route, and maintain source access from one place.": "Connect your workstation, verify the route, and maintain source access from one place.",
+  "Quick access": "Quick access",
+  "Choose an operating system and use the shortest supported setup path.": "Choose an operating system and use the shortest supported setup path.",
+  "Windows": "Windows",
+  "macOS": "macOS",
+  "Linux": "Linux",
+  "Use the downloaded script to turn the current user's Windows system proxy on or off.": "Use the downloaded script to turn the current user's Windows system proxy on or off.",
+  "Run without options to enable the proxy. Run with -Disable to turn it off.": "Run without options to enable the proxy. Run with -Disable to turn it off.",
+  "Shortcut links are placeholders until the macOS workflows are published.": "Shortcut links are placeholders until the macOS workflows are published.",
+  "Download the setup script and run it as the current user.": "Download the setup script and run it as the current user.",
+  "Testing, validation, and allowlist": "Testing, validation, and allowlist",
+  "Confirm the listener and proxy route, then use the returned address to maintain source access.": "Confirm the listener and proxy route, then use the returned address to maintain source access.",
+  "Check the listener and return the address seen through the proxy.": "Check the listener and return the address seen through the proxy.",
+  "Manage source CIDRs": "Manage source CIDRs",
+  "Use the returned address to locate or add the matching source CIDR.": "Use the returned address to locate or add the matching source CIDR.",
+  "Shortcut links are placeholders for the test and production workflows.": "Shortcut links are placeholders for the test and production workflows.",
+});
+Object.assign(messages.es, {
+  "Connect your workstation, verify the route, and maintain source access from one place.": "Conecta la estación de trabajo, verifica la ruta y administra el acceso de origen desde un solo lugar.",
+  "Quick access": "Acceso rápido",
+  "Choose an operating system and use the shortest supported setup path.": "Elige un sistema operativo y usa la ruta de configuración compatible más breve.",
+  "Windows": "Windows",
+  "macOS": "macOS",
+  "Linux": "Linux",
+  "Use the downloaded script to turn the current user's Windows system proxy on or off.": "Usa el script descargado para activar o desactivar el proxy del sistema del usuario actual de Windows.",
+  "Run without options to enable the proxy. Run with -Disable to turn it off.": "Ejecuta sin opciones para activar el proxy. Usa -Disable para desactivarlo.",
+  "Shortcut links are placeholders until the macOS workflows are published.": "Los enlaces de atajos son marcadores de posición hasta que se publiquen los flujos de macOS.",
+  "Download the setup script and run it as the current user.": "Descarga el script de configuración y ejecútalo como el usuario actual.",
+  "Testing, validation, and allowlist": "Pruebas, validación y lista de permitidos",
+  "Confirm the listener and proxy route, then use the returned address to maintain source access.": "Confirma el listener y la ruta del proxy; después usa la dirección devuelta para mantener el acceso de origen.",
+  "Check the listener and return the address seen through the proxy.": "Comprueba el listener y devuelve la dirección observada a través del proxy.",
+  "Manage source CIDRs": "Administrar CIDR de origen",
+  "Use the returned address to locate or add the matching source CIDR.": "Usa la dirección devuelta para localizar o añadir el CIDR de origen correspondiente.",
+  "Shortcut links are placeholders for the test and production workflows.": "Los enlaces de atajos son marcadores de posición para los flujos de prueba y producción.",
+});
+
 // Modal copy used by policy forms, source inspection, and the overview metrics.
 Object.assign(messages["zh-CN"], {
   "Temporarily allow a source CIDR or IP for every site.": "临时允许所有站点使用此来源 CIDR 或 IP。",

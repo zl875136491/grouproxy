@@ -81,8 +81,10 @@ grep -q 'gsettings set org.gnome.system.proxy mode manual' <<<"$linux_setup_scri
 grep -q 'kwriteconfig' <<<"$linux_setup_script"
 windows_setup_script="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/windows-setup.ps1")"
 grep -q 'ProxyEnable' <<<"$windows_setup_script"
-grep -q -- '-Disable' <<<"$windows_setup_script"
-grep -q 'https://ipinfo.io/json' <<<"$windows_setup_script"
+grep -q 'ProxyServer' <<<"$windows_setup_script"
+grep -q '\$Disable' <<<"$windows_setup_script"
+! grep -q 'ipinfo.io' <<<"$windows_setup_script"
+! grep -q 'Read-Host' <<<"$windows_setup_script"
 
 curl -fsS "$FRONTEND_URL/alerts" | grep -qi 'grouproxy'
 printf 'Phase 3 local observability and access validation passed.\n'

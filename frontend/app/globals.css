@@ -961,91 +961,91 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .auth-modal-form > label, .auth-modal-form .verification-row, .auth-modal-form .verification-row > label { width: 100%; }
 .auth-modal-form input { display: block; width: 100%; }
 
-/* Access is intentionally presented as a documentation surface. The article
-   owns its scroll context while the page rail stays available for navigation. */
-.page-fill.access-docs-page { display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
-.access-docs-layout { display: grid; min-height: 0; grid-template-columns: minmax(0, 880px) minmax(170px, 220px); justify-content: center; gap: clamp(28px, 5vw, 72px); overflow: auto; padding: 8px 8px 30px; scrollbar-gutter: stable; }
-.access-docs-article { min-width: 0; padding: 8px 0 44px; }
-.access-docs-header { display: grid; gap: 12px; border-bottom: 1px solid var(--gp-line); padding: 18px 0 28px; }
-.access-doc-eyebrow { display: block; color: var(--gp-green-dark); font-size: 10px; font-weight: 750; letter-spacing: 0; text-transform: uppercase; }
+/* The access page follows the same wide work-surface as the rest of the
+   console while keeping its nested document navigation in reach. */
+.page-fill.access-docs-page { height: auto; min-height: 100%; overflow: visible; }
+.access-docs-layout { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) 212px; align-items: start; gap: 32px; padding: 0 0 32px; }
+.access-docs-article { min-width: 0; padding-bottom: 28px; }
+.access-docs-header { display: grid; gap: 12px; border-bottom: 1px solid var(--gp-line); padding-bottom: 28px; }
 .access-endpoint-bar { display: flex; min-width: 0; align-items: center; gap: 12px; border: 1px solid var(--gp-line); border-radius: 7px; padding: 10px 12px; color: var(--gp-slate); background: var(--gp-surface); }
 .access-endpoint-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 .access-endpoint-status > span { color: var(--gp-steel); font-size: 12px; font-weight: 600; }
 .access-endpoint-bar code { min-width: 0; overflow: hidden; color: var(--gp-ink); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .access-endpoint-port { flex: 0 0 auto; margin-left: auto; color: var(--gp-steel); font-size: 11px; }
-.access-doc-section { display: grid; gap: 16px; border-bottom: 1px solid var(--gp-line); padding: 34px 0 38px; scroll-margin-top: 18px; }
+.access-doc-section { display: grid; gap: 18px; border-bottom: 1px solid var(--gp-line); padding: 36px 0 40px; scroll-margin-top: 18px; }
+.access-docs-header + .access-doc-section { padding-top: 30px; }
 .access-doc-section:last-child { border-bottom: 0; }
-.access-doc-section-heading { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.access-doc-section-heading > div:first-child { min-width: 0; }
-.access-doc-section-heading h2 { margin: 5px 0 0; color: var(--gp-ink); font-size: 21px; line-height: 1.25; font-weight: 650; }
-.access-doc-section-heading p { max-width: 720px; margin: 7px 0 0; color: var(--gp-steel); font-size: 13px; line-height: 1.55; }
-.access-doc-callout { display: flex; align-items: flex-start; gap: 11px; border-left: 3px solid var(--gp-green-dark); padding: 12px 14px; color: var(--gp-slate); background: var(--gp-green-soft); }
-.access-doc-callout > svg { flex: 0 0 auto; margin-top: 2px; color: var(--gp-green-dark); }
-.access-doc-callout > div { display: grid; gap: 3px; min-width: 0; }
-.access-doc-callout strong { color: var(--gp-ink); font-size: 13px; }
-.access-doc-callout span { font-size: 12px; line-height: 1.5; }
-.access-doc-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0; border: 1px solid var(--gp-line); border-radius: 7px; overflow: hidden; background: var(--gp-line); }
-.access-doc-facts > div { display: grid; min-width: 0; gap: 5px; padding: 12px; background: var(--gp-canvas); }
-.access-doc-facts dt { color: var(--gp-steel); font-size: 11px; font-weight: 650; }
-.access-doc-facts dd { min-width: 0; margin: 0; overflow: hidden; color: var(--gp-ink); text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
-.access-doc-codeblock { min-width: 0; overflow: hidden; border: 1px solid var(--gp-line); border-radius: 7px; background: var(--gp-canvas); }
-.access-doc-codebar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--gp-line); padding: 8px 10px; background: var(--gp-surface); }
-.access-doc-code-meta { display: flex; min-width: 0; align-items: center; gap: 7px; color: var(--gp-steel); }
-.access-doc-code-meta > svg { flex: 0 0 auto; color: var(--gp-green-dark); }
-.access-doc-code-meta code { min-width: 0; overflow: hidden; color: var(--gp-slate); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.access-doc-code-meta span { flex: 0 0 auto; border: 1px solid var(--gp-line-strong); border-radius: 4px; padding: 2px 5px; color: var(--gp-steel); font-family: "Source Code Pro", monospace; font-size: 9px; }
-.access-doc-codebar .row-actions { flex: 0 0 auto; }
-.access-doc-code { max-height: 340px; overflow: auto; margin: 0; padding: 16px; color: var(--gp-code-ink); background: var(--gp-code-surface); font-size: 12px; line-height: 1.65; white-space: pre; }
+.access-doc-section-heading { display: flex; min-width: 0; align-items: flex-start; }
+.access-doc-section-heading > div { min-width: 0; }
+.access-doc-section-heading h2 { margin: 0; color: var(--gp-ink); font-size: 21px; line-height: 1.25; font-weight: 650; }
+.access-doc-section-heading p { max-width: 680px; margin: 7px 0 0; color: var(--gp-steel); font-size: 13px; line-height: 1.55; }
+.access-doc-platform-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 16px; }
+.access-doc-platform-card { display: flex; min-width: 0; min-height: 238px; flex-direction: column; overflow: hidden; border: 1px solid var(--gp-line); border-radius: 8px; background: var(--gp-canvas); box-shadow: var(--gp-shadow); }
+.access-doc-platform-card > header { display: flex; min-width: 0; align-items: flex-start; gap: 10px; padding: 16px 16px 13px; }
+.access-doc-platform-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: var(--gp-teal-deep); background: var(--gp-green); }
+.access-doc-platform-card header > div { min-width: 0; }
+.access-doc-platform-card h3 { margin: 2px 0 0; color: var(--gp-ink); font-size: 14px; line-height: 1.25; font-weight: 650; }
+.access-doc-platform-card header p { margin: 4px 0 0; color: var(--gp-steel); font-size: 12px; line-height: 1.5; }
+.access-doc-card-body { display: grid; min-width: 0; align-content: start; gap: 10px; margin-top: auto; padding: 0 16px 16px; }
+.access-doc-codeblock { min-width: 0; overflow: hidden; border: 1px solid var(--gp-code-line); border-radius: 6px; background: var(--gp-code-surface); }
+.access-doc-codebar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--gp-code-line); padding: 7px 8px; background: var(--gp-code-surface-strong); }
+.access-doc-code-meta { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 6px; overflow: hidden; color: var(--gp-code-muted); }
+.access-doc-code-meta > svg { flex: 0 0 auto; color: var(--gp-code-key); }
+.access-doc-code-meta code { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--gp-code-ink); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.access-doc-code-meta span { flex: 0 0 auto; border: 1px solid var(--gp-code-line); border-radius: 4px; padding: 2px 4px; color: var(--gp-code-muted); font-family: "Source Code Pro", monospace; font-size: 9px; }
+.access-doc-codebar .row-actions { flex: 0 0 auto; gap: 3px; }
+.access-doc-code-action { width: 28px; height: 28px; border-color: transparent; color: var(--gp-code-ink); }
+.access-doc-code-action:hover { border-color: var(--gp-code-line); color: var(--gp-code-key); background: var(--gp-code-surface); }
+.access-doc-code { min-height: 104px; max-height: 180px; overflow: auto; margin: 0; padding: 12px; color: var(--gp-code-ink); background: var(--gp-code-surface); font-size: 11px; line-height: 1.65; tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 .access-doc-code code { font-family: "Source Code Pro", "SFMono-Regular", Consolas, monospace; }
-.access-doc-steps, .access-doc-notes { display: grid; gap: 8px; margin: 0; padding-left: 22px; color: var(--gp-slate); font-size: 13px; }
-.access-doc-steps li, .access-doc-notes li { padding-left: 3px; }
-.access-doc-instructions { display: grid; gap: 5px; color: var(--gp-slate); font-size: 12px; }
-.access-doc-instructions p { margin: 0; }
-.access-doc-instructions code, .access-doc-muted code { border: 1px solid var(--gp-line); border-radius: 4px; padding: 2px 5px; color: var(--gp-slate); background: var(--gp-surface); font-size: 11px; }
-.access-doc-download-note { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: var(--gp-green-dark); font-size: 11px; font-weight: 650; }
-.access-doc-action-row { display: flex; min-width: 0; align-items: center; gap: 12px; }
-.access-doc-action-row > span { min-width: 0; color: var(--gp-steel); font-size: 12px; }
-.access-doc-link-button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 8px; border: 0; border-radius: 999px; padding: 9px 14px; color: var(--gp-teal-deep); background: var(--gp-green); font-size: 12px; font-weight: 650; cursor: pointer; }
-.access-doc-link-button:hover { background: #00c653; }
-.access-doc-link-secondary { border: 1px solid var(--gp-line-strong); color: var(--gp-ink); background: var(--gp-canvas); }
-.access-doc-link-secondary:hover { background: var(--gp-surface); }
-.access-doc-muted { margin: 0; color: var(--gp-steel); font-size: 12px; line-height: 1.55; }
-.access-doc-command-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.access-doc-token-comment { color: var(--gp-code-comment); font-style: italic; }
+.access-doc-token-string, .access-doc-token-url { color: var(--gp-code-string); }
+.access-doc-token-variable, .access-doc-token-keyword { color: var(--gp-code-key); }
+.access-doc-token-option { color: var(--gp-code-number); }
+.access-doc-token-type { color: var(--gp-code-bool); }
+.access-doc-card-note { margin: 0; color: var(--gp-steel); font-size: 11px; line-height: 1.5; }
+.access-doc-shortcut-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.access-doc-shortcut-links a, .access-doc-card-link { display: inline-flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--gp-line-strong); border-radius: 6px; padding: 9px 10px; color: var(--gp-ink); background: var(--gp-surface); font-size: 12px; font-weight: 600; }
+.access-doc-shortcut-links a:hover, .access-doc-card-link:hover { border-color: var(--gp-green-dark); color: var(--gp-green-dark); background: var(--gp-green-soft); }
+.access-doc-shortcut-links a > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.access-doc-shortcut-links svg, .access-doc-card-link svg { flex: 0 0 auto; color: var(--gp-green-dark); }
+.access-doc-card-link { justify-content: flex-start; }
 .access-docs-rail { min-width: 0; }
-.access-docs-rail-sticky { position: sticky; top: 16px; display: grid; align-content: start; gap: 2px; border-left: 1px solid var(--gp-line); padding: 4px 0 0 18px; }
-.access-docs-rail-title { margin-bottom: 8px; color: var(--gp-ink); font-size: 12px; font-weight: 700; }
-.access-docs-rail-sticky > a { border-left: 2px solid transparent; margin-left: -20px; padding: 5px 0 5px 18px; color: var(--gp-steel); font-size: 12px; }
-.access-docs-rail-sticky > a:hover { border-left-color: var(--gp-green-dark); color: var(--gp-ink); }
-.access-docs-rail-endpoint { display: grid; gap: 3px; margin-top: 18px; border-top: 1px solid var(--gp-line); padding-top: 14px; }
+.access-docs-rail-sticky { position: sticky; top: 4px; display: grid; align-content: start; gap: 15px; border-left: 1px solid var(--gp-line); padding: 6px 0 0 18px; }
+.access-docs-rail-title { color: var(--gp-ink); font-size: 12px; font-weight: 700; }
+.access-docs-rail-group { display: grid; gap: 6px; }
+.access-docs-rail-parent { color: var(--gp-ink); font-size: 12px; font-weight: 650; line-height: 1.35; }
+.access-docs-rail-parent:hover { color: var(--gp-green-dark); }
+.access-docs-rail-children { display: grid; gap: 2px; margin-left: 1px; border-left: 1px solid var(--gp-line); }
+.access-docs-rail-children a { padding: 3px 0 3px 10px; color: var(--gp-steel); font-size: 11px; line-height: 1.35; }
+.access-docs-rail-children a:hover { color: var(--gp-green-dark); }
+.access-docs-rail-endpoint { display: grid; gap: 3px; border-top: 1px solid var(--gp-line); padding-top: 14px; }
 .access-docs-rail-endpoint span { color: var(--gp-steel); font-size: 10px; }
 .access-docs-rail-endpoint strong { color: var(--gp-ink); font-size: 12px; }
 .access-docs-rail-endpoint code { overflow-wrap: anywhere; color: var(--gp-steel); font-size: 10px; }
 
+@media (max-width: 1320px) {
+  .access-docs-layout { display: block; }
+  .access-docs-rail { display: none; }
+}
+
 @media (max-width: 1080px) {
-  .access-docs-layout { grid-template-columns: minmax(0, 1fr) 180px; gap: 28px; }
+  .access-doc-platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
-  .page-fill.access-docs-page { height: auto; min-height: 100%; overflow: visible; }
-  .access-docs-layout { display: block; overflow: visible; padding: 0 0 24px; }
-  .access-docs-article { padding-top: 0; }
-  .access-docs-rail { display: none; }
-  .access-docs-header { padding-top: 4px; }
   .access-endpoint-bar { align-items: flex-start; flex-wrap: wrap; }
   .access-endpoint-bar code { flex: 1 1 100%; order: 3; }
-  .access-endpoint-port { margin-left: auto; }
-  .access-doc-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .access-doc-command-pair { grid-template-columns: 1fr; }
 }
 
-@media (max-width: 520px) {
-  .access-doc-section { padding: 28px 0 32px; }
-  .access-doc-section-heading { display: grid; gap: 8px; }
+@media (max-width: 560px) {
+  .access-doc-section { gap: 16px; padding: 30px 0 34px; }
   .access-doc-section-heading h2 { font-size: 19px; }
+  .access-doc-platform-grid { grid-template-columns: 1fr; }
+  .access-doc-platform-card { min-height: 0; }
   .access-doc-codebar { align-items: flex-start; flex-direction: column; }
   .access-doc-codebar .row-actions { width: 100%; }
-  .access-doc-codebar .row-actions .button { flex: 1; }
-  .access-doc-action-row { align-items: flex-start; flex-direction: column; }
+  .access-doc-codebar .row-actions .access-doc-code-action { flex: 1; }
 }
 
 @media (max-width: 1180px) {
