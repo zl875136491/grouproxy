@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CirclePlus, Copy, Download, Play, WrapText } from "lucide-react";
+import { CirclePlus, Copy, Download, Filter, Play, WrapText } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -15,19 +15,28 @@ import {
   publishSubscriptionVersion,
   refreshSubscription,
   uploadSubscription,
+  type SubscriptionSource,
   type SubscriptionVersion,
   type Task,
 } from "../../lib/api";
+import { writeClipboard } from "../../lib/clipboard";
 import { usePreferences } from "../../lib/preferences";
 import { shortHash } from "../../lib/utils";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
+import { FilterSelect } from "../../components/list-filters";
 import { PageHeader } from "../../components/page-header";
 import { SessionGate, useManagementSession } from "../../components/session-gate";
-import { useToast } from "../../components/toast";
+import { toastErrorMessage, useToast } from "../../components/toast";
 import { Button, ConfirmDialog, DetailDialog, Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 type FormMode = "add" | null;
 type SourceType = "http" | "single_node" | "upload";
+type SourceStateFilter = "" | "current" | "failed" | "pending";
+
+function sourceRefreshState(source: SubscriptionSource): Exclude<SourceStateFilter, ""> {
+  if (source.last_refresh_error) return "failed";
+  return source.last_refresh_at ? "current" : "pending";
+}
 
 function isFinishedRefreshTask(task: Task) {
   return ["succeeded", "failed", "cancelled", "dead_letter"].includes(task.status);
@@ -51,6 +60,8 @@ export default function SubscriptionsPage() {
   const queryClient = useQueryClient();
   const [formMode, setFormMode] = useState<FormMode>(null);
   const [sourceType, setSourceType] = useState<SourceType>("http");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<"" | SourceType>("");
+  const [sourceStateFilter, setSourceStateFilter] = useState<SourceStateFilter>("");
   const [sourceName, setSourceName] = useState("");
   const [sourceURL, setSourceURL] = useState("");
   const [fetchInterval, setFetchInterval] = useState("21600");
@@ -152,6 +163,13 @@ export default function SubscriptionsPage() {
   const currentVersion = currentVersions.find((item) => item.id === selectedVersionId)
     || currentVersions[0]
     || null;
+  const filteredSourceItems = useMemo(
+    () => sourceItems.filter((source) => (
+      (!sourceTypeFilter || source.source_type === sourceTypeFilter)
+      && (!sourceStateFilter || sourceRefreshState(source) === sourceStateFilter)
+    )),
+    [sourceItems, sourceStateFilter, sourceTypeFilter],
+  );
 
   useEffect(() => {
     if (!selectedSourceId && sourceItems[0]) setSelectedSourceId(sourceItems[0].id);
@@ -233,10 +251,33 @@ export default function SubscriptionsPage() {
       </DetailDialog>
       <div className="subscription-scroll-area">
       <section className="subscription-layout">
-        <Panel className="list-panel subscription-source-panel">
-          <div className="panel-heading"><div><span className="panel-kicker">{t("UPSTREAMS")}</span><h2>{t("Sources")}</h2></div></div>
-          {sourceItems.length ? <div className="subscription-source-list table-scroll">{sourceItems.map((source) => <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}><button onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}><span><strong>{source.name}</strong><small>{source.source_type === "http" ? source.url_hint : t(source.source_type === "single_node" ? "Single VLESS or VMess node" : "Imported file")} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span><StatusBadge status={source.last_refresh_error ? "failed" : source.last_refresh_at ? "current" : "pending"} /></button>{source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}</div>)}</div> : <EmptyState title="No subscription sources" detail="Add a subscription site or a single node." />}
-        </Panel>
+        <div className="subscription-source-column">
+          <Panel className="subscription-filter-panel">
+            <div className="subscription-filter-heading">
+              <div className="toolbar-title"><Filter size={16} /><span>{t("Filter sources")}</span></div>
+              <span className="toolbar-note">{t("{count} shown", { count: formatNumber(filteredSourceItems.length) })}</span>
+            </div>
+            <div className="subscription-filters">
+              <FilterSelect label="Source type" value={sourceTypeFilter} setValue={(value) => setSourceTypeFilter(value as "" | SourceType)} options={[{ value: "", label: "All types" }, { value: "http", label: "Subscription site connection" }, { value: "single_node", label: "Single node" }, { value: "upload", label: "Subscription file" }]} />
+              <FilterSelect label="State" value={sourceStateFilter} setValue={(value) => setSourceStateFilter(value as SourceStateFilter)} options={[{ value: "", label: "All states" }, { value: "current", label: "current" }, { value: "failed", label: "failed" }, { value: "pending", label: "pending" }]} />
+            </div>
+          </Panel>
+          <Panel className="list-panel subscription-source-panel">
+            <div className="subscription-source-heading"><div><span className="panel-kicker">{t("UPSTREAMS")}</span><h2>{t("Sources")}</h2></div></div>
+            {sourceItems.length ? filteredSourceItems.length ? <div className="subscription-source-list">{filteredSourceItems.map((source) => {
+              const state = sourceRefreshState(source);
+              return <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}>
+                <button type="button" className="subscription-source-select" onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}>
+                  <span><strong>{source.name}</strong><small>{source.source_type === "http" ? source.url_hint : t(source.source_type === "single_node" ? "Single VLESS or VMess node" : "Imported file")} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span>
+                </button>
+                <div className="subscription-source-actions">
+                  {source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}
+                  <StatusBadge status={state} />
+                </div>
+              </div>;
+            })}</div> : <EmptyState title="No matching sources" detail="Change the source type or state filter." /> : <EmptyState title="No subscription sources" detail="Add a subscription site or a single node." />}
+          </Panel>
+        </div>
         <Panel className="subscription-detail-panel">
           {currentVersion ? <VersionDetail version={currentVersion} sourceName={currentSource?.name || ""} /> : <EmptyState title="Select a source version" detail="Parsed versions are available after a refresh or file import." />}
         </Panel>
@@ -256,24 +297,6 @@ function VersionDetail({
   sourceName: string;
 }) {
   const { t, formatBytes, formatDate, formatNumber } = usePreferences();
-  const { toast } = useToast();
-  const parseErrorKey = useRef("");
-
-  useEffect(() => {
-    if (version.parse_ok) {
-      parseErrorKey.current = "";
-      return;
-    }
-    const detail = version.parse_error || "Parsing did not produce usable outbounds.";
-    const key = `${version.id}:${detail}`;
-    if (parseErrorKey.current === key) return;
-    parseErrorKey.current = key;
-    toast({
-      title: t("Version cannot be published"),
-      description: t(detail),
-      variant: "destructive",
-    });
-  }, [t, toast, version.id, version.parse_error, version.parse_ok]);
 
   return (
     <div className="subscription-detail subscription-detail-split">
@@ -299,10 +322,10 @@ function InlineVersionDocument({ version }: { version: SubscriptionVersion }) {
   async function copyContent() {
     if (!content.data?.content) return;
     try {
-      await navigator.clipboard.writeText(content.data.content);
+      await writeClipboard(content.data.content);
       toast({ title: t("Copied"), variant: "success" });
     } catch (error) {
-      toast({ title: t("Operation failed"), description: error instanceof Error ? error.message : t("Unable to copy source content."), variant: "destructive" });
+      toast({ title: t("Operation failed"), description: t(toastErrorMessage(error, "Unable to copy source content.")), variant: "destructive" });
     }
   }
 

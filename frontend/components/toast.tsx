@@ -3,6 +3,7 @@
 import * as ToastPrimitive from "@radix-ui/react-toast";
 import { CircleCheck, CircleX, Info, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type PropsWithChildren, type ReactNode } from "react";
+import { usePreferences } from "../lib/preferences";
 import { cn } from "../lib/utils";
 
 type ToastVariant = "default" | "success" | "destructive";
@@ -41,6 +42,7 @@ export function notifyToast(input: ToastInput) {
 }
 
 export function ToastProvider({ children }: PropsWithChildren) {
+  const { t } = usePreferences();
   const [items, setItems] = useState<ToastItem[]>([]);
 
   const toast = useCallback((input: ToastInput) => {
@@ -79,7 +81,7 @@ export function ToastProvider({ children }: PropsWithChildren) {
               <ToastPrimitive.Title>{item.title}</ToastPrimitive.Title>
               {item.description ? <ToastPrimitive.Description>{item.description}</ToastPrimitive.Description> : null}
             </div>
-            <ToastPrimitive.Close className="toast-close" aria-label="Dismiss notification">
+            <ToastPrimitive.Close className="toast-close" aria-label={t("Dismiss notification")}>
               <X size={16} />
             </ToastPrimitive.Close>
           </ToastPrimitive.Root>

@@ -7,7 +7,8 @@
     "build": "next build && node scripts/prepare-standalone.mjs",
     "start": "HOSTNAME=${GROUPROXY_FRONTEND_HOST:-0.0.0.0} PORT=${GROUPROXY_FRONTEND_PORT:-80} node ${NEXT_DIST_DIR:-.next}/standalone/server.js",
     "typecheck": "tsc --noEmit",
-    "test:i18n": "node scripts/test-i18n-formatters.mjs",
+    "test:i18n": "node scripts/test-i18n-formatters.mjs && node scripts/test-i18n-coverage.mjs",
+    "test:i18n:coverage": "node scripts/test-i18n-coverage.mjs",
     "test:i18n:browser": "node scripts/test-i18n-browser.mjs",
     "test:session-role": "node scripts/test-session-role.mjs"
   },

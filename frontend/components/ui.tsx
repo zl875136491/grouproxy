@@ -143,7 +143,7 @@ export function StatusBadge({ status, className }: { status: string; className?:
           : ["resolved"].includes(normalized)
             ? "success"
             : "neutral";
-  return <span className={cn("status-badge", `status-${tone}`, className)}>{t(status.replaceAll("_", " "))}</span>;
+  return <span className={cn("status-badge", `status-${tone}`, className)}>{t(status)}</span>;
 }
 
 export function Panel({ children, className }: PropsWithChildren<{ className?: string }>) {

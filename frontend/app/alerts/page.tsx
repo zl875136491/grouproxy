@@ -128,11 +128,12 @@ function AlertRow({
   siteName: string;
   t: (key: string, values?: Record<string, string | number>) => string;
 }) {
+  const detail = translateAlertDetail(alert.detail, t);
   return (
     <tr>
       <td>
         <strong>{t(alert.title)}</strong>
-        <span className="cell-secondary">{t(alert.detail) || "-"}</span>
+        <span className="cell-secondary">{detail || "-"}</span>
       </td>
       <td><StatusBadge status={alert.severity} /></td>
       <td><StatusBadge status={alert.status} /></td>
@@ -142,4 +143,21 @@ function AlertRow({
       <td>{formatDate(alert.last_seen_at)}</td>
     </tr>
   );
+}
+
+function translateAlertDetail(detail: string, t: (key: string, values?: Record<string, string | number>) => string) {
+  const direct = t(detail);
+  if (direct !== detail) return direct;
+
+  const denySpike = detail.match(/^(.*): (\d+) denies in the last (\d+)s \(baseline (\d+)\)$/);
+  if (denySpike) {
+    const [, site, recent, window, baseline] = denySpike;
+    return t("{site}: {recent} denies in the last {window}s (baseline {baseline})", { site, recent, window, baseline });
+  }
+
+  const separator = detail.lastIndexOf(": ");
+  if (separator < 0) return detail;
+  const reason = detail.slice(separator + 2);
+  const translatedReason = t(reason);
+  return translatedReason === reason ? detail : `${detail.slice(0, separator + 2)}${translatedReason}`;
 }

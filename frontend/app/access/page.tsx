@@ -13,8 +13,10 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { getAccessConfig, getLinuxSetupScript, getProxyPAC, getWindowsSetupScript } from "../../lib/api";
+import { writeClipboard } from "../../lib/clipboard";
 import { usePreferences } from "../../lib/preferences";
 import { ErrorState, LoadingState } from "../../components/data-state";
+import { PageHeader } from "../../components/page-header";
 import { notifyToast, toastErrorMessage } from "../../components/toast";
 import { Button, StatusBadge } from "../../components/ui";
 
@@ -69,23 +71,6 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-async function writeClipboard(value: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("clipboard_unavailable");
-}
-
 export default function AccessPage() {
   const { t, formatNumber } = usePreferences();
   const [copiedId, setCopiedId] = useState("");
@@ -130,16 +115,21 @@ export default function AccessPage() {
     <div className="page-fill access-docs-page">
       <div className="access-docs-layout">
         <main className="access-docs-article">
-          <header className="access-docs-header">
-            <div className="access-docs-title-row"><div className="access-docs-mark"><BookOpen size={18} /></div><div><span className="access-doc-eyebrow">{t("ACCESS GUIDE")}</span><h1>{t("Proxy access")}</h1></div></div>
-            <p>{t("Configure the Grouproxy HTTP CONNECT endpoint on a workstation, verify the route, and return to a direct connection when finished.")}</p>
+          <section className="access-docs-header">
+            <PageHeader
+              className="access-docs-page-header"
+              eyebrow="ACCESS GUIDE"
+              title="Proxy access"
+              description="Configure the Grouproxy HTTP CONNECT endpoint on a workstation, verify the route, and return to a direct connection when finished."
+              icon={<BookOpen size={18} />}
+            />
             <div className="access-endpoint-bar"><div className="access-endpoint-status"><StatusBadge status="enabled" /><span>{t(config.environment === "test" ? "Test environment" : "Production environment")}</span></div><code>{endpoint}</code><span className="access-endpoint-port">{t("Port")} {formatNumber(config.port, { useGrouping: false })}</span></div>
-          </header>
+          </section>
 
           <section className="access-doc-section" aria-labelledby="access-overview">
             <SectionHeading id="access-overview" eyebrow="OVERVIEW" title="Proxy endpoint" description="The proxy service is exposed directly on port 1080. Dashboard access is separate and does not require an NGINX forwarding layer." t={t} />
             <div className="access-doc-callout"><Link2 size={17} /><div><strong>{t("HTTP CONNECT")}</strong><span>{t("Destination HTTPS remains end-to-end inside the HTTP CONNECT tunnel. No proxy credentials or TLS interception are used.")}</span></div></div>
-            <dl className="access-doc-facts"><div><dt>{t("Environment")}</dt><dd>{t(config.environment === "test" ? "Test environment" : "Production environment")}</dd></div><div><dt>FQDN</dt><dd className="mono">{config.fqdn}</dd></div><div><dt>{t("Port")}</dt><dd>{formatNumber(config.port, { useGrouping: false })}</dd></div><div><dt>{t("Protocol")}</dt><dd>HTTP CONNECT</dd></div></dl>
+            <dl className="access-doc-facts"><div><dt>{t("Environment")}</dt><dd>{t(config.environment === "test" ? "Test environment" : "Production environment")}</dd></div><div><dt>{t("Host name")}</dt><dd className="mono">{config.fqdn}</dd></div><div><dt>{t("Port")}</dt><dd>{formatNumber(config.port, { useGrouping: false })}</dd></div><div><dt>{t("Protocol")}</dt><dd>{t("HTTP CONNECT")}</dd></div></dl>
           </section>
 
           <section className="access-doc-section" aria-labelledby="access-quick-start">
@@ -151,7 +141,7 @@ export default function AccessPage() {
           <section className="access-doc-section" aria-labelledby="access-windows">
             <SectionHeading id="access-windows" eyebrow="WINDOWS" title="Windows one-click setup" description="The pre-generated PowerShell asset configures the current Windows user and keeps a backup for a reversible disable operation." t={t}><span className="access-doc-download-note"><Download size={14} />{t("Download ready")}</span></SectionHeading>
             <CodeSnippet id="windows" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsScript.data} copiedId={copiedId} onCopy={() => copySnippet("windows", windowsScript.data, t("Windows one-click setup"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
-            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script, then open PowerShell in its download folder.")}</p><p><strong>2.</strong> <code>Set-ExecutionPolicy -Scope Process Bypass</code>, then run <code>.\grouproxy-windows-setup.ps1</code>.</p><p><strong>3.</strong> {t("Use -SkipDirectTest to skip the optional direct-network checks, or -Disable to restore the previous Windows proxy settings.")}</p></div>
+            <div className="access-doc-instructions"><p><strong>1.</strong> {t("Download the script, then open PowerShell in its download folder.")}</p><p><strong>2.</strong> <code>Set-ExecutionPolicy -Scope Process Bypass</code>{t(", then run")} <code>.\grouproxy-windows-setup.ps1</code>.</p><p><strong>3.</strong> {t("Use -SkipDirectTest to skip the optional direct-network checks, or -Disable to restore the previous Windows proxy settings.")}</p></div>
           </section>
 
           <section className="access-doc-section" aria-labelledby="access-macos">

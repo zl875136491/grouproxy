@@ -48,9 +48,9 @@
   align-items: center;
   gap: 11px;
   padding: 14px;
-  color: var(--gp-on-dark);
-  border-color: var(--gp-teal);
-  background: var(--gp-teal-deep);
+  color: var(--gp-ink);
+  border-color: var(--gp-success-line);
+  background: var(--gp-green-soft);
 }
 
 .controlIcon {
@@ -95,7 +95,11 @@
 }
 
 .controlNode .nodeDetail {
-  color: var(--gp-on-dark-muted);
+  color: var(--gp-steel);
+}
+
+.controlNode .nodeEyebrow {
+  color: var(--gp-green-dark);
 }
 
 .siteNode {
@@ -186,9 +190,9 @@
 }
 
 .controlStatus {
-  border-color: rgba(255, 255, 255, 0.22);
-  color: var(--gp-green);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--gp-success-line);
+  color: var(--gp-green-dark);
+  background: var(--gp-canvas);
 }
 
 .handle {
