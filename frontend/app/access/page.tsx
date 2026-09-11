@@ -5,6 +5,7 @@ import {
   BookOpen,
   Check,
   Clipboard,
+  Clock3,
   Download,
   ExternalLink,
   FileCode2,
@@ -14,7 +15,7 @@ import {
   Terminal,
 } from "lucide-react";
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { getAccessConfig, getLinuxSetupScript, getWindowsSetupScript } from "../../lib/api";
 import { writeClipboard } from "../../lib/clipboard";
 import { usePreferences } from "../../lib/preferences";
@@ -98,12 +99,19 @@ function PlatformCard({ id, icon, title, description, children }: { id: string; 
   );
 }
 
-function MacOSShortcutLinks({ urls, t }: { urls: { test: string; production: string }; t: (key: string, values?: Record<string, string | number>) => string }) {
+function MacOSShortcutLink({ href, title, unavailable = false, t }: { href?: string; title: string; unavailable?: boolean; t: (key: string, values?: Record<string, string | number>) => string }) {
+  const content = <><img src="/apple-shortcuts-icon.jpg" alt="" width={44} height={44} /><span className="access-doc-shortcut-copy"><strong>{title}</strong><span>{t("macOS shortcut")}</span></span>{unavailable ? <Clock3 size={16} aria-hidden="true" /> : <ExternalLink size={16} aria-hidden="true" />}</>;
+  if (unavailable) {
+    return (
+      <button className="access-doc-shortcut-link" type="button" onClick={() => notifyToast({ title: t("Feature in development") })} aria-label={`${title} - ${t("Feature in development")}`}>
+        {content}
+      </button>
+    );
+  }
   return (
-    <div className="access-doc-shortcut-links">
-      <a href={urls.test} target="_blank" rel="noreferrer"><span>{t("Test environment")}</span><ExternalLink size={14} aria-hidden="true" /></a>
-      <a href={urls.production} target="_blank" rel="noreferrer"><span>{t("Production environment")}</span><ExternalLink size={14} aria-hidden="true" /></a>
-    </div>
+    <a className="access-doc-shortcut-link" href={href} target="_blank" rel="noreferrer" aria-label={`${title} - ${t("macOS shortcut")}`}>
+      {content}
+    </a>
   );
 }
 
@@ -122,20 +130,10 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-// These reserved domains deliberately do not resolve. Replace them after the
-// macOS workflows are published for each environment.
 const macOSShortcutUrls = {
   quickAccess: {
-    test: "https://shortcuts.example.invalid/grouproxy/test/quick-access",
-    production: "https://shortcuts.example.invalid/grouproxy/production/quick-access",
-  },
-  maintenance: {
-    test: "https://shortcuts.example.invalid/grouproxy/test/maintenance",
-    production: "https://shortcuts.example.invalid/grouproxy/production/maintenance",
-  },
-  allowlist: {
-    test: "https://shortcuts.example.invalid/grouproxy/test/allowlist",
-    production: "https://shortcuts.example.invalid/grouproxy/production/allowlist",
+    test: "https://www.icloud.com/shortcuts/d0b8a9e0e4a745de945cbc56d94424a8",
+    production: "https://www.icloud.com/shortcuts/569e37fe985148449327b3e1e1c1f68e",
   },
 } as const;
 
@@ -154,6 +152,15 @@ export default function AccessPage() {
   const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
   const windowsAllowlistCommand = config ? `$ProxyUrl = \"${endpoint}\"\n$SourceAddress = Invoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl\n$SourceAddress.Trim()` : "";
   const linuxAllowlistCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
+  const accessReady = Boolean(config && linuxScript.data && windowsScript.data);
+
+  useEffect(() => {
+    if (!accessReady) return;
+    const anchorId = decodeURIComponent(window.location.hash.slice(1));
+    if (!anchorId) return;
+    const frame = window.requestAnimationFrame(() => document.getElementById(anchorId)?.scrollIntoView());
+    return () => window.cancelAnimationFrame(frame);
+  }, [accessReady]);
 
   const copyContent = async (id: string, content: string, label: string) => {
     try {
@@ -202,8 +209,8 @@ export default function AccessPage() {
                 <CodeSnippet id="windows-quick" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-quick", windowsQuickCommand, t("Windows"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} />
                 <p className="access-doc-card-note">{t("Run without options to enable the proxy. Run with -Disable to turn it off.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders until the macOS workflows are published.")}>
-                <MacOSShortcutLinks urls={macOSShortcutUrls.quickAccess} t={t} />
+              <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Use the shortcut prepared for the selected deployment environment.")}>
+                <MacOSShortcutLink href={macOSShortcutUrls.quickAccess[config.environment]} title={t("Enable proxy script")} t={t} />
               </PlatformCard>
             </div>
           </section>
@@ -217,8 +224,8 @@ export default function AccessPage() {
               <PlatformCard id="access-testing-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Check the listener and return the address seen through the proxy.")}>
                 <CodeSnippet id="windows-validation" filename="grouproxy-check.ps1" language="powershell" content={windowsValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-validation", windowsValidationCommand, t("Windows"))} />
               </PlatformCard>
-              <PlatformCard id="access-testing-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
-                <MacOSShortcutLinks urls={macOSShortcutUrls.maintenance} t={t} />
+              <PlatformCard id="access-testing-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("This macOS shortcut is in development.")}>
+                <MacOSShortcutLink unavailable title={t("Test the actual proxy route")} t={t} />
               </PlatformCard>
             </div>
           </section>
@@ -234,8 +241,8 @@ export default function AccessPage() {
                 <CodeSnippet id="windows-allowlist" filename="grouproxy-source-address.ps1" language="powershell" content={windowsAllowlistCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-allowlist", windowsAllowlistCommand, t("Windows"))} />
                 <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
               </PlatformCard>
-              <PlatformCard id="access-allowlist-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
-                <MacOSShortcutLinks urls={macOSShortcutUrls.allowlist} t={t} />
+              <PlatformCard id="access-allowlist-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("This macOS shortcut is in development.")}>
+                <MacOSShortcutLink unavailable title={t("Manage source CIDRs")} t={t} />
                 <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
               </PlatformCard>
             </div>

@@ -14,6 +14,8 @@ const screenshotPath = process.env.GROUPROXY_BROWSER_SCREENSHOT;
 const viewport = process.env.GROUPROXY_BROWSER_VIEWPORT || "1440x900";
 const readySelector = process.env.GROUPROXY_BROWSER_READY_SELECTOR || "tbody tr";
 const smokeOnly = process.env.GROUPROXY_BROWSER_SMOKE_ONLY === "1";
+const authSendProbe = process.env.GROUPROXY_BROWSER_AUTH_SEND_PROBE === "1";
+const accessShortcutProbe = process.env.GROUPROXY_BROWSER_ACCESS_SHORTCUT_PROBE === "1";
 const debugBrowser = process.env.GROUPROXY_BROWSER_DEBUG === "1";
 const requestedTheme = process.env.GROUPROXY_BROWSER_THEME;
 
@@ -257,6 +259,10 @@ try {
   }
 
   if (smokeOnly) {
+    await waitFor(
+      () => evaluate("document.styleSheets.length > 0"),
+      "page stylesheet",
+    );
     const visualState = await evaluate(`(() => {
       const target = document.querySelector(${JSON.stringify(readySelector)});
       return {
@@ -271,6 +277,87 @@ try {
     if (requestedTheme === "dark") {
       const unreadableIcons = await assertDarkThemeIconContrast(evaluate);
       assert.deepEqual(unreadableIcons, [], `Dark theme has low-contrast icons: ${JSON.stringify(unreadableIcons)}`);
+    }
+    if (authSendProbe) {
+      assert.equal(browserPath, "/login", "The authentication send probe only supports /login");
+      await waitFor(
+        () => evaluate("document.readyState === 'complete'"),
+        "login page load",
+      );
+      await sleep(300);
+      const probeItcode = `browser-auth-probe-${crypto.randomUUID().replaceAll("-", "")}`;
+      const requestsBeforeProbe = apiRequests.length;
+      await evaluate(`(() => {
+        const tab = [...document.querySelectorAll('.auth-mode-tab')]
+          .find((button) => button.textContent?.includes('光圈验证码'));
+        if (!tab) throw new Error('GQuan authentication tab is missing');
+        tab.click();
+      })()`);
+      await waitFor(
+        () => evaluate("document.querySelector('.verification-send') !== null"),
+        "GQuan verification controls",
+      );
+      await evaluate(`(() => {
+        const input = document.querySelector('.login-form input[autocomplete="username"]');
+        if (!(input instanceof HTMLInputElement)) throw new Error('IT code input is missing');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(probeItcode)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      await waitFor(
+        () => evaluate("document.querySelector('.verification-send')?.disabled === false"),
+        "enabled verification send button",
+      );
+      await evaluate("document.querySelector('.verification-send').click()");
+      await waitFor(
+        () => apiRequests.slice(requestsBeforeProbe).some((url) => url.includes("/api/v1/auth/verification-codes")),
+        "verification-code request",
+      );
+      await waitFor(
+        () => evaluate("document.body.innerText.includes('该 IT Code 尚未注册有效账号。')"),
+        "verification error feedback",
+      );
+      assert.deepEqual(browserErrors, [], `Login page threw browser errors: ${browserErrors.join(" | ")}`);
+      console.log("GQuan send control issued a verification request and rendered its response.");
+    }
+    if (accessShortcutProbe) {
+      assert.equal(browserPath, "/access", "The access shortcut probe only supports /access");
+      await waitFor(
+        () => evaluate("document.readyState === 'complete'"),
+        "access page load",
+      );
+      await sleep(300);
+      const shortcuts = await evaluate(`(() => [...document.querySelectorAll('.access-doc-platform-card')]
+        .map((card) => {
+          const action = card.querySelector('.access-doc-shortcut-link');
+          return {
+            id: card.querySelector('h3')?.id || '',
+            tagName: action?.tagName || '',
+            href: action instanceof HTMLAnchorElement ? action.href : '',
+          };
+        })
+        .filter((shortcut) => shortcut.id.endsWith('-macos')))()`);
+      assert.deepEqual(shortcuts, [
+        {
+          id: "access-quick-macos",
+          tagName: "A",
+          href: "https://www.icloud.com/shortcuts/d0b8a9e0e4a745de945cbc56d94424a8",
+        },
+        { id: "access-testing-macos", tagName: "BUTTON", href: "" },
+        { id: "access-allowlist-macos", tagName: "BUTTON", href: "" },
+      ]);
+      await evaluate(`(() => {
+        const action = document.getElementById('access-testing-macos')
+          ?.closest('.access-doc-platform-card')
+          ?.querySelector('.access-doc-shortcut-link');
+        if (!(action instanceof HTMLButtonElement)) throw new Error('Unavailable macOS shortcut button is missing');
+        action.click();
+      })()`);
+      await waitFor(
+        () => evaluate("document.body.innerText.includes('功能开发中')"),
+        "in-development shortcut toast",
+      );
+      assert.deepEqual(browserErrors, [], `Access page threw browser errors: ${browserErrors.join(" | ")}`);
+      console.log("Access shortcuts use the configured iCloud URL and in-development toast.");
     }
     console.log(`Rendered ${browserPath} with ${visualState.stylesheets} stylesheet(s).`);
   } else {

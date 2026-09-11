@@ -979,14 +979,14 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .access-doc-section-heading > div { min-width: 0; }
 .access-doc-section-heading h2 { margin: 0; color: var(--gp-ink); font-size: 21px; line-height: 1.25; font-weight: 650; }
 .access-doc-section-heading p { max-width: 680px; margin: 7px 0 0; color: var(--gp-steel); font-size: 13px; line-height: 1.55; }
-.access-doc-platform-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 16px; }
-.access-doc-platform-card { display: flex; min-width: 0; min-height: 238px; flex-direction: column; overflow: hidden; border: 1px solid var(--gp-line); border-radius: 8px; background: var(--gp-canvas); box-shadow: var(--gp-shadow); }
+.access-doc-platform-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 16px; }
+.access-doc-platform-card { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--gp-line); border-radius: 8px; background: var(--gp-canvas); box-shadow: var(--gp-shadow); }
 .access-doc-platform-card > header { display: flex; min-width: 0; align-items: flex-start; gap: 10px; padding: 16px 16px 13px; }
 .access-doc-platform-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: var(--gp-teal-deep); background: var(--gp-green); }
 .access-doc-platform-card header > div { min-width: 0; }
 .access-doc-platform-card h3 { margin: 2px 0 0; color: var(--gp-ink); font-size: 14px; line-height: 1.25; font-weight: 650; scroll-margin-top: 18px; }
 .access-doc-platform-card header p { margin: 4px 0 0; color: var(--gp-steel); font-size: 12px; line-height: 1.5; }
-.access-doc-card-body { display: grid; min-width: 0; align-content: start; gap: 10px; margin-top: auto; padding: 0 16px 16px; }
+.access-doc-card-body { display: grid; min-width: 0; align-content: start; gap: 10px; margin-top: 0; padding: 0 16px 16px; }
 .access-doc-codeblock { min-width: 0; overflow: hidden; border: 1px solid var(--gp-code-line); border-radius: 6px; background: var(--gp-code-surface); }
 .access-doc-codebar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--gp-code-line); padding: 7px 8px; background: var(--gp-code-surface-strong); }
 .access-doc-code-meta { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 6px; overflow: hidden; color: var(--gp-code-muted); }
@@ -1004,12 +1004,15 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .access-doc-token-option { color: var(--gp-code-number); }
 .access-doc-token-type { color: var(--gp-code-bool); }
 .access-doc-card-note { margin: 0; color: var(--gp-steel); font-size: 11px; line-height: 1.5; }
-.access-doc-shortcut-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.access-doc-shortcut-links a, .access-doc-card-link { display: inline-flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--gp-line-strong); border-radius: 6px; padding: 9px 10px; color: var(--gp-ink); background: var(--gp-surface); font-size: 12px; font-weight: 600; }
-.access-doc-shortcut-links a:hover, .access-doc-card-link:hover { border-color: var(--gp-green-dark); color: var(--gp-green-dark); background: var(--gp-green-soft); }
-.access-doc-shortcut-links a > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.access-doc-shortcut-links svg, .access-doc-card-link svg { flex: 0 0 auto; color: var(--gp-green-dark); }
-.access-doc-card-link { justify-content: flex-start; }
+.access-doc-shortcut-link, .access-doc-card-link { min-width: 0; border: 1px solid var(--gp-line-strong); border-radius: 7px; color: var(--gp-ink); background: var(--gp-surface); font-size: 12px; font-weight: 600; }
+.access-doc-shortcut-link { display: grid; width: 100%; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; cursor: pointer; appearance: none; font: inherit; text-align: left; }
+.access-doc-shortcut-link:hover, .access-doc-card-link:hover { border-color: var(--gp-green-dark); color: var(--gp-green-dark); background: var(--gp-green-soft); }
+.access-doc-shortcut-link img { display: block; width: 44px; height: 44px; border-radius: 10px; }
+.access-doc-shortcut-copy { display: grid; min-width: 0; gap: 3px; }
+.access-doc-shortcut-copy strong { overflow: hidden; color: inherit; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.access-doc-shortcut-copy span { color: var(--gp-steel); font-size: 11px; font-weight: 500; }
+.access-doc-shortcut-link > svg, .access-doc-card-link svg { flex: 0 0 auto; color: var(--gp-green-dark); }
+.access-doc-card-link { display: inline-flex; align-items: center; justify-content: flex-start; gap: 8px; padding: 9px 10px; }
 .access-docs-rail { min-width: 0; }
 .access-docs-rail-sticky { position: sticky; top: 4px; display: grid; align-content: start; gap: 15px; border-left: 1px solid var(--gp-line); padding: 6px 0 0 18px; }
 .access-docs-rail-title { color: var(--gp-ink); font-size: 12px; font-weight: 700; }
@@ -1029,10 +1032,6 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
   .access-docs-rail { display: none; }
 }
 
-@media (max-width: 1080px) {
-  .access-doc-platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
 @media (max-width: 760px) {
   .access-endpoint-bar { align-items: flex-start; flex-wrap: wrap; }
   .access-endpoint-bar code { flex: 1 1 100%; order: 3; }
@@ -1041,8 +1040,8 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 @media (max-width: 560px) {
   .access-doc-section { gap: 16px; padding: 30px 0 34px; }
   .access-doc-section-heading h2 { font-size: 19px; }
-  .access-doc-platform-grid { grid-template-columns: 1fr; }
-  .access-doc-platform-card { min-height: 0; }
+  .access-doc-shortcut-link { grid-template-columns: 40px minmax(0, 1fr) auto; gap: 10px; padding: 10px; }
+  .access-doc-shortcut-link img { width: 40px; height: 40px; }
   .access-doc-codebar { align-items: flex-start; flex-direction: column; }
   .access-doc-codebar .row-actions { width: 100%; }
   .access-doc-codebar .row-actions .access-doc-code-action { flex: 1; }
