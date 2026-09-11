@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     gquan_test_code: SecretStr | None = None
     gquan_request_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
     seed_default_sites: bool = True
+    # CORS configuration for browser access. Production same-origin deploys
+    # should leave this empty; development can allow specific origins.
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
 
 @lru_cache

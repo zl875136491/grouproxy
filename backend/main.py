@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import socket
@@ -25,6 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
 from pymongo.errors import DuplicateKeyError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import PROXY_LISTEN_PORT, Settings, get_settings
 from app.db import Database
@@ -176,6 +178,180 @@ from app.services.tasks import (
     fail_task,
     reclaim_expired_tasks,
 )
+
+
+# Configure logging with sensitive-field redaction
+class SensitiveFieldFilter(logging.Filter):
+    """Redact sensitive fields from log messages using the same logic as audit logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Redact message string if it contains potential sensitive patterns
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            # Replace common patterns for secrets in logs
+            msg = record.msg
+            # Redact Bearer tokens
+            msg = re.sub(r'Bearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]', msg)
+            # Redact password= patterns
+            msg = re.sub(r'password["\']?\s*[:=]\s*["\']?[^"\'}\s,]+', 'password=[REDACTED]', msg, flags=re.IGNORECASE)
+            # Redact token= patterns
+            msg = re.sub(r'token["\']?\s*[:=]\s*["\']?[^"\'}\s,]+', 'token=[REDACTED]', msg, flags=re.IGNORECASE)
+            # Redact secret= patterns
+            msg = re.sub(r'secret["\']?\s*[:=]\s*["\']?[^"\'}\s,]+', 'secret=[REDACTED]', msg, flags=re.IGNORECASE)
+            record.msg = msg
+        
+        # Redact args if they contain sensitive data structures
+        if hasattr(record, 'args') and record.args:
+            try:
+                record.args = tuple(
+                    redact(arg) if isinstance(arg, (dict, list)) else arg
+                    for arg in record.args
+                )
+            except Exception:
+                # If redaction fails, pass through to avoid breaking logging
+                pass
+        return True
+
+
+# Install log filter on root logger and uvicorn loggers
+_log_filter = SensitiveFieldFilter()
+logging.getLogger().addFilter(_log_filter)
+logging.getLogger("uvicorn").addFilter(_log_filter)
+logging.getLogger("uvicorn.access").addFilter(_log_filter)
+logging.getLogger("uvicorn.error").addFilter(_log_filter)
+
+
+# Simple in-memory rate limiter
+class RateLimiter:
+    """In-memory rate limiter using sliding window per key (IP/user/node).
+    
+    Designed to be lightweight and avoid external dependencies. For production
+    with multiple backend instances, consider Redis-backed rate limiting.
+    """
+
+    def __init__(self):
+        self._windows: dict[str, list[float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def check_rate_limit(
+        self, key: str, limit: int, window_seconds: int
+    ) -> tuple[bool, int]:
+        """Check if request exceeds rate limit.
+        
+        Returns (allowed, remaining_requests). Cleans up old entries.
+        """
+        async with self._lock:
+            now = datetime.now().timestamp()
+            cutoff = now - window_seconds
+            
+            # Get or create window for this key
+            if key not in self._windows:
+                self._windows[key] = []
+            
+            # Remove expired timestamps
+            self._windows[key] = [ts for ts in self._windows[key] if ts > cutoff]
+            
+            current_count = len(self._windows[key])
+            
+            if current_count >= limit:
+                return False, 0
+            
+            # Record this request
+            self._windows[key].append(now)
+            return True, limit - current_count - 1
+
+    async def cleanup_old_windows(self):
+        """Periodic cleanup of stale rate limit windows."""
+        async with self._lock:
+            now = datetime.now().timestamp()
+            # Remove windows that haven't been accessed in 1 hour
+            stale_cutoff = now - 3600
+            keys_to_remove = [
+                key
+                for key, timestamps in self._windows.items()
+                if not timestamps or max(timestamps) < stale_cutoff
+            ]
+            for key in keys_to_remove:
+                del self._windows[key]
+
+
+_rate_limiter = RateLimiter()
+
+
+# Rate limit middleware
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Apply rate limits to API endpoints based on endpoint type and caller."""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        client_ip = request.client.host if request.client else "unknown"
+        
+        # Define rate limits: (requests, window_seconds, key_type)
+        # key_type: "ip" uses client IP, "user" uses auth token, "none" skips
+        rate_config = None
+        
+        # Auth endpoints (most strict)
+        if path.startswith("/api/v1/auth/"):
+            if path in {"/api/v1/auth/login/password", "/api/v1/auth/register", "/api/v1/auth/gquan"}:
+                rate_config = (10, 60, "ip")  # 10 req/min per IP
+            elif path == "/api/v1/auth/verification-code":
+                rate_config = (5, 60, "ip")  # 5 req/min per IP (already has internal limit)
+            else:
+                rate_config = (30, 60, "ip")  # Other auth: 30 req/min per IP
+        
+        # Management API (moderate)
+        elif path.startswith("/api/v1/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            # State-changing management operations
+            auth_header = request.headers.get("authorization", "")
+            if auth_header:
+                # Use token hash as key for authenticated requests
+                token = auth_header.removeprefix("Bearer ").strip()
+                token_key = hashlib.sha256(token.encode()).hexdigest()[:16]
+                rate_config = (100, 60, f"user:{token_key}")
+            else:
+                rate_config = (20, 60, "ip")  # Unauthenticated: stricter limit
+        
+        # Agent API (higher limits)
+        elif path.startswith("/agent/v1/"):
+            auth_header = request.headers.get("authorization", "")
+            if auth_header:
+                token = auth_header.removeprefix("Bearer ").strip()
+                token_key = hashlib.sha256(token.encode()).hexdigest()[:16]
+                rate_config = (1000, 60, f"agent:{token_key}")
+            else:
+                rate_config = (50, 60, "ip")
+        
+        # Apply rate limit if configured
+        if rate_config:
+            limit, window, key_type = rate_config
+            if key_type == "ip":
+                rate_key = f"ip:{client_ip}"
+            elif key_type == "none":
+                rate_key = None
+            else:
+                rate_key = key_type  # Already includes prefix
+            
+            if rate_key:
+                allowed, remaining = await _rate_limiter.check_rate_limit(
+                    rate_key, limit, window
+                )
+                
+                if not allowed:
+                    logging.warning(
+                        f"Rate limit exceeded: {rate_key} on {path}, "
+                        f"limit={limit}/{window}s"
+                    )
+                    return Response(
+                        content=json.dumps({"detail": "rate_limit_exceeded"}),
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        media_type="application/json",
+                        headers={
+                            "X-RateLimit-Limit": str(limit),
+                            "X-RateLimit-Window": str(window),
+                            "Retry-After": str(window),
+                        }
+                    )
+        
+        return await call_next(request)
 
 DEFAULT_SITES = [
     ("north", "North Region"),
@@ -951,7 +1127,17 @@ async def lifespan(app: FastAPI):
                 pass
             await asyncio.sleep(15)
 
+    async def rate_limit_cleanup() -> None:
+        """Periodic cleanup of stale rate limit windows."""
+        while True:
+            try:
+                await _rate_limiter.cleanup_old_windows()
+            except Exception:
+                pass
+            await asyncio.sleep(300)  # Every 5 minutes
+
     observe_task = asyncio.create_task(observe())
+    cleanup_task = asyncio.create_task(rate_limit_cleanup())
     app.state.subscription_worker = worker
     app.state.backup_worker = backup_worker
     try:
@@ -962,6 +1148,7 @@ async def lifespan(app: FastAPI):
         worker_task.cancel()
         backup_worker_task.cancel()
         observe_task.cancel()
+        cleanup_task.cancel()
         try:
             await worker_task
         except asyncio.CancelledError:
@@ -974,18 +1161,90 @@ async def lifespan(app: FastAPI):
             await observe_task
         except asyncio.CancelledError:
             pass
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
         await database.close()
 
 
 app = FastAPI(title="Grouproxy Control Plane", version="0.4.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# CORS: strict origin allowlist, no wildcard ports. Production same-origin
+# deploys (dashboard and backend both served from the same domain) should set
+# GROUPROXY_CORS_ALLOWED_ORIGINS="" to disable browser CORS entirely.
+_settings_for_cors = get_settings()
+_cors_origins = [
+    origin.strip()
+    for origin in _settings_for_cors.cors_allowed_origins.split(",")
+    if origin.strip()
+]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+# CSRF protection: verify Origin/Referer for state-changing browser requests.
+# Agent endpoints (/agent/v1/*) and health checks are excluded (machine-to-machine).
+class CSRFProtectionMiddleware(BaseHTTPMiddleware):
+    """Protect browser management APIs from CSRF by validating Origin/Referer.
+    
+    Bearer token auth reduces CSRF risk, but we still validate that state-changing
+    requests come from allowed origins. Agent endpoints use machine-to-machine
+    Bearer tokens and are excluded from this check.
+    """
+
+    def __init__(self, app, allowed_origins: list[str]):
+        super().__init__(app)
+        self.allowed_origins = set(allowed_origins)
+
+    async def dispatch(self, request: Request, call_next):
+        # Only check state-changing methods on browser management endpoints
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            path = request.url.path
+            # Exclude agent APIs (machine-to-machine), health checks, and public assets
+            if not (
+                path.startswith("/agent/")
+                or path in {"/healthz", "/readyz"}
+                or path.startswith("/api/v1/access/")  # public workstation assets
+            ):
+                # Check Origin or Referer header
+                origin = request.headers.get("origin", "")
+                referer = request.headers.get("referer", "")
+                
+                # Extract origin from referer if origin header is missing
+                if not origin and referer:
+                    try:
+                        parsed = urlsplit(referer)
+                        origin = f"{parsed.scheme}://{parsed.netloc}"
+                    except Exception:
+                        origin = ""
+                
+                # Verify origin is in allowed list (if CORS is enabled)
+                if self.allowed_origins:
+                    if not origin or origin not in self.allowed_origins:
+                        logging.warning(
+                            f"CSRF check failed: origin={origin!r} not in allowed origins, "
+                            f"path={path}, method={request.method}"
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="csrf_origin_mismatch",
+                        )
+        
+        return await call_next(request)
+
+
+if _cors_origins:
+    app.add_middleware(CSRFProtectionMiddleware, allowed_origins=_cors_origins)
+
+# Rate limiting for all endpoints
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.get("/healthz")
