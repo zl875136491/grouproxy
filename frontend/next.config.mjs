@@ -5,6 +5,10 @@ const backendApiUrl = (process.env.GROUPROXY_BACKEND_API_URL || "http://127.0.0.
 );
 const nextConfig = {
   devIndicators: false,
+  // The shared test console is reached through its DNS name instead of
+  // localhost. Permit that origin so Next's development assets can reload
+  // cleanly when the test frontend is restarted.
+  allowedDevOrigins: ["test-proxy.1oa.com.cn"],
   output: "standalone",
   // Keep the dev compiler output separate from production builds. Running
   // `next build` while the local console is open must not invalidate its
