@@ -11,7 +11,6 @@ import {
   Laptop,
   Monitor,
   Network,
-  ShieldCheck,
   Terminal,
 } from "lucide-react";
 import Link from "next/link";
@@ -134,6 +133,10 @@ const macOSShortcutUrls = {
     test: "https://shortcuts.example.invalid/grouproxy/test/maintenance",
     production: "https://shortcuts.example.invalid/grouproxy/production/maintenance",
   },
+  allowlist: {
+    test: "https://shortcuts.example.invalid/grouproxy/test/allowlist",
+    production: "https://shortcuts.example.invalid/grouproxy/production/allowlist",
+  },
 } as const;
 
 export default function AccessPage() {
@@ -149,6 +152,8 @@ export default function AccessPage() {
   const linuxQuickCommand = "chmod +x ./grouproxy-linux-setup.sh\n./grouproxy-linux-setup.sh\n\n./grouproxy-linux-setup.sh --uninstall";
   const windowsValidationCommand = config ? `$ProxyUrl = \"${endpoint}\"\nTest-NetConnection -ComputerName \"${config.fqdn}\" -Port ${config.port}\nInvoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl` : "";
   const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
+  const windowsAllowlistCommand = config ? `$ProxyUrl = \"${endpoint}\"\n$SourceAddress = Invoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl\n$SourceAddress.Trim()` : "";
+  const linuxAllowlistCommand = config ? `# Copy the returned address into the site's source CIDR policy.\nproxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
 
   const copyContent = async (id: string, content: string, label: string) => {
     try {
@@ -187,9 +192,12 @@ export default function AccessPage() {
             <div className="access-endpoint-bar"><div className="access-endpoint-status"><StatusBadge status="enabled" /><span>{t(config.environment === "test" ? "Test environment" : "Production environment")}</span></div><code>{endpoint}</code><span className="access-endpoint-port">{t("Port")} {formatNumber(config.port, { useGrouping: false })}</span></div>
           </section>
 
-          <section className="access-doc-section" aria-labelledby="access-quick-access">
-            <SectionHeading id="access-quick-access" title={t("Quick access")} description={t("Choose an operating system and use the shortest supported setup path.")} />
+          <section className="access-doc-section" aria-labelledby="access-quick-start">
+            <SectionHeading id="access-quick-start" title={t("Quick start")} description={t("Choose an operating system and use the shortest supported setup path.")} />
             <div className="access-doc-platform-grid">
+              <PlatformCard id="access-quick-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Download the setup script and run it as the current user.")}>
+                <CodeSnippet id="linux-quick" filename="grouproxy-linux-setup.sh" language="bash" content={linuxQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-quick", linuxQuickCommand, t("Linux"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} />
+              </PlatformCard>
               <PlatformCard id="access-quick-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Use the downloaded script to turn the current user's Windows system proxy on or off.")}>
                 <CodeSnippet id="windows-quick" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-quick", windowsQuickCommand, t("Windows"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} />
                 <p className="access-doc-card-note">{t("Run without options to enable the proxy. Run with -Disable to turn it off.")}</p>
@@ -197,27 +205,38 @@ export default function AccessPage() {
               <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders until the macOS workflows are published.")}>
                 <MacOSShortcutLinks urls={macOSShortcutUrls.quickAccess} t={t} />
               </PlatformCard>
-              <PlatformCard id="access-quick-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Download the setup script and run it as the current user.")}>
-                <CodeSnippet id="linux-quick" filename="grouproxy-linux-setup.sh" language="bash" content={linuxQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-quick", linuxQuickCommand, t("Linux"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} />
+            </div>
+          </section>
+
+          <section className="access-doc-section" aria-labelledby="access-testing">
+            <SectionHeading id="access-testing" title={t("Testing and validation")} description={t("Confirm the listener and proxy route, then use the returned address to maintain source access.")} />
+            <div className="access-doc-platform-grid">
+              <PlatformCard id="access-testing-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Check the listener and return the address seen through the proxy.")}>
+                <CodeSnippet id="linux-validation" filename="grouproxy-check.sh" language="bash" content={linuxValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-validation", linuxValidationCommand, t("Linux"))} />
+              </PlatformCard>
+              <PlatformCard id="access-testing-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Check the listener and return the address seen through the proxy.")}>
+                <CodeSnippet id="windows-validation" filename="grouproxy-check.ps1" language="powershell" content={windowsValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-validation", windowsValidationCommand, t("Windows"))} />
+              </PlatformCard>
+              <PlatformCard id="access-testing-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
+                <MacOSShortcutLinks urls={macOSShortcutUrls.maintenance} t={t} />
               </PlatformCard>
             </div>
           </section>
 
-          <section className="access-doc-section" aria-labelledby="access-operations">
-            <SectionHeading id="access-operations" title={t("Testing, validation, and allowlist")} description={t("Confirm the listener and proxy route, then use the returned address to maintain source access.")} />
+          <section className="access-doc-section" aria-labelledby="access-allowlist">
+            <SectionHeading id="access-allowlist" title={t("Allowlist")} description={t("Use the returned address to locate or add the matching source CIDR.")} />
             <div className="access-doc-platform-grid">
-              <PlatformCard id="access-operations-windows" icon={<ShieldCheck size={19} />} title={t("Windows")} description={t("Check the listener and return the address seen through the proxy.")}>
-                <CodeSnippet id="windows-validation" filename="grouproxy-check.ps1" language="powershell" content={windowsValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-validation", windowsValidationCommand, t("Windows"))} />
+              <PlatformCard id="access-allowlist-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Collect the proxy source address, then open site policy to maintain the allowlist.")}>
+                <CodeSnippet id="linux-allowlist" filename="grouproxy-source-address.sh" language="bash" content={linuxAllowlistCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-allowlist", linuxAllowlistCommand, t("Linux"))} />
                 <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
-                <p className="access-doc-card-note">{t("Use the returned address to locate or add the matching source CIDR.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-operations-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
-                <MacOSShortcutLinks urls={macOSShortcutUrls.maintenance} t={t} />
-              </PlatformCard>
-              <PlatformCard id="access-operations-linux" icon={<ShieldCheck size={19} />} title={t("Linux")} description={t("Check the listener and return the address seen through the proxy.")}>
-                <CodeSnippet id="linux-validation" filename="grouproxy-check.sh" language="bash" content={linuxValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-validation", linuxValidationCommand, t("Linux"))} />
+              <PlatformCard id="access-allowlist-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Collect the proxy source address, then open site policy to maintain the allowlist.")}>
+                <CodeSnippet id="windows-allowlist" filename="grouproxy-source-address.ps1" language="powershell" content={windowsAllowlistCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-allowlist", windowsAllowlistCommand, t("Windows"))} />
                 <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
-                <p className="access-doc-card-note">{t("Use the returned address to locate or add the matching source CIDR.")}</p>
+              </PlatformCard>
+              <PlatformCard id="access-allowlist-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Shortcut links are placeholders for the test and production workflows.")}>
+                <MacOSShortcutLinks urls={macOSShortcutUrls.allowlist} t={t} />
+                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
               </PlatformCard>
             </div>
           </section>
@@ -227,12 +246,16 @@ export default function AccessPage() {
           <nav className="access-docs-rail-sticky">
             <div className="access-docs-rail-title">{t("On this page")}</div>
             <div className="access-docs-rail-group">
-              <a className="access-docs-rail-parent" href="#access-quick-access">{t("Quick access")}</a>
-              <div className="access-docs-rail-children"><a href="#access-quick-windows">{t("Windows")}</a><a href="#access-quick-macos">{t("macOS")}</a><a href="#access-quick-linux">{t("Linux")}</a></div>
+              <a className="access-docs-rail-parent" href="#access-quick-start">{t("Quick start")}</a>
+              <div className="access-docs-rail-children"><a href="#access-quick-linux">{t("Linux")}</a><a href="#access-quick-windows">{t("Windows")}</a><a href="#access-quick-macos">{t("macOS")}</a></div>
             </div>
             <div className="access-docs-rail-group">
-              <a className="access-docs-rail-parent" href="#access-operations">{t("Testing, validation, and allowlist")}</a>
-              <div className="access-docs-rail-children"><a href="#access-operations-windows">{t("Windows")}</a><a href="#access-operations-macos">{t("macOS")}</a><a href="#access-operations-linux">{t("Linux")}</a></div>
+              <a className="access-docs-rail-parent" href="#access-testing">{t("Testing and validation")}</a>
+              <div className="access-docs-rail-children"><a href="#access-testing-linux">{t("Linux")}</a><a href="#access-testing-windows">{t("Windows")}</a><a href="#access-testing-macos">{t("macOS")}</a></div>
+            </div>
+            <div className="access-docs-rail-group">
+              <a className="access-docs-rail-parent" href="#access-allowlist">{t("Allowlist")}</a>
+              <div className="access-docs-rail-children"><a href="#access-allowlist-linux">{t("Linux")}</a><a href="#access-allowlist-windows">{t("Windows")}</a><a href="#access-allowlist-macos">{t("macOS")}</a></div>
             </div>
             <div className="access-docs-rail-endpoint"><span>{t("Environment")}</span><strong>{t(config.environment === "test" ? "Test environment" : "Production environment")}</strong><code>{config.fqdn}:{config.port}</code></div>
           </nav>
