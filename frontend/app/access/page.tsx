@@ -153,7 +153,7 @@ export default function AccessPage() {
   const windowsValidationCommand = config ? `$ProxyUrl = \"${endpoint}\"\nTest-NetConnection -ComputerName \"${config.fqdn}\" -Port ${config.port}\nInvoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl` : "";
   const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
   const windowsAllowlistCommand = config ? `$ProxyUrl = \"${endpoint}\"\n$SourceAddress = Invoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl\n$SourceAddress.Trim()` : "";
-  const linuxAllowlistCommand = config ? `# Copy the returned address into the site's source CIDR policy.\nproxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
+  const linuxAllowlistCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
 
   const copyContent = async (id: string, content: string, label: string) => {
     try {
