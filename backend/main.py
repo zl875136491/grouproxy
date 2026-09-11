@@ -200,12 +200,17 @@ class SensitiveFieldFilter(logging.Filter):
             record.msg = msg
         
         # Redact args if they contain sensitive data structures
+        # Keep the original type (dict/list stay dict/list after redaction)
         if hasattr(record, 'args') and record.args:
             try:
-                record.args = tuple(
-                    redact(arg) if isinstance(arg, (dict, list)) else arg
-                    for arg in record.args
-                )
+                redacted_args = []
+                for arg in record.args:
+                    if isinstance(arg, (dict, list)):
+                        # redact() returns the same type: dict→dict, list→list
+                        redacted_args.append(redact(arg))
+                    else:
+                        redacted_args.append(arg)
+                record.args = tuple(redacted_args)
             except Exception:
                 # If redaction fails, pass through to avoid breaking logging
                 pass
@@ -1270,7 +1275,13 @@ async def readyz(request: Request) -> dict[str, str]:
     if database is None or database.client is None:
         raise HTTPException(status_code=503, detail="database_not_ready")
     try:
-        await database.client.admin.command("ping")
+        # Add timeout to prevent readyz from hanging on dead/slow MongoDB
+        await asyncio.wait_for(
+            database.client.admin.command("ping"),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="database_ping_timeout")
     except Exception as exc:  # pragma: no cover - driver-specific exception
         raise HTTPException(status_code=503, detail="database_not_ready") from exc
     return {"status": "ready"}

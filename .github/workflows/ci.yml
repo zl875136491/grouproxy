@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    
+    # Dummy env vars for Settings validation at import time
+    # Real values are set in deployment; these allow unit tests to import main.py
+    # min_length constraints: management_token ≥32, admin_password ≥12, bundle_hmac_secret ≥32
+    env:
+      GROUPROXY_BUNDLE_HMAC_SECRET: "ci-dummy-bundle-hmac-secret-32chars-minimum-length-ok"
+      GROUPROXY_ADMIN_PASSWORD: "ci-dummy-admin-password-12chars-min"
+      GROUPROXY_MANAGEMENT_TOKEN: "ci-dummy-management-token-32chars-minimum-length-ok"
+      GROUPROXY_MONGODB_URI: "mongodb://localhost:27017/grouproxy_ci"
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          
+      - name: Run unit tests
+        working-directory: backend
+        run: |
+          # Run only unit tests that don't require MongoDB
+          # Full integration tests (verify-phase*.sh) run separately in deployment
+          pytest tests/test_security_fixes.py tests/test_p2_hardening.py tests/test_p3_hardening.py -v --tb=short
+          # test_auth.py omitted: requires full app bootstrap with real settings
+          
+  frontend-lint:
+    name: Frontend Lint & Typecheck
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+          
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+        
+      - name: Run TypeScript check
+        working-directory: frontend
+        run: npx tsc --noEmit
+        
+      - name: Run i18n tests
+        working-directory: frontend
+        run: npm run test:i18n
+        
+  monitor-tests:
+    name: Monitor Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          
+      - name: Run tests
+        working-directory: monitor
+        run: |
+          # Run only internal package tests that don't require privileged netlink/nft
+          # Rollback tests (TestRollback*, TestRestoreLastGoodFirewall*) need CAP_NET_ADMIN
+          # and fail on Actions with "Operation not permitted"
+          # Full integration tests run in deployment with proper privileges
+          go test -v ./internal/...
