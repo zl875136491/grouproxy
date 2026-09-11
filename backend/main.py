@@ -1270,7 +1270,13 @@ async def readyz(request: Request) -> dict[str, str]:
     if database is None or database.client is None:
         raise HTTPException(status_code=503, detail="database_not_ready")
     try:
-        await database.client.admin.command("ping")
+        # Add timeout to prevent readyz from hanging on dead/slow MongoDB
+        await asyncio.wait_for(
+            database.client.admin.command("ping"),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="database_ping_timeout")
     except Exception as exc:  # pragma: no cover - driver-specific exception
         raise HTTPException(status_code=503, detail="database_not_ready") from exc
     return {"status": "ready"}
