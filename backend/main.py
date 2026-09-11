@@ -1118,13 +1118,22 @@ async def lifespan(app: FastAPI):
     backup_worker_task = asyncio.create_task(backup_worker.run())
 
     async def observe() -> None:
+        """Background observability loop: refresh liveness and alerts.
+        
+        Exceptions are logged but never crash the control plane. Transient
+        failures (network, DB timeout) are expected; persistent errors should
+        be investigated from logs.
+        """
         while True:
             try:
                 await refresh_liveness()
                 await refresh_deny_spike_alerts()
-            except Exception:
-                # Observability must never take down the control plane.
-                pass
+            except Exception as exc:
+                # Log errors for investigation but never crash the API
+                logging.error(
+                    f"Observability loop error (continuing): {exc.__class__.__name__}: {exc}",
+                    exc_info=False,  # Don't spam with full traceback for expected transients
+                )
             await asyncio.sleep(15)
 
     async def rate_limit_cleanup() -> None:

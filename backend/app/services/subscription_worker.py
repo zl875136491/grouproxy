@@ -94,10 +94,13 @@ class SubscriptionWorker:
                 if task is not None:
                     await self.execute(task)
                     continue
-            except Exception:
-                # The next scheduler pass can recover an abandoned lease. Do
-                # not let a single bad upstream stop all future refreshes.
-                pass
+            except Exception as exc:
+                # Log unexpected errors in task adoption/execution but continue
+                # serving other refreshes. Lease expiry will recover abandoned tasks.
+                logging.error(
+                    f"Subscription worker error (continuing): {exc.__class__.__name__}: {exc}",
+                    exc_info=True,  # Full traceback for unexpected worker errors
+                )
             try:
                 await asyncio.wait_for(
                     self.stop_event.wait(),
@@ -177,7 +180,13 @@ class SubscriptionWorker:
                 result="failed",
                 error=exc.code,
             )
-        except Exception:
+        except Exception as exc:
+            # Unexpected error during refresh (not a SubscriptionError)
+            logging.error(
+                f"Unexpected subscription refresh error for source {source.id}: "
+                f"{exc.__class__.__name__}: {exc}",
+                exc_info=True,
+            )
             updated = await fail_task(
                 task,
                 error="subscription_refresh_unexpected_error",
