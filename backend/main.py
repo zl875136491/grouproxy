@@ -200,12 +200,17 @@ class SensitiveFieldFilter(logging.Filter):
             record.msg = msg
         
         # Redact args if they contain sensitive data structures
+        # Keep the original type (dict/list stay dict/list after redaction)
         if hasattr(record, 'args') and record.args:
             try:
-                record.args = tuple(
-                    redact(arg) if isinstance(arg, (dict, list)) else arg
-                    for arg in record.args
-                )
+                redacted_args = []
+                for arg in record.args:
+                    if isinstance(arg, (dict, list)):
+                        # redact() returns the same type: dict→dict, list→list
+                        redacted_args.append(redact(arg))
+                    else:
+                        redacted_args.append(arg)
+                record.args = tuple(redacted_args)
             except Exception:
                 # If redaction fails, pass through to avoid breaking logging
                 pass
