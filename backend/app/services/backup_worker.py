@@ -60,10 +60,13 @@ class BackupWorker:
                         did_work = True
                         await self.execute(task)
                         break
-            except Exception:
-                # A failed backup must not take down the API; the task lease is
-                # recovered on the next pass and the error remains queryable.
-                pass
+            except Exception as exc:
+                # Log backup task errors but continue serving other tasks.
+                # Failed backups remain queryable and lease will be recovered.
+                logging.error(
+                    f"Backup worker error (continuing): {exc.__class__.__name__}: {exc}",
+                    exc_info=True,
+                )
             if did_work:
                 continue
             try:
@@ -97,9 +100,12 @@ class BackupWorker:
                 severity="critical",
                 active=False,
             )
-        except Exception:
-            # Scheduler failure must be visible, but never stop workers from
-            # handling an operator-initiated backup or restore task.
+        except Exception as exc:
+            # Log maintenance errors and set alert, but never stop workers
+            logging.error(
+                f"Backup maintenance error: {exc.__class__.__name__}: {exc}",
+                exc_info=True,
+            )
             await set_alert(
                 fingerprint="backup:scheduler",
                 category="backup",

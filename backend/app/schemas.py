@@ -86,10 +86,10 @@ class EmployeeOut(BaseModel):
 
 
 class NodeCreate(BaseModel):
-    site_id: str
-    name: str
-    agent_id: str
-    advertise_ip: str = ""
+    site_id: str = Field(max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    agent_id: str = Field(min_length=1, max_length=128)
+    advertise_ip: str = Field(default="", max_length=128)
 
 
 class NodeNameUpdate(BaseModel):
@@ -123,8 +123,8 @@ class NodeCreateResponse(NodeOut):
 
 
 class CIDRCreate(BaseModel):
-    cidr: str
-    comment: str = ""
+    cidr: str = Field(min_length=1, max_length=128)
+    comment: str = Field(default="", max_length=512)
     enabled: bool = True
 
 
@@ -137,8 +137,8 @@ class CIDROut(BaseModel):
 
 
 class CIDRPreviewRequest(BaseModel):
-    site_id: str
-    source_ip: str
+    site_id: str = Field(max_length=128)
+    source_ip: str = Field(min_length=1, max_length=128)
 
 
 class CIDRPreviewResponse(BaseModel):
@@ -149,9 +149,9 @@ class CIDRPreviewResponse(BaseModel):
 
 
 class TravelExceptionCreate(BaseModel):
-    cidr: str
-    comment: str = ""
-    owner: str = ""
+    cidr: str = Field(min_length=1, max_length=128)
+    comment: str = Field(default="", max_length=512)
+    owner: str = Field(default="", max_length=256)
     expires_at: datetime
     enabled: bool = True
 
@@ -167,10 +167,10 @@ class TravelExceptionOut(BaseModel):
 
 
 class CrossSiteAllowUpdate(BaseModel):
-    from_site_id: str
-    to_site_id: str
+    from_site_id: str = Field(max_length=128)
+    to_site_id: str = Field(max_length=128)
     enabled: bool = False
-    comment: str = ""
+    comment: str = Field(default="", max_length=512)
 
 
 class CrossSiteAllowOut(BaseModel):
@@ -183,9 +183,9 @@ class CrossSiteAllowOut(BaseModel):
 
 
 class DestinationBlacklistCreate(BaseModel):
-    pattern: str = Field(min_length=1, max_length=255)
+    pattern: str = Field(min_length=1, max_length=512)
     kind: Literal["domain", "ip", "cidr"] = "domain"
-    comment: str = ""
+    comment: str = Field(default="", max_length=512)
     enabled: bool = True
 
 
@@ -271,24 +271,24 @@ class SubscriptionCatalogOut(BaseModel):
 
 
 class SubscriptionPublishRequest(BaseModel):
-    site_ids: list[str] = Field(default_factory=list)
-    note: str = Field(default="", max_length=500)
+    site_ids: list[str] = Field(default_factory=list, max_items=100)
+    note: str = Field(default="", max_length=1024)
 
 
 class DraftCreate(BaseModel):
-    site_id: str
-    node_ids: list[str] = Field(default_factory=list)
+    site_id: str = Field(max_length=128)
+    node_ids: list[str] = Field(default_factory=list, max_items=100)
     diff: dict[str, Any] = Field(default_factory=dict)
-    note: str = ""
+    note: str = Field(default="", max_length=1024)
 
 
 class ProxySelectionRequest(BaseModel):
     """Select an already reported outbound for one node's selector."""
 
-    group: str = Field(default="subscription", min_length=1, max_length=255)
-    outbound: str = Field(min_length=1, max_length=255)
+    group: str = Field(default="subscription", min_length=1, max_length=256)
+    outbound: str = Field(min_length=1, max_length=256)
     expected_current_version: int | None = None
-    note: str = Field(default="", max_length=500)
+    note: str = Field(default="", max_length=1024)
 
 
 class DraftOut(BaseModel):
@@ -306,12 +306,12 @@ class DraftOut(BaseModel):
 
 
 class ReleaseCreate(BaseModel):
-    draft_id: str
-    site_id: str | None = None
-    node_ids: list[str] = Field(default_factory=list)
+    draft_id: str = Field(max_length=128)
+    site_id: str | None = Field(default=None, max_length=128)
+    node_ids: list[str] = Field(default_factory=list, max_items=100)
     expected_current_version: int | None = None
-    idempotency_key: str | None = None
-    note: str = ""
+    idempotency_key: str | None = Field(default=None, max_length=128)
+    note: str = Field(default="", max_length=1024)
 
 
 class ReleaseOut(BaseModel):

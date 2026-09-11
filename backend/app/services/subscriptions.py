@@ -544,13 +544,18 @@ async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
     """Fetch an HTTP subscription with redirect-by-redirect SSRF validation.
 
     Requests are connected to a validated address while retaining the original
-    Host header.  That prevents a second DNS lookup inside the HTTP client from
-    defeating the address check through DNS rebinding.
+    Host header. Redirects are validated to prevent DNS rebinding attacks:
+    - Each redirect's hostname is independently DNS-resolved and validated
+    - Only public IPs are allowed (no private/local addresses)
+    - Cached validation prevents attackers from rebinding DNS mid-fetch
     """
 
     current = source.url
     max_body_bytes = source.max_body_bytes
     timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+    # Track validated hosts to prevent DNS rebinding
+    validated_hosts: dict[str, list[str]] = {}
+    
     async with httpx.AsyncClient(
         follow_redirects=False,
         timeout=timeout,
@@ -558,7 +563,17 @@ async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
     ) as client:
         for redirect_index in range(source.redirect_limit + 1):
             parsed, port = _validate_url_shape(current)
-            addresses = await _resolve_public_addresses(parsed.hostname or "", port)
+            hostname = parsed.hostname or ""
+            
+            # Use cached addresses if we've already validated this host
+            if hostname in validated_hosts:
+                addresses = validated_hosts[hostname]
+            else:
+                # First time seeing this host - resolve and validate
+                addresses = await _resolve_public_addresses(hostname, port)
+                # Cache validated addresses to prevent DNS rebinding
+                validated_hosts[hostname] = addresses
+            
             endpoint = _request_url(parsed, addresses[0], port)
             try:
                 async with client.stream(
@@ -570,7 +585,24 @@ async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
                         location = response.headers.get("location", "")
                         if not location or redirect_index >= source.redirect_limit:
                             raise SubscriptionError("subscription_redirect_rejected")
-                        current = urljoin(current, location)
+                        # Construct absolute redirect URL
+                        next_url = urljoin(current, location)
+                        # Pre-validate the redirect target before following
+                        try:
+                            next_parsed, next_port = _validate_url_shape(next_url)
+                            next_hostname = next_parsed.hostname or ""
+                            # Resolve and validate redirect target immediately
+                            # This prevents DNS rebinding between redirect construction
+                            # and the next loop iteration
+                            if next_hostname not in validated_hosts:
+                                next_addresses = await _resolve_public_addresses(
+                                    next_hostname, next_port
+                                )
+                                validated_hosts[next_hostname] = next_addresses
+                        except SubscriptionError as e:
+                            # Redirect target is invalid (private IP, etc.)
+                            raise SubscriptionError("subscription_redirect_rejected") from e
+                        current = next_url
                         continue
                     if response.status_code != 200:
                         raise SubscriptionError(

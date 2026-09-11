@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -38,6 +39,9 @@ const (
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
 	maxProxyDelayTargets          = 500
+	// Expected SHA-256 of sing-box v1.13.19 Linux amd64 binary
+	// Source: singbox/README.md
+	expectedSingboxSHA256 = "7e9dcd7239c49478a576d79f272751e5ed1c2aba7cc08ab1b2bd69c00c904ba1"
 )
 
 type agent struct {
@@ -93,12 +97,26 @@ func main() {
 	configPath := flag.String("config", "/etc/grouproxy/monitor.yaml", "monitor configuration")
 	once := flag.Bool("once", false, "fetch and apply once, then exit")
 	validate := flag.Bool("validate", false, "validate configuration and token, then exit")
+	skipIntegrityCheck := flag.Bool("skip-integrity-check", false, "skip sing-box binary integrity verification (dev only)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	
+	// Verify sing-box binary integrity at startup
+	if !*skipIntegrityCheck {
+		if err := verifySingboxIntegrity(cfg.SingboxBin); err != nil {
+			log.Fatalf("sing-box integrity check failed: %v\n"+
+				"If you are using a custom sing-box binary for local development,\n"+
+				"you can skip this check with -skip-integrity-check flag.\n"+
+				"WARNING: Never skip integrity checks in production!", err)
+		}
+	} else {
+		log.Println("WARNING: Skipping sing-box binary integrity verification (development mode)")
+	}
+	
 	if *validate {
 		if _, err := client.New(cfg.BackendURL, cfg.TokenFile); err != nil {
 			log.Fatalf("validate agent credentials: %v", err)
@@ -2077,6 +2095,37 @@ func errorCode(err error) string {
 		return "unknown"
 	}
 	return strings.ReplaceAll(err.Error(), " ", "_")
+}
+
+// verifySingboxIntegrity checks the SHA-256 hash of the sing-box binary.
+// This prevents execution of tampered binaries. The expected hash is hardcoded
+// from singbox/README.md for version 1.13.19.
+func verifySingboxIntegrity(binaryPath string) error {
+	f, err := os.Open(binaryPath)
+	if err != nil {
+		return fmt.Errorf("open binary: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash binary: %w", err)
+	}
+
+	actualHash := hex.EncodeToString(h.Sum(nil))
+	if actualHash != expectedSingboxSHA256 {
+		return fmt.Errorf(
+			"integrity check failed:\n"+
+				"  binary: %s\n"+
+				"  expected: %s\n"+
+				"  actual:   %s\n"+
+				"This binary may have been tampered with or is a different version.",
+			binaryPath, expectedSingboxSHA256, actualHash,
+		)
+	}
+
+	log.Printf("sing-box binary integrity verified: %s", actualHash[:16]+"...")
+	return nil
 }
 
 // Keep net/http linked in the first static build as a smoke check for the
