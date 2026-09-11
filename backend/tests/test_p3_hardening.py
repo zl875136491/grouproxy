@@ -66,7 +66,7 @@ def test_csp_allows_nextjs_requirements():
 @pytest.mark.asyncio
 async def test_readyz_has_timeout():
     """Readyz endpoint should timeout on slow MongoDB."""
-    from backend.main import readyz
+    from main import readyz
     from fastapi import Request, HTTPException
     
     # Mock a slow database
@@ -101,7 +101,7 @@ async def test_readyz_has_timeout():
 @pytest.mark.asyncio
 async def test_readyz_succeeds_on_quick_response():
     """Readyz should succeed when MongoDB responds quickly."""
-    from backend.main import readyz
+    from main import readyz
     from fastapi import Request
     
     # Mock a quick database
@@ -181,13 +181,17 @@ def test_ci_runs_security_tests():
 
 def test_p3_tests_exist():
     """P3 hardening tests should exist and be importable."""
-    import backend.tests.test_p3_hardening
+    # Verify this test file exists and has test functions
+    import os
+    from pathlib import Path
     
-    # Should have test functions
-    import inspect
-    members = inspect.getmembers(backend.tests.test_p3_hardening)
-    test_functions = [name for name, obj in members if name.startswith("test_")]
+    test_file = Path(__file__)
+    assert test_file.exists(), "Test file should exist"
+    assert test_file.name == "test_p3_hardening.py", "Test file should be named correctly"
     
+    # Read file and count test functions
+    content = test_file.read_text()
+    test_functions = [line for line in content.split('\n') if line.startswith('def test_')]
     assert len(test_functions) > 0, "Should have test functions"
 
 

@@ -13,11 +13,12 @@ jobs:
     
     # Dummy env vars for Settings validation at import time
     # Real values are set in deployment; these allow unit tests to import main.py
+    # min_length constraints: management_token ≥32, admin_password ≥12, bundle_hmac_secret ≥32
     env:
-      GROUPROXY_BUNDLE_HMAC_SECRET: "ci-dummy-secret-32-chars-long-for-testing-purposes"
-      GROUPROXY_ADMIN_PASSWORD: "ci-dummy-admin-password"
-      GROUPROXY_MANAGEMENT_TOKEN: "ci-dummy-management-token"
-      GROUPROXY_MONGODB_URI: "mongodb://localhost:27017/grouproxy"
+      GROUPROXY_BUNDLE_HMAC_SECRET: "ci-dummy-bundle-hmac-secret-32chars-minimum-length-ok"
+      GROUPROXY_ADMIN_PASSWORD: "ci-dummy-admin-password-12chars-min"
+      GROUPROXY_MANAGEMENT_TOKEN: "ci-dummy-management-token-32chars-minimum-length-ok"
+      GROUPROXY_MONGODB_URI: "mongodb://localhost:27017/grouproxy_ci"
     
     steps:
       - uses: actions/checkout@v4
