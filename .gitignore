@@ -132,6 +132,7 @@ testenv/
 frontend/node_modules/
 frontend/.next/
 frontend/.next-dev/
+frontend/.next-fresh-init/
 
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.

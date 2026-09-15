@@ -53,6 +53,8 @@ function authErrorMessage(error: unknown, t: (key: string) => string) {
     gquan_delivery_unavailable: "GQuan verification delivery is unavailable.",
     gquan_delivery_rejected: "GQuan did not accept the verification request.",
     gquan_quota_exceeded: "GQuan verification quota is currently exhausted.",
+    gquan_stub_not_allowed: "GQuan stub delivery is not allowed in this environment.",
+    gquan_test_code_not_configured: "GQuan test verification is not configured.",
     invalid_credentials: "The IT code or password is not valid.",
     invalid_itcode: "Enter a valid IT code.",
     invalid_password: "Passwords must contain at least 12 characters.",
@@ -84,6 +86,17 @@ function VerificationCodeField({
   challenge: VerificationChallenge | null;
 }) {
   const { t } = usePreferences();
+  const [now, setNow] = useState(() => Date.now());
+  const resendAt = challenge ? Date.parse(challenge.resend_available_at) : 0;
+  const waitSeconds = challenge && Number.isFinite(resendAt) ? Math.max(0, Math.ceil((resendAt - now) / 1000)) : 0;
+  const waitingToResend = waitSeconds > 0;
+
+  useEffect(() => {
+    if (!waitingToResend) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [waitingToResend, challenge?.resend_available_at]);
+
   return (
     <div className="verification-row">
       <label>
@@ -93,17 +106,24 @@ function VerificationCodeField({
           onChange={(event) => onChange(event.target.value.replace(/\D/g, "").slice(0, 6))}
           inputMode="numeric"
           autoComplete="one-time-code"
+          maxLength={6}
           required
         />
       </label>
       <Button
         className="verification-send"
         type="button"
-        disabled={!canSend || busy !== null}
+        disabled={!canSend || busy !== null || waitingToResend}
         onClick={onSend}
       >
         <MessageSquareText size={16} />
-        {busy === "send" ? t("Sending...") : challenge ? t("Send again") : t("Send code")}
+        {busy === "send"
+          ? t("Sending...")
+          : waitingToResend
+            ? t("Send in {seconds}s", { seconds: waitSeconds })
+            : challenge
+              ? t("Send again")
+              : t("Send code")}
       </Button>
     </div>
   );
@@ -195,7 +215,11 @@ export default function LoginPage() {
     try {
       const result = await requestAuthVerificationCode(loginItcode.trim(), purpose);
       setLoginChallenge(result);
-      notifyToast({ title: t("Verification code sent through GQuan."), variant: "success" });
+      notifyToast({
+        title: t("Verification code sent through GQuan."),
+        description: t("Open GQuan and enter the 6-digit code."),
+        variant: "success",
+      });
     } catch (requestError) {
       notifyToast({ title: t("Operation failed"), description: authErrorMessage(requestError, t), variant: "destructive" });
     } finally {
@@ -212,7 +236,11 @@ export default function LoginPage() {
         accountActions[accountAction].purpose,
       );
       setAccountChallenge(result);
-      notifyToast({ title: t("Verification code sent through GQuan."), variant: "success" });
+      notifyToast({
+        title: t("Verification code sent through GQuan."),
+        description: t("Open GQuan and enter the 6-digit code."),
+        variant: "success",
+      });
     } catch (requestError) {
       notifyToast({ title: t("Operation failed"), description: authErrorMessage(requestError, t), variant: "destructive" });
     } finally {

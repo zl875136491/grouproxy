@@ -272,11 +272,47 @@ async def test_gquan_app_delivery_uses_app_bearer_and_content() -> None:
     assert captured["authorization"] == "Bearer sat_test_app_token"
     assert captured["body"] == {
         "to": ["example.user"],
-        "title": "Grouproxy verification code",
-        "desc": "Verification for register.",
-        "content": "Your Grouproxy verification code is 123456. It expires in 10 minutes.",
+        "title": "Grouproxy 验证码",
+        "desc": "用于账号注册身份验证。",
+        "content": "您的 Grouproxy 验证码是 123456，10 分钟内有效。",
         "msg_type": "MSG",
     }
+
+
+@pytest.mark.asyncio
+async def test_gquan_app_delivery_rejects_failed_recipient_results() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "status": "ok",
+                    "results": [{"to": "example.user", "data": "failed"}],
+                }
+            },
+        )
+
+    client = GQuanClient(settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(GQuanDeliveryError, match="gquan_delivery_rejected"):
+        await client.send_verification_code(
+            itcode="example.user",
+            code="123456",
+            purpose="gquan_login",
+        )
+
+
+@pytest.mark.asyncio
+async def test_gquan_app_delivery_maps_quota_error_code() -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"code": "quota_exceeded"})
+
+    client = GQuanClient(settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(GQuanDeliveryError, match="gquan_quota_exceeded"):
+        await client.send_verification_code(
+            itcode="example.user",
+            code="123456",
+            purpose="gquan_login",
+        )
 
 
 @pytest.mark.asyncio

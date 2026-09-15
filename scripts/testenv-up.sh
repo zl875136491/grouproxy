@@ -98,6 +98,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
     printf 'GROUPROXY_GQUAN_DELIVERY_MODE=%q\n' "$GQUAN_DELIVERY_MODE"
     if [[ "$GQUAN_DELIVERY_MODE" == "stub" ]]; then
       printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE"
+    else
+      printf 'GROUPROXY_GQUAN_APP_TOKEN=%s\n' "$GQUAN_APP_TOKEN"
     fi
     printf 'GROUPROXY_SEED_DEFAULT_SITES=true\n'
   } > "$ENV_FILE"
@@ -124,6 +126,13 @@ set -a
 source "$ENV_FILE"
 set +a
 
+if [[ "$GQUAN_DELIVERY_MODE" == "app" && -n "$GQUAN_APP_TOKEN" ]] && ! rg -q '^GROUPROXY_GQUAN_APP_TOKEN=' "$ENV_FILE"; then
+  printf 'GROUPROXY_GQUAN_APP_TOKEN=%s\n' "$GQUAN_APP_TOKEN" >> "$ENV_FILE"
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+
 if [[ -n "$MONGODB_URL_OVERRIDE" && "$GROUPROXY_MONGODB_URL" != "$MONGODB_URL_OVERRIDE" ]]; then
   printf 'Test environment already points at another MongoDB URI. Reset it before changing targets.\n' >&2
   exit 1
@@ -140,10 +149,18 @@ if [[ "$GROUPROXY_GQUAN_DELIVERY_MODE" != "$GQUAN_DELIVERY_MODE" ]]; then
   sed -i -E "s/^GROUPROXY_GQUAN_DELIVERY_MODE=.*/GROUPROXY_GQUAN_DELIVERY_MODE=${GQUAN_DELIVERY_MODE}/" "$ENV_FILE"
   if [[ "$GQUAN_DELIVERY_MODE" == "app" ]]; then
     sed -i -E '/^GROUPROXY_GQUAN_TEST_CODE=/d' "$ENV_FILE"
-  elif rg -q '^GROUPROXY_GQUAN_TEST_CODE=' "$ENV_FILE"; then
-    sed -i -E "s/^GROUPROXY_GQUAN_TEST_CODE=.*/GROUPROXY_GQUAN_TEST_CODE=${GQUAN_TEST_CODE}/" "$ENV_FILE"
+    if rg -q '^GROUPROXY_GQUAN_APP_TOKEN=' "$ENV_FILE"; then
+      sed -i -E "s/^GROUPROXY_GQUAN_APP_TOKEN=.*/GROUPROXY_GQUAN_APP_TOKEN=${GQUAN_APP_TOKEN}/" "$ENV_FILE"
+    else
+      printf 'GROUPROXY_GQUAN_APP_TOKEN=%s\n' "$GQUAN_APP_TOKEN" >> "$ENV_FILE"
+    fi
   else
-    printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE" >> "$ENV_FILE"
+    sed -i -E '/^GROUPROXY_GQUAN_APP_TOKEN=/d' "$ENV_FILE"
+    if rg -q '^GROUPROXY_GQUAN_TEST_CODE=' "$ENV_FILE"; then
+      sed -i -E "s/^GROUPROXY_GQUAN_TEST_CODE=.*/GROUPROXY_GQUAN_TEST_CODE=${GQUAN_TEST_CODE}/" "$ENV_FILE"
+    else
+      printf 'GROUPROXY_GQUAN_TEST_CODE=%s\n' "$GQUAN_TEST_CODE" >> "$ENV_FILE"
+    fi
   fi
   set -a
   source "$ENV_FILE"

@@ -300,9 +300,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         
         # Auth endpoints (most strict)
         if path.startswith("/api/v1/auth/"):
-            if path in {"/api/v1/auth/login/password", "/api/v1/auth/register", "/api/v1/auth/gquan"}:
+            if path in {
+                "/api/v1/auth/login",
+                "/api/v1/auth/register",
+                "/api/v1/auth/gquan/login",
+            }:
                 rate_config = (10, 60, "ip")  # 10 req/min per IP
-            elif path == "/api/v1/auth/verification-code":
+            elif path == "/api/v1/auth/verification-codes":
                 rate_config = (5, 60, "ip")  # 5 req/min per IP (already has internal limit)
             else:
                 rate_config = (30, 60, "ip")  # Other auth: 30 req/min per IP

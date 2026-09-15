@@ -8,7 +8,7 @@ const nextConfig = {
   // The shared test console is reached through its DNS name instead of
   // localhost. Permit that origin so Next's development assets can reload
   // cleanly when the test frontend is restarted.
-  allowedDevOrigins: ["test-proxy.1oa.com.cn"],
+  allowedDevOrigins: ["test-proxy.1oa.com.cn", "10.32.12.111", "127.0.0.1"],
   output: "standalone",
   // Keep the dev compiler output separate from production builds. Running
   // `next build` while the local console is open must not invalidate its
