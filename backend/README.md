@@ -30,8 +30,8 @@ uses the real APP API, accepting its token only as the runtime
 `GROUPROXY_TEST_GQUAN_APP_TOKEN` input. Do not place either token in the
 repository, audit records, browser configuration, or test fixture.
 
-Phase 0/1 covers sites, nodes, source CIDRs, travel and cross-site policy,
-drafts, releases, ACKs, tasks, and the audit hash chain. Phase 2 adds
+Phase 0/1 covers sites, nodes, source blacklist policy, drafts, releases,
+ACKs, tasks, and the audit hash chain. Phase 2 adds
 `subscription_source`, immutable `subscription_version`, and per-site
 selection records plus these management operations:
 
@@ -56,18 +56,23 @@ Publish and rollback derive stable per-site task keys from `Idempotency-Key`,
 so retries return the existing releases without overwriting rollback history.
 
 Proxy access is not an application credential flow. Desired Bundles always
-declare HTTP CONNECT port `1080`; source CIDR policy is the data-plane access
-boundary. The dashboard is expected to be served directly by Next.js on port
-`80`, whose `/api/*` rewrite reaches this backend without an external reverse
-proxy.
+declare HTTP CONNECT port `1080`; source access is allow-all by default because
+proxy domains resolve through local DNS. Explicit `SourceBlacklist` rules may
+deny a source IP, network, or domain globally or for one site. New bundles emit
+only applicable enabled entries in `source_blacklist`; retired allowlist,
+exception, cross-site, and destination-policy state is removed during startup
+migration and is never used to build a bundle. The dashboard is expected to be
+served directly by Next.js on port `80`, whose `/api/*` rewrite reaches this
+backend without an external reverse proxy.
 
 The public access endpoints expose immutable workstation assets selected by
 `GROUPROXY_ENVIRONMENT`: `GET /api/v1/access/linux-setup.sh`,
 `GET /api/v1/access/windows-setup.ps1`, `GET /api/v1/access/proxy.pac`, and
 `GET /api/v1/access/config`. The `test` profile uses the test proxy domain and
-macOS Shortcut; production is selected for all other environment values. The
-script files are stored in `deploy/` and are intentionally not rendered from
-request data.
+dashboard-relative macOS `.shortcut` download path; production is selected for
+all other environment values. The Linux and Windows script files are stored in
+`deploy/`, run without parameters, and toggle the current user's proxy state.
+They are intentionally not rendered from request data.
 
 Authentication uses `itcode` as the primary account identity. Registration,
 password changes, and passwordless GQuan login all consume a single-use

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, FileClock, Network } from "lucide-react";
+import { ArrowRight, Ban, FileClock } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -92,7 +92,7 @@ export default function OverviewPage() {
         eyebrow="OPERATIONS"
         title="Overview"
         description="Regional proxy state and deployment activity."
-        actions={<Link className="button button-primary button-md" href="/sites"><Network size={16} /> {t("Manage policy")}</Link>}
+        actions={<Link className="button button-primary button-md" href="/blacklist"><Ban size={16} /> {t("Manage source blacklist")}</Link>}
       />
 
       <section className="metric-grid" aria-label={t("Control-plane summary")}>
@@ -121,7 +121,7 @@ export default function OverviewPage() {
             <div className="activity-list">
               {releaseItems.slice(0, 4).map((release) => <Link className="activity-row" href={`/releases?release=${release.release_id}`} key={release.release_id}><span className="activity-icon"><FileClock size={16} /></span><div><strong>{t(siteNames.get(release.site_id) || "Unknown site")}</strong><span>{t(release.stage.replaceAll("_", " "))} · {formatDate(release.created_at)}</span></div><StatusBadge status={release.status} /></Link>)}
             </div>
-          ) : <EmptyState title="No releases yet" detail="Create a draft from a site policy workspace." />}
+          ) : <EmptyState title="No releases yet" detail="Create a configuration draft from a site workspace." />}
         </Panel>
       </section>
 
@@ -142,5 +142,5 @@ function TopologySiteDetail({
   formatNumber: (value: number) => string;
   t: (key: string, values?: Record<string, string | number>) => string;
 }) {
-  return <article className="topology-site-detail"><header><div><span className="panel-kicker">{t("SELECTED SITE")}</span><h3>{t(site.name)}</h3><span className="mono">{site.slug}</span></div><div className="topology-site-detail-actions"><StatusBadge status={state} /><Link href={`/sites/${site.slug}/cidrs`}>{t("Open policy")} <ArrowRight size={14} /></Link></div></header><div className="topology-site-facts"><div><span>{t("Nodes")}</span><strong>{formatNumber(nodes.length)}</strong></div><div><span>{t("Online")}</span><strong>{formatNumber(nodes.filter((node) => node.liveness_status === "online").length)}</strong></div><div><span>{t("In sync")}</span><strong>{formatNumber(nodes.filter((node) => node.config_status === "in_sync").length)}</strong></div></div>{nodes.length ? <div className="topology-node-list">{nodes.map((node) => <div className="topology-node-row" key={node.id}><div><strong>{node.name}</strong><small className="mono">{node.agent_id}</small></div><div><StatusBadge status={node.liveness_status} /><StatusBadge status={node.config_status} /></div></div>)}</div> : <p className="topology-site-empty">{t("No node enrolled")}</p>}</article>;
+  return <article className="topology-site-detail"><header><div><span className="panel-kicker">{t("SELECTED SITE")}</span><h3>{t(site.name)}</h3><span className="mono">{site.slug}</span></div><div className="topology-site-detail-actions"><StatusBadge status={state} /><Link href={`/blacklist?scope=site&site=${encodeURIComponent(site.id)}`}>{t("Manage source blacklist")} <ArrowRight size={14} /></Link></div></header><div className="topology-site-facts"><div><span>{t("Nodes")}</span><strong>{formatNumber(nodes.length)}</strong></div><div><span>{t("Online")}</span><strong>{formatNumber(nodes.filter((node) => node.liveness_status === "online").length)}</strong></div><div><span>{t("In sync")}</span><strong>{formatNumber(nodes.filter((node) => node.config_status === "in_sync").length)}</strong></div></div>{nodes.length ? <div className="topology-node-list">{nodes.map((node) => <div className="topology-node-row" key={node.id}><div><strong>{node.name}</strong><small className="mono">{node.agent_id}</small></div><div><StatusBadge status={node.liveness_status} /><StatusBadge status={node.config_status} /></div></div>)}</div> : <p className="topology-site-empty">{t("No node enrolled")}</p>}</article>;
 }

@@ -16,6 +16,8 @@ set +a
 
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 AUTH_HEADER="Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}"
+TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://${GROUPROXY_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}:${GROUPROXY_TEST_FRONTEND_PORT:-3000}}"
+curl() { command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"; }
 
 # The data plane is network-ACL-only. Its connection contract is fixed at
 # port 1080 and has no HTTP Basic credential endpoint to exercise.

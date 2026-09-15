@@ -117,6 +117,50 @@ def test_sensitive_field_filter_redacts_dict_args():
     assert record.args[0]["password"] == "[REDACTED]"
 
 
+def test_sensitive_field_filter_preserves_named_mapping_args():
+    """Named logging placeholders must keep their mapping shape after redaction."""
+    import main
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="User %(username)s password %(password)s",
+        args=({"username": "alice", "password": "secret"},),
+        exc_info=None,
+    )
+
+    main.SensitiveFieldFilter().filter(record)
+
+    assert record.args["password"] == "[REDACTED]"
+    assert record.getMessage() == "User alice password [REDACTED]"
+
+
+def test_csrf_rejection_returns_json_403():
+    """A middleware rejection must not escape as a 500 response."""
+    import main
+
+    test_app = FastAPI()
+
+    @test_app.post("/mutate")
+    async def mutate() -> dict[str, str]:
+        return {"status": "ok"}
+
+    test_app.add_middleware(
+        main.CSRFProtectionMiddleware,
+        allowed_origins=["http://console.example"],
+    )
+    client = TestClient(test_app)
+
+    rejected = client.post("/mutate", headers={"Origin": "http://evil.example"})
+    allowed = client.post("/mutate", headers={"Origin": "http://console.example"})
+
+    assert rejected.status_code == 403
+    assert rejected.json() == {"detail": "csrf_origin_mismatch"}
+    assert allowed.status_code == 200
+
+
 # Test rate limiting
 
 

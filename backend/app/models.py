@@ -128,39 +128,41 @@ class Node(Document):
     created_at: datetime = Field(default_factory=utcnow)
 
 
-class SiteCIDR(Document):
-    site_id: str
-    cidr: str
-    comment: str = ""
-    enabled: bool = True
-    created_by: str = "system"
-    created_at: datetime = Field(default_factory=utcnow)
+class SourceBlacklist(Document):
+    """Explicit source-side deny rule.
 
+    Source access is allow-all by default.  Rules may apply to every site or
+    to one site only and are carried into the node bundle for enforcement by
+    the monitor.  Legacy policy collections are intentionally not registered
+    with the control plane, so old records cannot silently deny new traffic.
+    """
 
-class TravelException(Document):
-    cidr: str
-    comment: str = ""
-    owner: str = ""
-    expires_at: datetime
-    enabled: bool = True
-    created_by: str = "system"
-    created_at: datetime = Field(default_factory=utcnow)
-
-
-class CrossSiteAllow(Document):
-    from_site_id: str
-    to_site_id: str
-    enabled: bool = False
-    comment: str = ""
-    updated_at: datetime = Field(default_factory=utcnow)
-
-
-class DestinationBlacklist(Document):
+    scope: Literal["global", "site"] = "global"
+    site_id: str | None = None
+    kind: Literal["ip", "network", "domain"] = "domain"
     pattern: str
-    kind: str = "domain"
     comment: str = ""
     enabled: bool = True
+    created_by: str = "system"
     created_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [
+                    ("scope", ASCENDING),
+                    ("site_id", ASCENDING),
+                    ("kind", ASCENDING),
+                    ("pattern", ASCENDING),
+                ],
+                name="unique_source_blacklist_rule",
+                unique=True,
+            ),
+            IndexModel(
+                [("site_id", ASCENDING), ("enabled", ASCENDING)],
+                name="source_blacklist_site_enabled",
+            ),
+        ]
 
 
 class SubscriptionSource(Document):
@@ -650,10 +652,7 @@ DOCUMENT_MODELS: list[type[Document]] = [
     ManagementSession,
     Site,
     Node,
-    SiteCIDR,
-    TravelException,
-    CrossSiteAllow,
-    DestinationBlacklist,
+    SourceBlacklist,
     SubscriptionSource,
     SubscriptionVersion,
     SiteSubscription,

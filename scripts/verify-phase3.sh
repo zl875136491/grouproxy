@@ -17,6 +17,8 @@ set +a
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 FRONTEND_URL="http://127.0.0.1:${GROUPROXY_TEST_FRONTEND_PORT:-3000}"
 AUTH_HEADER="Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}"
+TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://${GROUPROXY_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}:${GROUPROXY_TEST_FRONTEND_PORT:-3000}}"
+curl() { command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"; }
 
 curl -fsS "$BACKEND_URL/healthz" >/dev/null
 curl -fsS "$BACKEND_URL/readyz" >/dev/null
@@ -69,20 +71,24 @@ curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/audit/export?export_format=ndjs
 
 access_config="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/config")"
 jq -e '(.environment == "test" or .environment == "production") and
-  (.macos_shortcut_url | startswith("https://www.icloud.com/shortcuts/")) and
+  (.macos_shortcut_url | startswith("/shortcuts/grouproxy-macos-")) and
   .protocol == "http-connect" and (.port == 1080)' \
   <<<"$access_config" >/dev/null
 curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/proxy.pac" \
   | grep -q 'return "PROXY '
 linux_setup_script="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/linux-setup.sh")"
-grep -q 'HTTPS transport is intentionally disabled.' <<<"$linux_setup_script"
-grep -q -- '--uninstall' <<<"$linux_setup_script"
+grep -q 'if proxy_is_enabled; then' <<<"$linux_setup_script"
+grep -q 'Grouproxy proxy is now disabled.' <<<"$linux_setup_script"
+! grep -q -- '--uninstall' <<<"$linux_setup_script"
 grep -q 'gsettings set org.gnome.system.proxy mode manual' <<<"$linux_setup_script"
+grep -q 'gsettings set org.gnome.system.proxy mode none' <<<"$linux_setup_script"
 grep -q 'kwriteconfig' <<<"$linux_setup_script"
 windows_setup_script="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/windows-setup.ps1")"
 grep -q 'ProxyEnable' <<<"$windows_setup_script"
 grep -q 'ProxyServer' <<<"$windows_setup_script"
-grep -q '\$Disable' <<<"$windows_setup_script"
+grep -q '\$proxyEnabled' <<<"$windows_setup_script"
+grep -q 'InternetSetOption' <<<"$windows_setup_script"
+! grep -q '\$Disable' <<<"$windows_setup_script"
 ! grep -q 'ipinfo.io' <<<"$windows_setup_script"
 ! grep -q 'Read-Host' <<<"$windows_setup_script"
 

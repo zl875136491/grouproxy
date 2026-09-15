@@ -24,7 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pymongo.errors import DuplicateKeyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -39,9 +39,7 @@ from app.models import (
     ConfigDraft,
     ConfigRelease,
     ConnectionSnapshot,
-    CrossSiteAllow,
     DesiredRelease,
-    DestinationBlacklist,
     HeartbeatLatest,
     HeartbeatSample,
     ManagementSession,
@@ -50,14 +48,13 @@ from app.models import (
     ProbeHistory,
     ProxyConfigSnapshot,
     Site,
-    SiteCIDR,
     SiteSubscription,
+    SourceBlacklist,
     SubscriptionSource,
     SubscriptionVersion,
     Task,
     TelemetryBatch,
     TelemetryCursor,
-    TravelException,
     utcnow,
 )
 from app.models import (
@@ -82,16 +79,8 @@ from app.schemas import (
     BackupRecordOut,
     BackupRestoreRequest,
     BackupRestoreResponse,
-    CIDRCreate,
-    CIDROut,
-    CIDRPreviewRequest,
-    CIDRPreviewResponse,
     ConnectionSnapshotOut,
-    CrossSiteAllowOut,
-    CrossSiteAllowUpdate,
     DesiredResponse,
-    DestinationBlacklistCreate,
-    DestinationBlacklistOut,
     DraftCreate,
     DraftOut,
     EmployeeOut,
@@ -119,6 +108,12 @@ from app.schemas import (
     SiteNameUpdate,
     SiteOut,
     SiteSubscriptionOut,
+    SourceBlacklistCreate,
+    SourceBlacklistDistributionOut,
+    SourceBlacklistMutationOut,
+    SourceBlacklistOut,
+    SourceBlacklistPreviewRequest,
+    SourceBlacklistPreviewResponse,
     SubscriptionCatalogOut,
     SubscriptionPublishOut,
     SubscriptionPublishRequest,
@@ -126,13 +121,11 @@ from app.schemas import (
     SubscriptionSingleNodeCreate,
     SubscriptionSourceCreate,
     SubscriptionSourceOut,
-    SubscriptionVersionContentOut,
     SubscriptionUploadResponse,
+    SubscriptionVersionContentOut,
     SubscriptionVersionOut,
     TaskOut,
     TelemetryBatchResponse,
-    TravelExceptionCreate,
-    TravelExceptionOut,
     VerificationCodeRequest,
     VerificationCodeResponse,
 )
@@ -159,8 +152,14 @@ from app.services.bundles import (
     create_desired_release,
     latest_release,
     repair_stale_proxy_selection,
+    strip_retired_policy_fields,
 )
-from app.services.cidr import effective_cidrs, match_source_ip, normalize_cidr, normalize_source_ip
+from app.services.cidr import (
+    effective_source_blacklist,
+    match_source_blacklist,
+    normalize_source_blacklist_pattern,
+    normalize_source_ip,
+)
 from app.services.probes import record_probe_result
 from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
 from app.services.subscriptions import (
@@ -201,16 +200,20 @@ class SensitiveFieldFilter(logging.Filter):
         
         # Redact args if they contain sensitive data structures
         # Keep the original type (dict/list stay dict/list after redaction)
-        if hasattr(record, 'args') and record.args:
+        if hasattr(record, "args") and record.args:
             try:
-                redacted_args = []
-                for arg in record.args:
-                    if isinstance(arg, (dict, list)):
-                        # redact() returns the same type: dict→dict, list→list
-                        redacted_args.append(redact(arg))
-                    else:
-                        redacted_args.append(arg)
-                record.args = tuple(redacted_args)
+                # logging normalizes a single mapping argument to a mapping
+                # instead of a one-item tuple. Preserve that shape so the
+                # formatter can still resolve named placeholders. Positional
+                # placeholders still need the original one-item tuple shape.
+                if isinstance(record.args, dict):
+                    redacted = redact(record.args)
+                    record.args = redacted if "%(" in record.msg else (redacted,)
+                else:
+                    record.args = tuple(
+                        redact(arg) if isinstance(arg, (dict, list)) else arg
+                        for arg in record.args
+                    )
             except Exception:
                 # If redaction fails, pass through to avoid breaking logging
                 pass
@@ -446,8 +449,8 @@ def _draft_out(draft: ConfigDraft) -> DraftOut:
         site_id=draft.site_id,
         node_ids=draft.node_ids,
         source_revision=draft.source_revision,
-        diff=draft.diff,
-        validation=draft.validation,
+        diff=strip_retired_policy_fields(draft.diff),
+        validation=strip_retired_policy_fields(draft.validation),
         risk_level=draft.risk_level,
         status=draft.status,
         expires_at=draft.expires_at,
@@ -497,36 +500,16 @@ def _task_out(task: Task) -> TaskOut:
     )
 
 
-def _exception_out(item: TravelException) -> TravelExceptionOut:
-    return TravelExceptionOut(
+def _source_blacklist_out(item: SourceBlacklist) -> SourceBlacklistOut:
+    return SourceBlacklistOut(
         id=_model_id(item),
-        cidr=item.cidr,
-        comment=item.comment,
-        owner=item.owner,
-        expires_at=item.expires_at,
-        enabled=item.enabled,
-        created_at=item.created_at,
-    )
-
-
-def _cross_site_out(item: CrossSiteAllow) -> CrossSiteAllowOut:
-    return CrossSiteAllowOut(
-        id=_model_id(item),
-        from_site_id=item.from_site_id,
-        to_site_id=item.to_site_id,
-        enabled=item.enabled,
-        comment=item.comment,
-        updated_at=item.updated_at,
-    )
-
-
-def _blacklist_out(item: DestinationBlacklist) -> DestinationBlacklistOut:
-    return DestinationBlacklistOut(
-        id=_model_id(item),
-        pattern=item.pattern,
+        scope=item.scope,
+        site_id=item.site_id,
         kind=item.kind,
+        pattern=item.pattern,
         comment=item.comment,
         enabled=item.enabled,
+        created_by=item.created_by,
         created_at=item.created_at,
     )
 
@@ -637,6 +620,8 @@ def _latest_ack_per_node(items: list[AgentAckDocument]) -> list[AgentAckDocument
 
 
 def _audit_out(item: AuditEvent) -> AuditEventOut:
+    # Historical audit events remain immutable so their hash chain can still
+    # verify. Filter retired policy fields only from management responses.
     return AuditEventOut(
         event_id=item.event_id,
         actor=item.actor,
@@ -646,8 +631,8 @@ def _audit_out(item: AuditEvent) -> AuditEventOut:
         action=item.action,
         target_type=item.target_type,
         target_id=item.target_id,
-        before=item.before,
-        after=item.after,
+        before=strip_retired_policy_fields(item.before),
+        after=strip_retired_policy_fields(item.after),
         result=item.result,
         error=item.error,
         immutable_hash=item.immutable_hash,
@@ -1077,6 +1062,94 @@ async def _increment_all_site_revisions() -> None:
     await _increment_site_revisions([_model_id(site) for site in sites])
 
 
+_ACTIVE_CONFIG_RELEASE_STATUSES = frozenset(
+    {"queued", "applying", "health_check", "rolling_back"}
+)
+
+
+@dataclass(frozen=True)
+class _SourceBlacklistReleasePlan:
+    """One affected site and the nodes that must receive its policy change."""
+
+    site: Site
+    nodes: list[Node]
+
+
+@dataclass(frozen=True)
+class _SourceBlacklistDistribution:
+    """Recorded release work for one source-blacklist mutation."""
+
+    releases: list[ConfigRelease]
+    draft_ids: list[str]
+    no_node_site_ids: list[str]
+    targets: list[SourceBlacklistDistributionOut]
+
+
+async def _source_blacklist_target_sites(
+    *, scope: str, site_id: str | None
+) -> list[Site]:
+    """Resolve the sites affected by a global or site-scoped rule."""
+
+    if scope == "global":
+        return await Site.find_all().sort(+Site.slug).to_list()
+    site = await Site.get(site_id or "")
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    return [site]
+
+
+async def _source_blacklist_no_effect_distribution(
+    *, scope: str, site_id: str | None
+) -> list[SourceBlacklistDistributionOut]:
+    """Describe an inert rule mutation without creating a release."""
+
+    targets: list[SourceBlacklistDistributionOut] = []
+    for site in await _source_blacklist_target_sites(scope=scope, site_id=site_id):
+        target_site_id = _model_id(site)
+        nodes = await Node.find({"site_id": target_site_id}).to_list()
+        targets.append(
+            SourceBlacklistDistributionOut(
+                site_id=target_site_id,
+                node_ids=[node.agent_id for node in nodes],
+                state="no_effect",
+                release=None,
+            )
+        )
+    return targets
+
+
+async def _source_blacklist_release_plans(
+    *, scope: str, site_id: str | None
+) -> list[_SourceBlacklistReleasePlan]:
+    """Snapshot targets and reject policy changes that would supersede a release.
+
+    Agents always request the newest desired bundle. Generating another desired
+    release while one is still applying would let an agent skip the earlier
+    bundle, leaving its ConfigRelease permanently waiting for an ACK. Check
+    every affected site before the rule itself is changed so a global update is
+    all-or-nothing with respect to active releases.
+    """
+
+    sites = await _source_blacklist_target_sites(scope=scope, site_id=site_id)
+
+    plans: list[_SourceBlacklistReleasePlan] = []
+    for site in sites:
+        target_site_id = _model_id(site)
+        nodes = await Node.find({"site_id": target_site_id}).to_list()
+        active = await _active_config_release_for_nodes(nodes)
+        if active is not None:
+            raise HTTPException(
+                409,
+                {
+                    "code": "source_blacklist_release_in_progress",
+                    "site_id": target_site_id,
+                    "release_id": active.release_id,
+                },
+            )
+        plans.append(_SourceBlacklistReleasePlan(site=site, nodes=nodes))
+    return plans
+
+
 async def seed_defaults(settings: Settings) -> None:
     if settings.seed_default_sites:
         for slug, name in DEFAULT_SITES:
@@ -1182,7 +1255,7 @@ async def lifespan(app: FastAPI):
         await database.close()
 
 
-app = FastAPI(title="Grouproxy Control Plane", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Grouproxy Control Plane", version="0.5.0", lifespan=lifespan)
 
 # CORS: strict origin allowlist, no wildcard ports. Production same-origin
 # deploys (dashboard and backend both served from the same domain) should set
@@ -1246,9 +1319,9 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                             f"CSRF check failed: origin={origin!r} not in allowed origins, "
                             f"path={path}, method={request.method}"
                         )
-                        raise HTTPException(
+                        return JSONResponse(
                             status_code=status.HTTP_403_FORBIDDEN,
-                            detail="csrf_origin_mismatch",
+                            content={"detail": "csrf_origin_mismatch"},
                         )
         
         return await call_next(request)
@@ -1266,7 +1339,7 @@ async def healthz() -> dict[str, str]:
     # Keep the deployed API version visible without requiring management
     # authentication.  This makes stale dashboard/backend processes obvious
     # when a newly added route is reported as 404.
-    return {"status": "ok", "service": "grouproxy-backend", "version": "0.4.0"}
+    return {"status": "ok", "service": "grouproxy-backend", "version": "0.5.0"}
 
 
 @app.get("/readyz")
@@ -1745,83 +1818,26 @@ async def update_node(
     return _node_out(node)
 
 
-@app.get("/api/v1/sites/{site_id}/cidrs", response_model=list[CIDROut])
-async def list_cidrs(site_id: str, _: str = Depends(require_management)) -> list[CIDROut]:
-    entries = await SiteCIDR.find(SiteCIDR.site_id == site_id).sort(+SiteCIDR.cidr).to_list()
-    return [
-        CIDROut(
-            id=_model_id(item),
-            site_id=item.site_id,
-            cidr=item.cidr,
-            comment=item.comment,
-            enabled=item.enabled,
-        )
-        for item in entries
-    ]
+@app.get("/api/v1/source-blacklist", response_model=list[SourceBlacklistOut])
+async def list_source_blacklist(_: str = Depends(require_management)) -> list[SourceBlacklistOut]:
+    entries = await SourceBlacklist.find_all().sort(+SourceBlacklist.created_at).to_list()
+    return [_source_blacklist_out(item) for item in entries]
 
 
-@app.post("/api/v1/sites/{site_id}/cidrs", response_model=CIDROut, status_code=201)
-async def add_cidr(
-    site_id: str, payload: CIDRCreate, _: str = Depends(require_management)
-) -> CIDROut:
-    site = await Site.get(site_id)
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    try:
-        cidr = normalize_cidr(payload.cidr)
-    except ValueError as exc:
-        raise HTTPException(422, "invalid_cidr") from exc
-    if await SiteCIDR.find_one(SiteCIDR.site_id == site_id, SiteCIDR.cidr == cidr):
-        raise HTTPException(409, "cidr_exists")
-    entry = SiteCIDR(
-        site_id=site_id,
-        cidr=cidr,
-        comment=payload.comment,
-        enabled=payload.enabled,
-        created_by=_actor(),
-    )
-    await entry.insert()
-    site.config_revision += 1
-    await site.save()
-    await append_audit(
-        action="cidr.create",
-        target_type="site_cidr",
-        target_id=_model_id(entry),
-        actor=_actor(),
-        after={"site_id": site_id, "cidr": cidr, "comment": payload.comment},
-    )
-    return CIDROut(
-        id=_model_id(entry),
-        site_id=entry.site_id,
-        cidr=entry.cidr,
-        comment=entry.comment,
-        enabled=entry.enabled,
-    )
+@app.post(
+    "/api/v1/source-blacklist/preview",
+    response_model=SourceBlacklistPreviewResponse,
+)
+async def preview_source_blacklist(
+    payload: SourceBlacklistPreviewRequest,
+    _: str = Depends(require_management),
+) -> SourceBlacklistPreviewResponse:
+    """Preview source access using the explicit blacklist for one site.
 
+    A request contains only an address, so domain rules are listed in the
+    response but are materialized by the monitor when it resolves the bundle.
+    """
 
-@app.delete("/api/v1/sites/{site_id}/cidrs/{cidr_id}", status_code=204)
-async def delete_cidr(site_id: str, cidr_id: str, _: str = Depends(require_management)) -> None:
-    entry = await SiteCIDR.get(cidr_id)
-    if entry is None or entry.site_id != site_id:
-        raise HTTPException(404, "cidr_not_found")
-    await entry.delete()
-    site = await Site.get(site_id)
-    if site:
-        site.config_revision += 1
-        await site.save()
-    await append_audit(
-        action="cidr.delete",
-        target_type="site_cidr",
-        target_id=cidr_id,
-        actor=_actor(),
-        before={"site_id": site_id, "cidr": entry.cidr},
-    )
-
-
-@app.post("/api/v1/cidrs/preview", response_model=CIDRPreviewResponse)
-async def preview_cidr(
-    payload: CIDRPreviewRequest, _: str = Depends(require_management)
-) -> CIDRPreviewResponse:
     try:
         source_ip = normalize_source_ip(payload.source_ip)
     except ValueError as exc:
@@ -1829,181 +1845,171 @@ async def preview_cidr(
     site = await Site.get(payload.site_id)
     if site is None:
         raise HTTPException(404, "site_not_found")
-    cidrs, _ = await effective_cidrs(payload.site_id)
-    match = match_source_ip(source_ip, cidrs)
+    source_rules = await effective_source_blacklist(payload.site_id)
+    match = match_source_blacklist(source_ip, source_rules)
     if site.shutdown:
         reason = "shutdown"
-    elif match is None:
-        reason = "not_in_allowlist"
+    elif match is not None:
+        reason = "source_blacklisted"
     else:
         reason = "allowed"
-    return CIDRPreviewResponse(
-        allowed=match is not None and not site.shutdown,
-        matched_cidr=match,
+    return SourceBlacklistPreviewResponse(
+        allowed=match is None and not site.shutdown,
+        matched_pattern=match,
         reason=reason,
-        effective_cidrs=cidrs,
+        source_blacklist=source_rules,
     )
 
 
-@app.get("/api/v1/exceptions", response_model=list[TravelExceptionOut])
-async def list_exceptions(_: str = Depends(require_management)) -> list[TravelExceptionOut]:
-    return [
-        _exception_out(item)
-        for item in await TravelException.find_all().sort(+TravelException.expires_at).to_list()
-    ]
-
-
-@app.post("/api/v1/exceptions", response_model=TravelExceptionOut, status_code=201)
-async def create_exception(
-    payload: TravelExceptionCreate, _: str = Depends(require_management)
-) -> TravelExceptionOut:
+@app.post(
+    "/api/v1/source-blacklist",
+    response_model=SourceBlacklistMutationOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def add_source_blacklist(
+    payload: SourceBlacklistCreate,
+    request: Request,
+    _: str = Depends(require_management),
+) -> SourceBlacklistMutationOut:
+    site_id = payload.site_id.strip() if payload.site_id else None
+    if payload.scope == "site":
+        if not site_id:
+            raise HTTPException(422, "source_blacklist_site_required")
+        if await Site.get(site_id) is None:
+            raise HTTPException(404, "site_not_found")
+    elif site_id:
+        raise HTTPException(422, "source_blacklist_global_site_forbidden")
     try:
-        cidr = normalize_cidr(payload.cidr)
+        pattern = normalize_source_blacklist_pattern(payload.kind, payload.pattern)
     except ValueError as exc:
-        raise HTTPException(422, "invalid_exception") from exc
-    if payload.expires_at <= utcnow():
-        raise HTTPException(422, "exception_must_expire_in_future")
-    item = TravelException(
-        cidr=cidr,
-        comment=payload.comment,
-        owner=payload.owner,
-        expires_at=payload.expires_at,
+        raise HTTPException(422, "invalid_source_blacklist_pattern") from exc
+    existing = await SourceBlacklist.find_one(
+        SourceBlacklist.scope == payload.scope,
+        SourceBlacklist.site_id == site_id,
+        SourceBlacklist.kind == payload.kind,
+        SourceBlacklist.pattern == pattern,
+    )
+    if existing is not None:
+        raise HTTPException(409, "source_blacklist_entry_exists")
+
+    # An enabled rule changes the next bundle. Resolve all sites and verify
+    # that none has an in-flight release before persisting it, otherwise a
+    # monitor could skip the old desired bundle and strand its release.
+    plans = (
+        await _source_blacklist_release_plans(scope=payload.scope, site_id=site_id)
+        if payload.enabled
+        else []
+    )
+    item = SourceBlacklist(
+        scope=payload.scope,
+        site_id=site_id,
+        kind=payload.kind,
+        pattern=pattern,
+        comment=payload.comment.strip(),
         enabled=payload.enabled,
         created_by=_actor(),
     )
     await item.insert()
-    await _increment_all_site_revisions()
-    await append_audit(
-        action="exception.create",
-        target_type="travel_exception",
-        target_id=_model_id(item),
-        actor=_actor(),
-        after={"cidr": cidr, "expires_at": item.expires_at.isoformat(), "enabled": item.enabled},
-    )
-    return _exception_out(item)
-
-
-@app.delete("/api/v1/exceptions/{exception_id}", status_code=204)
-async def delete_exception(exception_id: str, _: str = Depends(require_management)) -> None:
-    item = await TravelException.get(exception_id)
-    if item is None:
-        raise HTTPException(404, "exception_not_found")
-    await item.delete()
-    await _increment_all_site_revisions()
-    await append_audit(
-        action="exception.delete",
-        target_type="travel_exception",
-        target_id=exception_id,
-        actor=_actor(),
-        before={"cidr": item.cidr, "expires_at": item.expires_at.isoformat()},
-    )
-
-
-@app.get("/api/v1/cross-site-allows", response_model=list[CrossSiteAllowOut])
-async def list_cross_site_allows(_: str = Depends(require_management)) -> list[CrossSiteAllowOut]:
-    return [
-        _cross_site_out(item)
-        for item in await CrossSiteAllow.find_all().sort(+CrossSiteAllow.updated_at).to_list()
-    ]
-
-
-@app.put("/api/v1/cross-site-allows", response_model=CrossSiteAllowOut)
-@app.post("/api/v1/cross-site-allows", response_model=CrossSiteAllowOut, status_code=201)
-async def set_cross_site(
-    payload: CrossSiteAllowUpdate, _: str = Depends(require_management)
-) -> CrossSiteAllowOut:
-    from_site_id, to_site_id = payload.from_site_id, payload.to_site_id
-    if (
-        not from_site_id
-        or not to_site_id
-        or from_site_id == to_site_id
-        or await Site.get(from_site_id) is None
-        or await Site.get(to_site_id) is None
-    ):
-        raise HTTPException(422, "invalid_site_pair")
-    relation = await CrossSiteAllow.find_one(
-        CrossSiteAllow.from_site_id == from_site_id, CrossSiteAllow.to_site_id == to_site_id
-    )
-    if relation is None:
-        relation = CrossSiteAllow(from_site_id=from_site_id, to_site_id=to_site_id)
-    before = {"enabled": relation.enabled, "comment": relation.comment}
-    relation.enabled = payload.enabled
-    relation.comment = payload.comment
-    relation.updated_at = utcnow()
-    if relation.id:
-        await relation.save()
+    request_id = _request_id(request)
+    if item.enabled:
+        distribution = await _distribute_source_blacklist_change(
+            rule=item,
+            operation="created",
+            plans=plans,
+            actor=_actor(),
+            request_id=request_id,
+        )
+        targets = distribution.targets
     else:
-        await relation.insert()
-    await _increment_site_revisions([to_site_id])
+        targets = await _source_blacklist_no_effect_distribution(
+            scope=item.scope,
+            site_id=item.site_id,
+        )
     await append_audit(
-        action="cross_site.update",
-        target_type="cross_site_allow",
-        target_id=_model_id(relation),
-        actor=_actor(),
-        before=before,
-        after={"from_site_id": from_site_id, "to_site_id": to_site_id, "enabled": relation.enabled},
-    )
-    return _cross_site_out(relation)
-
-
-@app.get("/api/v1/blacklist", response_model=list[DestinationBlacklistOut])
-async def list_blacklist(_: str = Depends(require_management)) -> list[DestinationBlacklistOut]:
-    entries = await DestinationBlacklist.find_all().sort(+DestinationBlacklist.pattern).to_list()
-    return [_blacklist_out(item) for item in entries]
-
-
-@app.post("/api/v1/blacklist", response_model=DestinationBlacklistOut, status_code=201)
-async def add_blacklist(
-    payload: DestinationBlacklistCreate, _: str = Depends(require_management)
-) -> DestinationBlacklistOut:
-    pattern = payload.pattern.strip()
-    try:
-        if payload.kind == "cidr":
-            pattern = normalize_cidr(pattern)
-        elif payload.kind == "ip":
-            pattern = normalize_source_ip(pattern)
-        else:
-            pattern = pattern.lower().rstrip(".")
-    except ValueError as exc:
-        raise HTTPException(422, "invalid_blacklist_pattern") from exc
-    if not pattern:
-        raise HTTPException(422, "invalid_blacklist_pattern")
-    if await DestinationBlacklist.find_one(
-        DestinationBlacklist.pattern == pattern,
-        DestinationBlacklist.kind == payload.kind,
-    ):
-        raise HTTPException(409, "blacklist_entry_exists")
-    item = DestinationBlacklist(
-        pattern=pattern,
-        kind=payload.kind,
-        comment=payload.comment,
-        enabled=payload.enabled,
-    )
-    await item.insert()
-    await _increment_all_site_revisions()
-    await append_audit(
-        action="blacklist.create",
-        target_type="destination_blacklist",
+        action="source_blacklist.create",
+        target_type="source_blacklist",
         target_id=_model_id(item),
         actor=_actor(),
-        after={"pattern": item.pattern, "kind": item.kind, "enabled": item.enabled},
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        after={
+            "scope": item.scope,
+            "site_id": item.site_id,
+            "kind": item.kind,
+            "pattern": item.pattern,
+            "enabled": item.enabled,
+            "release_ids": [
+                target.release.release_id for target in targets if target.release is not None
+            ],
+        },
     )
-    return _blacklist_out(item)
+    return SourceBlacklistMutationOut(
+        rule=_source_blacklist_out(item),
+        operation="created",
+        distribution=targets,
+    )
 
 
-@app.delete("/api/v1/blacklist/{entry_id}", status_code=204)
-async def delete_blacklist(entry_id: str, _: str = Depends(require_management)) -> None:
-    item = await DestinationBlacklist.get(entry_id)
+@app.delete(
+    "/api/v1/source-blacklist/{entry_id}",
+    response_model=SourceBlacklistMutationOut,
+)
+async def delete_source_blacklist(
+    entry_id: str,
+    request: Request,
+    _: str = Depends(require_management),
+) -> SourceBlacklistMutationOut:
+    item = await SourceBlacklist.get(entry_id)
     if item is None:
-        raise HTTPException(404, "blacklist_entry_not_found")
+        raise HTTPException(404, "source_blacklist_entry_not_found")
+
+    # Preflight before deleting an effective rule. A rejected preflight leaves
+    # the persisted rule exactly as it was and avoids partial global rollout.
+    plans = (
+        await _source_blacklist_release_plans(scope=item.scope, site_id=item.site_id)
+        if item.enabled
+        else []
+    )
+    rule = _source_blacklist_out(item)
     await item.delete()
-    await _increment_all_site_revisions()
+    request_id = _request_id(request)
+    if item.enabled:
+        distribution = await _distribute_source_blacklist_change(
+            rule=item,
+            operation="deleted",
+            plans=plans,
+            actor=_actor(),
+            request_id=request_id,
+        )
+        targets = distribution.targets
+    else:
+        targets = await _source_blacklist_no_effect_distribution(
+            scope=item.scope,
+            site_id=item.site_id,
+        )
     await append_audit(
-        action="blacklist.delete",
-        target_type="destination_blacklist",
+        action="source_blacklist.delete",
+        target_type="source_blacklist",
         target_id=entry_id,
         actor=_actor(),
-        before={"pattern": item.pattern, "kind": item.kind},
+        request_id=request_id,
+        source_ip=_request_source_ip(request),
+        before={
+            "scope": item.scope,
+            "site_id": item.site_id,
+            "kind": item.kind,
+            "pattern": item.pattern,
+        },
+        after={
+            "release_ids": [
+                target.release.release_id for target in targets if target.release is not None
+            ],
+        },
+    )
+    return SourceBlacklistMutationOut(
+        rule=rule,
+        operation="deleted",
+        distribution=targets,
     )
 
 
@@ -2239,14 +2245,19 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
     selected = payload.node_ids or [_model_id(node) for node in nodes]
     if any(node_id not in {_model_id(node) for node in nodes} for node_id in selected):
         raise HTTPException(422, "node_not_in_site")
-    cidrs, sources = await effective_cidrs(payload.site_id)
-    validation = {"valid": True, "errors": [], "effective_cidrs": cidrs, "acl_sources": sources}
-    risk = "high" if payload.diff.get("shutdown") else ("medium" if payload.diff else "low")
+    source_rules = await effective_source_blacklist(payload.site_id)
+    clean_diff = strip_retired_policy_fields(payload.diff)
+    validation = {
+        "valid": True,
+        "errors": [],
+        "source_blacklist": source_rules,
+    }
+    risk = "high" if clean_diff.get("shutdown") else ("medium" if clean_diff else "low")
     draft = ConfigDraft(
         site_id=payload.site_id,
         node_ids=selected,
         source_revision=site.config_revision,
-        diff=payload.diff,
+        diff=clean_diff,
         validation=validation,
         risk_level=risk,
         created_by=_actor(),
@@ -2258,7 +2269,7 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
         target_type="config_draft",
         target_id=_model_id(draft),
         actor=_actor(),
-        after={"site_id": payload.site_id, "risk_level": risk, "diff": payload.diff},
+        after={"site_id": payload.site_id, "risk_level": risk, "diff": clean_diff},
     )
     return _draft_out(draft)
 
@@ -2277,6 +2288,20 @@ async def get_draft(draft_id: str, _: str = Depends(require_management)) -> Draf
     if draft is None:
         raise HTTPException(404, "draft_not_found")
     return _draft_out(draft)
+
+
+async def _active_config_release_for_nodes(nodes: list[Node]) -> ConfigRelease | None:
+    """Return a release which would be superseded by a new desired bundle."""
+
+    agent_ids = [node.agent_id for node in nodes]
+    if not agent_ids:
+        return None
+    return await ConfigRelease.find_one(
+        {
+            "node_ids": {"$in": agent_ids},
+            "status": {"$in": list(_ACTIVE_CONFIG_RELEASE_STATUSES)},
+        }
+    )
 
 
 async def _create_release_from_draft(
@@ -2311,12 +2336,7 @@ async def _create_release_from_draft(
     # ObjectIds are an implementation detail and must not be used for
     # cross-component reconciliation.
     selected_ids = [node.agent_id for node in selected]
-    active_release = await ConfigRelease.find_one(
-        {
-            "node_ids": {"$in": selected_ids},
-            "status": {"$in": ["queued", "applying", "health_check", "rolling_back"]},
-        }
-    )
+    active_release = await _active_config_release_for_nodes(selected)
     if active_release:
         raise HTTPException(409, "release_in_progress")
     current = await latest_release(draft.site_id)
@@ -2377,6 +2397,110 @@ async def _create_release_from_draft(
         },
     )
     return release, False
+
+
+async def _distribute_source_blacklist_change(
+    *,
+    rule: SourceBlacklist,
+    operation: str,
+    plans: list[_SourceBlacklistReleasePlan],
+    actor: str,
+    request_id: str,
+) -> _SourceBlacklistDistribution:
+    """Create normal per-site releases for an already persisted rule change.
+
+    Bundles are signed and released through the same path as operator-created
+    drafts. A site without a node has nothing to acknowledge, so its revision
+    advances once without inventing an unfinishable release.
+    """
+
+    releases: list[ConfigRelease] = []
+    draft_ids: list[str] = []
+    no_node_site_ids: list[str] = []
+    targets: list[SourceBlacklistDistributionOut] = []
+    rule_id = _model_id(rule)
+    rule_change = {
+        "operation": operation,
+        "rule_id": rule_id,
+        "scope": rule.scope,
+        "site_id": rule.site_id,
+        "kind": rule.kind,
+        "pattern": rule.pattern,
+        "enabled": rule.enabled,
+    }
+    for plan in plans:
+        site = plan.site
+        site_id = _model_id(site)
+        if not plan.nodes:
+            site.config_revision += 1
+            await site.save()
+            no_node_site_ids.append(site_id)
+            targets.append(
+                SourceBlacklistDistributionOut(
+                    site_id=site_id,
+                    node_ids=[],
+                    state="no_nodes",
+                    release=None,
+                )
+            )
+            continue
+        source_rules = await effective_source_blacklist(site_id)
+        draft = ConfigDraft(
+            site_id=site_id,
+            node_ids=[_model_id(node) for node in plan.nodes],
+            source_revision=site.config_revision,
+            diff={"source_blacklist": rule_change},
+            validation={
+                "valid": True,
+                "errors": [],
+                "source_blacklist": source_rules,
+            },
+            risk_level="medium",
+            created_by=actor,
+            expires_at=utcnow() + timedelta(hours=24),
+        )
+        await draft.insert()
+        draft_ids.append(_model_id(draft))
+        try:
+            release, reused = await _create_release_from_draft(
+                draft=draft,
+                site=site,
+                requested_node_ids=draft.node_ids,
+                expected_current_version=None,
+                idempotency_key=f"source-blacklist:{operation}:{rule_id}:{site_id}",
+                request_id=request_id,
+                actor=actor,
+            )
+        except Exception:
+            # This temporary draft is not operator-authored. Keep it out of
+            # the normal release queue when a race or bundle validation error
+            # prevents the release from being created.
+            if draft.status == "draft":
+                draft.status = "expired"
+                draft.updated_at = utcnow()
+                await draft.save()
+            raise
+        if reused:
+            # The deterministic key can only be reused after a retry. Retire
+            # the duplicate temporary draft and surface the original release.
+            draft.status = "expired"
+            draft.updated_at = utcnow()
+            await draft.save()
+        releases.append(release)
+        targets.append(
+            SourceBlacklistDistributionOut(
+                site_id=site_id,
+                node_ids=[node.agent_id for node in plan.nodes],
+                state="released",
+                release=_release_out(release),
+            )
+        )
+    return _SourceBlacklistDistribution(
+        releases=releases,
+        draft_ids=draft_ids,
+        no_node_site_ids=no_node_site_ids,
+        targets=targets,
+    )
 
 
 @app.post("/api/v1/config/releases", response_model=ReleaseOut, status_code=202)
@@ -2501,7 +2625,7 @@ async def _publish_subscription_version(
         nodes = nodes_by_site[site_id]
         if not nodes:
             continue
-        cidrs, sources = await effective_cidrs(site_id)
+        source_rules = await effective_source_blacklist(site_id)
         draft = ConfigDraft(
             site_id=site_id,
             node_ids=[_model_id(node) for node in nodes],
@@ -2519,8 +2643,7 @@ async def _publish_subscription_version(
             validation={
                 "valid": True,
                 "errors": [],
-                "effective_cidrs": cidrs,
-                "acl_sources": sources,
+                "source_blacklist": source_rules,
                 "subscription": {
                     "parse_ok": version.parse_ok,
                     "content_hash": version.content_hash,
@@ -3003,7 +3126,7 @@ async def select_node_proxy(
     site = await Site.get(node.site_id)
     if site is None:
         raise HTTPException(409, "site_not_found")
-    cidrs, sources = await effective_cidrs(node.site_id)
+    source_rules = await effective_source_blacklist(node.site_id)
     draft = ConfigDraft(
         site_id=node.site_id,
         node_ids=[_model_id(node)],
@@ -3020,8 +3143,7 @@ async def select_node_proxy(
         validation={
             "valid": True,
             "errors": [],
-            "effective_cidrs": cidrs,
-            "acl_sources": sources,
+            "source_blacklist": source_rules,
             "proxy_selection": {
                 "group": group_name,
                 "outbound": outbound_name,

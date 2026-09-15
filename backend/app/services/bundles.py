@@ -5,15 +5,44 @@ from uuid import uuid4
 from ..config import PROXY_LISTEN_PORT, Settings
 from ..models import (
     DesiredRelease,
-    DestinationBlacklist,
     Node,
     Site,
     SiteSubscription,
     SubscriptionVersion,
 )
-from .cidr import effective_cidrs
+from .cidr import effective_source_blacklist
 from .crypto import sign_bundle
 from .subscriptions import subscription_outbound_tags
+
+RETIRED_POLICY_FIELDS = frozenset(
+    {
+        "allow_cidrs",
+        "deny_destinations",
+        "deny_sources",
+        "acl_note",
+        "acl_sources",
+        "effective_cidrs",
+    }
+)
+
+
+def strip_retired_policy_fields(value: Any) -> Any:
+    """Return JSON-shaped data without policy fields removed by this release.
+
+    Older drafts and desired bundles can remain in MongoDB across an upgrade.
+    Keeping the cleanup recursive prevents those fields from leaking through a
+    draft/desired response or being carried into a newly signed retry.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: strip_retired_policy_fields(item)
+            for key, item in value.items()
+            if key not in RETIRED_POLICY_FIELDS
+        }
+    if isinstance(value, list):
+        return [strip_retired_policy_fields(item) for item in value]
+    return value
 
 
 def iso(value: datetime) -> str:
@@ -112,16 +141,29 @@ async def repair_stale_proxy_selection(
     fallback, including when the bundle was created by an older backend.
     """
 
-    selection = desired.bundle.get("proxy_selection")
+    repaired = strip_retired_policy_fields(desired.bundle)
+    changed = repaired != desired.bundle
+    selection = repaired.get("proxy_selection")
     if not isinstance(selection, dict):
-        return False
+        if not changed:
+            return False
+        signed = sign_bundle(repaired, settings.bundle_hmac_secret)
+        desired.bundle = signed
+        desired.bundle_hash = signed["bundle_hash"]
+        await desired.save()
+        return True
     group = str(selection.get("group", "")).strip()
     outbound = str(selection.get("outbound", "")).strip()
-    tags = await _bundle_subscription_tags(desired.bundle)
+    tags = await _bundle_subscription_tags(repaired)
     if group == "subscription" and outbound and outbound in tags:
+        if not changed:
+            return False
+    else:
+        repaired = dict(repaired)
+        repaired.pop("proxy_selection", None)
+        changed = True
+    if not changed:
         return False
-    repaired = dict(desired.bundle)
-    repaired.pop("proxy_selection", None)
     signed = sign_bundle(repaired, settings.bundle_hmac_secret)
     desired.bundle = signed
     desired.bundle_hash = signed["bundle_hash"]
@@ -138,10 +180,7 @@ async def build_signed_bundle(
     settings: Settings,
     proxy_selection: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    allow_cidrs, sources = await effective_cidrs(str(site.id))
-    blacklist = await DestinationBlacklist.find(
-        DestinationBlacklist.enabled == True,  # noqa: E712 - Beanie expression
-    ).to_list()
+    source_blacklist = await effective_source_blacklist(str(site.id))
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
     selected_tags = (
@@ -151,15 +190,15 @@ async def build_signed_bundle(
         "schema_version": 1,
         "release_id": release_id,
         "desired_version": desired_version,
-        "min_monitor_version": "0.4.0",
+        "min_monitor_version": "0.5.0",
         "site_id": str(site.id),
         "node_id": node.agent_id,
         "shutdown": site.shutdown,
         "listen": {"http_port": PROXY_LISTEN_PORT},
-        "allow_cidrs": allow_cidrs,
-        "deny_destinations": [{"pattern": item.pattern, "kind": item.kind} for item in blacklist],
+        # Source access is allow-all by default.  Only explicit blacklist
+        # entries are carried to the monitor and rendered as deny rules.
+        "source_blacklist": source_blacklist,
         "subscription": subscription,
-        "acl_note": sources,
         "issued_at": iso(now),
         "expires_at": iso(now + timedelta(days=settings.bundle_ttl_days)),
     }

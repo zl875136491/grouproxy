@@ -14,16 +14,25 @@ a large blob from its configured backend with its node token. The resolved
 sing-box configuration is persisted as `last-good.json`,
 so restart and rollback do not need historical blob access.
 
+Version `0.5.0` changes source access to allow-all by default. Signed bundles
+must carry a canonical flat `source_blacklist` array of explicit global or
+current-site entries. IP and network entries render as sing-box and nftables
+drops; source domains are resolved on the monitor before a candidate is
+applied, and the materialized addresses are persisted with last-good state for
+DNS-independent rollback. Retired allowlist, destination-block, and source
+alias fields are rejected for new bundles and removed from historical local
+state before recovery.
+
 Deployed public HTTP inbounds are fixed to port `1080` and have no application
 credential list. The same-host test harness may use one explicit alternate
 public listener only when `test_ingress_override: true`, the control-plane URL
 is loopback HTTP, and firewall mode is `dry-run`; this lets its simulated nuc
-node bind `0.0.0.0:18081` without changing deployed-node behavior. Source CIDR
-policy is enforced by the rendered route rules and the monitor-owned nftables
-policy. Clash Trojan sources are converted to sing-box TLS objects, including
+node bind `0.0.0.0:18081` without changing deployed-node behavior. Source
+blacklist policy is enforced by the rendered route rules and the monitor-owned
+nftables policy. Clash Trojan sources are converted to sing-box TLS objects, including
 SNI, certificate-validation mode, ALPN, and client fingerprint values. The
-control plane continues to own ACLs, routes, direct / block outbounds, and
-selectors.
+control plane owns subscriptions and selector preferences; no destination
+access policy is rendered by the monitor.
 
 The monitor also samples its loopback Clash `/proxies` endpoint and posts a
 bounded proxy-group snapshot to `/agent/v1/proxy-config`. It actively measures

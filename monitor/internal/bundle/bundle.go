@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -141,21 +141,8 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 	if port != proxyListenPort {
 		return "", errors.New("unsupported_http_port")
 	}
-	switch cidrs := value["allow_cidrs"].(type) {
-	case []any:
-		for _, raw := range cidrs {
-			if _, _, err := net.ParseCIDR(stringValue(raw)); err != nil {
-				return "", errors.New("invalid_allow_cidr")
-			}
-		}
-	case []string:
-		for _, raw := range cidrs {
-			if _, _, err := net.ParseCIDR(raw); err != nil {
-				return "", errors.New("invalid_allow_cidr")
-			}
-		}
-	default:
-		return "", errors.New("invalid_allow_cidr_list")
+	if err := ValidateSourceBlacklist(value); err != nil {
+		return "", err
 	}
 	if err := validateSubscription(value); err != nil {
 		return "", err
@@ -164,6 +151,149 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 		return "", err
 	}
 	return stringValue(value["bundle_hash"]), nil
+}
+
+func rejectRetiredPolicyFields(value Bundle) error {
+	for _, field := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
+		if _, exists := value[field]; exists {
+			return errors.New("retired_policy_field")
+		}
+	}
+	return nil
+}
+
+// ValidateSourceBlacklist verifies the only source-policy representation the
+// monitor accepts from the control plane: a canonical flat JSON array. It is
+// also used when normalizing local last-good state before recovery.
+func ValidateSourceBlacklist(value Bundle) error {
+	if err := rejectRetiredPolicyFields(value); err != nil {
+		return err
+	}
+	raw, exists := value["source_blacklist"]
+	if !exists || raw == nil {
+		return errors.New("missing_source_blacklist")
+	}
+	return validateSourceBlacklistEntries(raw, stringValue(value["site_id"]))
+}
+
+func validateSourceBlacklistEntries(raw any, bundleSiteID string) error {
+	var entries []any
+	switch typed := raw.(type) {
+	case []any:
+		entries = typed
+	default:
+		return errors.New("invalid_source_blacklist_entries")
+	}
+	if len(entries) > 10_000 {
+		return errors.New("source_blacklist_too_large")
+	}
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			return errors.New("invalid_source_blacklist_entry")
+		}
+		kind, kindOK := entry["kind"].(string)
+		pattern, patternOK := entry["pattern"].(string)
+		if !kindOK || !patternOK || pattern == "" || pattern != strings.TrimSpace(pattern) || len(pattern) > 512 {
+			return errors.New("invalid_source_blacklist_pattern")
+		}
+		switch kind {
+		case "ip":
+			if !isCanonicalSourceIP(pattern) {
+				return errors.New("invalid_source_blacklist_ip")
+			}
+		case "network":
+			if !isCanonicalSourceNetwork(pattern) {
+				return errors.New("invalid_source_blacklist_network")
+			}
+		case "domain":
+			if !isCanonicalSourceDomain(pattern) {
+				return errors.New("invalid_source_blacklist_domain")
+			}
+		default:
+			return errors.New("invalid_source_blacklist_kind")
+		}
+		scope, scopeOK := entry["scope"].(string)
+		if !scopeOK || (scope != "global" && scope != "site") {
+			return errors.New("invalid_source_blacklist_scope")
+		}
+		entrySiteID := ""
+		if rawSiteID, exists := entry["site_id"]; exists && rawSiteID != nil {
+			var siteIDOK bool
+			entrySiteID, siteIDOK = rawSiteID.(string)
+			if !siteIDOK || entrySiteID != strings.TrimSpace(entrySiteID) {
+				return errors.New("invalid_source_blacklist_site")
+			}
+		}
+		if scope == "global" && entrySiteID != "" {
+			return errors.New("invalid_source_blacklist_site")
+		}
+		if scope == "site" && (entrySiteID == "" || entrySiteID != bundleSiteID) {
+			return errors.New("invalid_source_blacklist_site")
+		}
+	}
+	return nil
+}
+
+func isCanonicalSourceIP(pattern string) bool {
+	address, err := netip.ParseAddr(pattern)
+	return err == nil && address.String() == pattern
+}
+
+func isCanonicalSourceNetwork(pattern string) bool {
+	prefix, err := netip.ParsePrefix(pattern)
+	return err == nil && prefix.Masked() == prefix && prefix.String() == pattern
+}
+
+func isCanonicalSourceDomain(pattern string) bool {
+	if pattern == "" || len(pattern) > 253 || pattern != strings.ToLower(pattern) || strings.HasSuffix(pattern, ".") {
+		return false
+	}
+	if _, err := netip.ParseAddr(pattern); err == nil {
+		return false
+	}
+	labels := strings.Split(pattern, ".")
+	allNumericAddressLabels := true
+	for _, label := range labels {
+		if !isCanonicalHostnameLabel(label) {
+			return false
+		}
+		allNumericAddressLabels = allNumericAddressLabels && isNumericAddressLabel(label)
+	}
+	return !allNumericAddressLabels
+}
+
+func isCanonicalHostnameLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 {
+		return false
+	}
+	for index := 0; index < len(label); index++ {
+		character := label[index]
+		if character > 0x7f || (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+		if (index == 0 || index == len(label)-1) && character == '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isNumericAddressLabel(label string) bool {
+	if strings.HasPrefix(label, "0x") && len(label) > 2 {
+		for _, character := range label[2:] {
+			if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	for _, character := range label {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return label != ""
 }
 
 func validateSubscription(value Bundle) error {

@@ -1,6 +1,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from beanie import init_beanie
@@ -8,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from .config import PROXY_LISTEN_PORT, Settings
 from .models import DOCUMENT_MODELS
+from .services.cidr import normalize_source_blacklist_pattern
 from .services.crypto import sign_bundle
 
 logger = logging.getLogger(__name__)
@@ -23,15 +25,165 @@ SUBSCRIPTION_SOURCE_COLLECTION = "SubscriptionSource"
 LEGACY_PROXY_CREDENTIAL_COLLECTION = "ProxyCredential"
 DESIRED_RELEASE_COLLECTION = "DesiredRelease"
 CONFIG_DRAFT_COLLECTION = "ConfigDraft"
+SOURCE_BLACKLIST_COLLECTION = "SourceBlacklist"
+RETIRED_POLICY_COLLECTIONS = (
+    "SiteCIDR",
+    "TravelException",
+    "CrossSiteAllow",
+    "DestinationBlacklist",
+)
+RETIRED_POLICY_FIELDS = frozenset(
+    {
+        "allow_cidrs",
+        "deny_destinations",
+        "deny_sources",
+        "acl_note",
+        "acl_sources",
+        "effective_cidrs",
+    }
+)
 
 
-async def _migrate_retired_proxy_state(database: Any, settings: Settings) -> None:
-    """Erase retired proxy Basic-auth state and pin bundles to port 1080.
+def _strip_retired_policy_fields(value: Any) -> Any:
+    """Remove the policy model retired in favour of source blacklists."""
 
-    This runs before Beanie opens collections so no handler can expose a
-    retired credential. Legacy desired bundles are re-signed after the field
-    is stripped, allowing a still-pending release to apply without restoring
-    a removed authentication configuration.
+    if isinstance(value, dict):
+        return {
+            key: _strip_retired_policy_fields(item)
+            for key, item in value.items()
+            if key not in RETIRED_POLICY_FIELDS
+        }
+    if isinstance(value, list):
+        return [_strip_retired_policy_fields(item) for item in value]
+    return value
+
+
+def _normalized_source_blacklist_document(
+    document: dict[str, Any], *, known_site_ids: set[str]
+) -> dict[str, Any] | None:
+    """Return a canonical source rule, or drop an unsafe legacy document.
+
+    Beanie validates ``SourceBlacklist`` documents when it reads them. A row
+    written by an older build or directly into MongoDB can otherwise make an
+    entire policy query fail before the request handler has a chance to reject
+    the bad value. Source access is intentionally allow-all by default, so an
+    unrecognised deny record must not become an implicit blocker.
+    """
+
+    scope = document.get("scope")
+    kind = document.get("kind")
+    if scope not in {"global", "site"} or kind not in {"ip", "network", "domain"}:
+        return None
+    try:
+        pattern = normalize_source_blacklist_pattern(kind, document.get("pattern"))
+    except (TypeError, ValueError):
+        return None
+
+    raw_site_id = document.get("site_id")
+    if scope == "global":
+        # The two scopes have mutually exclusive targets. Do not guess whether
+        # an inconsistent row was intended to be global or site-scoped: source
+        # policy must not widen into an all-site deny during migration.
+        if raw_site_id is not None:
+            return None
+        site_id: str | None = None
+    else:
+        if not isinstance(raw_site_id, str):
+            return None
+        site_id = raw_site_id.strip()
+        if not site_id or site_id not in known_site_ids:
+            return None
+
+    raw_enabled = document.get("enabled", True)
+    if not isinstance(raw_enabled, bool):
+        return None
+    raw_comment = document.get("comment", "")
+    comment = raw_comment.strip()[:512] if isinstance(raw_comment, str) else ""
+    raw_created_by = document.get("created_by", "system")
+    created_by = raw_created_by.strip()[:128] if isinstance(raw_created_by, str) else "system"
+    if not created_by:
+        created_by = "system"
+    created_at = document.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = datetime.now(timezone.utc)
+    return {
+        "scope": scope,
+        "site_id": site_id,
+        "kind": kind,
+        "pattern": pattern,
+        "comment": comment,
+        "enabled": raw_enabled,
+        "created_by": created_by,
+        "created_at": created_at,
+    }
+
+
+async def _migrate_source_blacklist_state(database: Any) -> tuple[int, int]:
+    """Normalize valid source rules and remove malformed/orphaned duplicates.
+
+    This runs before Beanie opens the collection, which makes the modern flat
+    blacklist contract resilient to corrupted historical documents. The first
+    valid rule for a canonical key is retained; later duplicates are removed
+    before Beanie attempts to create its unique index.
+    """
+
+    collections = set(await database.list_collection_names())
+    if SOURCE_BLACKLIST_COLLECTION not in collections:
+        return 0, 0
+
+    known_site_ids = {
+        str(site["_id"])
+        async for site in database[SITE_COLLECTION].find({})
+        if site.get("_id") is not None
+    }
+    rules = database[SOURCE_BLACKLIST_COLLECTION]
+    normalized_count = 0
+    removed_count = 0
+    seen: set[tuple[str, str | None, str, str]] = set()
+    async for document in rules.find({}):
+        normalized = _normalized_source_blacklist_document(
+            document, known_site_ids=known_site_ids
+        )
+        document_id = document.get("_id")
+        if normalized is None:
+            await rules.delete_one({"_id": document_id})
+            removed_count += 1
+            continue
+        key = (
+            str(normalized["scope"]),
+            normalized["site_id"],
+            str(normalized["kind"]),
+            str(normalized["pattern"]),
+        )
+        if key in seen:
+            await rules.delete_one({"_id": document_id})
+            removed_count += 1
+            continue
+        seen.add(key)
+        changes = {
+            field: value
+            for field, value in normalized.items()
+            if document.get(field) != value
+        }
+        if changes:
+            await rules.update_one({"_id": document_id}, {"$set": changes})
+            normalized_count += 1
+    if normalized_count or removed_count:
+        logger.warning(
+            "Normalized source blacklist state before startup; updated=%d removed=%d",
+            normalized_count,
+            removed_count,
+        )
+    return normalized_count, removed_count
+
+
+async def _migrate_retired_policy_state(database: Any, settings: Settings) -> None:
+    """Erase retired proxy and policy state before handlers can expose it.
+
+    This runs before Beanie opens collections. Existing desired bundles are
+    normalized and re-signed so an installation upgraded from the old CIDR,
+    exception, cross-site, or destination-policy model cannot restore that
+    model through a pending bundle or a monitor restart.
     """
 
     sites = database[SITE_COLLECTION]
@@ -41,43 +193,62 @@ async def _migrate_retired_proxy_state(database: Any, settings: Settings) -> Non
             "$unset": {"http_port": "", "proxy_auth_required": ""},
         },
     )
-    credentials = database[LEGACY_PROXY_CREDENTIAL_COLLECTION]
-    dropped = await credentials.drop()
+    collections = set(await database.list_collection_names())
+    dropped_collections: list[str] = []
+    if LEGACY_PROXY_CREDENTIAL_COLLECTION in collections:
+        await database[LEGACY_PROXY_CREDENTIAL_COLLECTION].drop()
+        dropped_collections.append(LEGACY_PROXY_CREDENTIAL_COLLECTION)
+    for collection_name in RETIRED_POLICY_COLLECTIONS:
+        if collection_name in collections:
+            await database[collection_name].drop()
+            dropped_collections.append(collection_name)
     scrubbed_releases = 0
     desired_releases = database[DESIRED_RELEASE_COLLECTION]
     async for release in desired_releases.find({}):
         bundle = release.get("bundle")
         if not isinstance(bundle, dict):
             continue
-        legacy_auth = "proxy_auth" in bundle
-        listen = bundle.get("listen")
-        current_port = listen.get("http_port") if isinstance(listen, dict) else None
-        if not legacy_auth and current_port == PROXY_LISTEN_PORT:
+        normalized = _strip_retired_policy_fields(bundle)
+        normalized.pop("proxy_auth", None)
+        listen = normalized.get("listen")
+        if not isinstance(listen, dict) or listen.get("http_port") != PROXY_LISTEN_PORT:
+            normalized["listen"] = {"http_port": PROXY_LISTEN_PORT}
+        # The modern bundle contract has a single flat source blacklist. An
+        # old bundle becomes an explicit empty blacklist, which is allow-all.
+        if not isinstance(normalized.get("source_blacklist"), list):
+            normalized["source_blacklist"] = []
+        normalized["min_monitor_version"] = "0.5.0"
+        if normalized == bundle:
             continue
-        bundle.pop("proxy_auth", None)
-        bundle["listen"] = {"http_port": PROXY_LISTEN_PORT}
-        signed = sign_bundle(bundle, settings.bundle_hmac_secret)
+        signed = sign_bundle(normalized, settings.bundle_hmac_secret)
         await desired_releases.update_one(
             {"_id": release["_id"]},
             {"$set": {"bundle": signed, "bundle_hash": signed["bundle_hash"]}},
         )
         scrubbed_releases += 1
     drafts = database[CONFIG_DRAFT_COLLECTION]
-    scrubbed_drafts = await drafts.update_many(
-        {
-            "$or": [
-                {"diff.proxy_auth": {"$exists": True}},
-                {"validation.proxy_auth": {"$exists": True}},
-            ]
-        },
-        {"$unset": {"diff.proxy_auth": "", "validation.proxy_auth": ""}},
-    )
-    if updated.modified_count or dropped or scrubbed_releases or scrubbed_drafts.modified_count:
+    scrubbed_drafts = 0
+    async for draft in drafts.find({}):
+        diff = _strip_retired_policy_fields(draft.get("diff", {}))
+        validation = _strip_retired_policy_fields(draft.get("validation", {}))
+        if isinstance(diff, dict):
+            diff.pop("proxy_auth", None)
+        if isinstance(validation, dict):
+            validation.pop("proxy_auth", None)
+        if diff == draft.get("diff", {}) and validation == draft.get("validation", {}):
+            continue
+        await drafts.update_one(
+            {"_id": draft["_id"]},
+            {"$set": {"diff": diff, "validation": validation}},
+        )
+        scrubbed_drafts += 1
+    if updated.modified_count or dropped_collections or scrubbed_releases or scrubbed_drafts:
         logger.info(
-            "Removed retired proxy state; migrated_sites=%d bundles=%d drafts=%d",
+            "Removed retired policy state; migrated_sites=%d bundles=%d drafts=%d collections=%s",
             updated.modified_count,
             scrubbed_releases,
-            scrubbed_drafts.modified_count,
+            scrubbed_drafts,
+            ",".join(dropped_collections) or "none",
         )
 
 
@@ -183,7 +354,8 @@ class Database:
         )
         await self.client.admin.command("ping")
         database = self.client[self.settings.mongodb_database]
-        await _migrate_retired_proxy_state(database, self.settings)
+        await _migrate_retired_policy_state(database, self.settings)
+        await _migrate_source_blacklist_state(database)
         await _migrate_subscription_source_types(database)
         await _prepare_telemetry_indexes(database)
         await init_beanie(

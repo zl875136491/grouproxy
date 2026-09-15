@@ -22,14 +22,14 @@ _ACCESS_PROFILES: dict[str, AccessProfile] = {
     "test": AccessProfile(
         environment="test",
         fqdn="test-proxy.1oa.com.cn",
-        macos_shortcut_url="https://www.icloud.com/shortcuts/5afbae477a7145e28ec2839d56577885",
+        macos_shortcut_url="/shortcuts/grouproxy-macos-test.shortcut",
         linux_script_path=_DEPLOY_PATH / "linux-setup-proxy-test.sh",
         windows_script_path=_DEPLOY_PATH / "windows-setup-proxy-test.ps1",
     ),
     "production": AccessProfile(
         environment="production",
         fqdn="proxy.1oa.com.cn",
-        macos_shortcut_url="https://www.icloud.com/shortcuts/2eebe51c251d4da6949d85363e482872",
+        macos_shortcut_url="/shortcuts/grouproxy-macos-production.shortcut",
         linux_script_path=_DEPLOY_PATH / "linux-setup-proxy.sh",
         windows_script_path=_DEPLOY_PATH / "windows-setup-proxy.ps1",
     ),

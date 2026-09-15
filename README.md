@@ -15,13 +15,23 @@ layer is part of this deployment.
   the backend can remain on a private listener such as `127.0.0.1:8000`.
 - The dashboard forwards `/healthz` and `/readyz` to that backend, so
   `curl http://<dashboard-domain>/healthz` exposes the running API version.
-- HTTP Basic proxy authentication is intentionally absent. Source CIDR policy
-  on each site is the proxy access boundary.
+- HTTP Basic proxy authentication is intentionally absent. Proxy domains are
+  resolved by local DNS, so source access is allow-all by default. Operators
+  can apply explicit source blacklists globally or per site for an IP, network,
+  or source domain.
 
 The monitor validates signed bundles with `listen.http_port: 1080` and renders
 the public sing-box HTTP inbound on that port. The same-host two-node test
 harness has one explicit public test exception for its second node on `:18081`;
 deployed nodes remain on `:1080`.
+
+Source deny rules use the management endpoint `GET|POST /api/v1/source-blacklist`
+and `DELETE /api/v1/source-blacklist/{entry_id}`. Each record has `scope`
+(`global` or `site`), `site_id` for site scope, `kind` (`ip`, `network`, or
+`domain`), `pattern`, and `comment`. Desired Bundles contain only the global
+rules and rules for that bundle's site under `source_blacklist`. Creating or
+removing a rule immediately creates a normal release for each affected site's
+nodes; no allowlist or destination-policy field is part of the bundle contract.
 
 The `/` dashboard page is the public workstation runbook (also available at
 `/access`). It selects a pair of
@@ -29,10 +39,11 @@ checked-in, pre-generated assets from `GROUPROXY_ENVIRONMENT`: `test` serves
 `test-proxy.1oa.com.cn`, while every other value serves production
 `proxy.1oa.com.cn`. Public downloads are available at
 `/api/v1/access/linux-setup.sh` and `/api/v1/access/windows-setup.ps1`; the
-configuration response also returns the matching macOS iCloud Shortcut URL.
-The Windows script configures the current user's WinINET and environment
-proxy, runs the supplied connectivity checks, and accepts `-Disable` to
-restore its backup. No downloaded asset installs proxy credentials or a CA.
+configuration response also returns the matching dashboard-relative macOS
+Shortcut download path. The reusable Linux and Windows scripts are
+parameterless current-user toggles: each run detects whether the proxy is
+enabled and switches to the opposite state. No downloaded asset installs proxy
+credentials or a CA.
 
 The production dashboard is a Next.js standalone service. Its deployable
 systemd unit and replacement steps for retired Grouproxy NGINX files are in
@@ -73,11 +84,9 @@ host, then use these client-facing endpoints:
 - codedev proxy: `http://test-proxy.1oa.com.cn:1080`
 - nuc proxy: `http://test-proxy.1oa.com.cn:18081`
 
-`GROUPROXY_TEST_CLIENT_CIDR` defaults to `10.32.12.0/24` and is included in
-both test sites so the workstation can exercise both public listeners. Set it
-to a narrower CIDR when the test client address is known. The `:18081` endpoint
-exists only because both simulations share one host; an actual `nuc` host uses
-its own address on `:1080`.
+No CIDR allowlist needs to be seeded for the test listeners. The `:18081`
+endpoint exists only because both simulations share one host; an actual `nuc`
+host uses its own address on `:1080`.
 
 Generated test state and logs remain below the ignored `testenv/` directory.
 Stop the local processes without removing evidence:

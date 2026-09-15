@@ -495,7 +495,7 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .subscription-form input[type="file"] { padding: 7px 9px; font-size: 12px; }
 .subscription-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px 12px; }
 .subscription-source-heading h2 { margin: 0; color: var(--gp-ink); font-size: 17px; line-height: 1.3; font-weight: 600; }
-.subscription-source-list { display: grid; min-height: 0; flex: 1 1 auto; overflow: auto; scrollbar-gutter: stable; }
+.subscription-source-list { display: grid; min-height: 0; flex: 1 1 auto; grid-auto-rows: minmax(72px, max-content); align-content: start; overflow: auto; scrollbar-gutter: stable; }
 .subscription-source-row { display: grid; min-height: 72px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border-top: 1px solid var(--gp-line); padding: 12px 20px; }
 .subscription-source-select { display: grid; min-width: 0; border: 0; padding: 0; color: var(--gp-ink); background: transparent; font: inherit; text-align: left; }
 .subscription-source-select > span { display: grid; min-width: 0; gap: 2px; }
@@ -1008,6 +1008,7 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .access-doc-shortcut-link { display: grid; width: 100%; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; cursor: pointer; appearance: none; font: inherit; text-align: left; }
 .access-doc-shortcut-link:hover, .access-doc-card-link:hover { border-color: var(--gp-green-dark); color: var(--gp-green-dark); background: var(--gp-green-soft); }
 .access-doc-shortcut-link img { display: block; width: 44px; height: 44px; border-radius: 10px; }
+.access-doc-download-icon { display: grid; width: 44px; height: 44px; place-items: center; border-radius: 10px; color: var(--gp-teal-deep); background: var(--gp-green); }
 .access-doc-shortcut-copy { display: grid; min-width: 0; gap: 3px; }
 .access-doc-shortcut-copy strong { overflow: hidden; color: inherit; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .access-doc-shortcut-copy span { color: var(--gp-steel); font-size: 11px; font-weight: 500; }
@@ -1041,7 +1042,7 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
   .access-doc-section { gap: 16px; padding: 30px 0 34px; }
   .access-doc-section-heading h2 { font-size: 19px; }
   .access-doc-shortcut-link { grid-template-columns: 40px minmax(0, 1fr) auto; gap: 10px; padding: 10px; }
-  .access-doc-shortcut-link img { width: 40px; height: 40px; }
+  .access-doc-shortcut-link img, .access-doc-download-icon { width: 40px; height: 40px; }
   .access-doc-codebar { align-items: flex-start; flex-direction: column; }
   .access-doc-codebar .row-actions { width: 100%; }
   .access-doc-codebar .row-actions .access-doc-code-action { flex: 1; }

@@ -2,7 +2,9 @@ import base64
 import hashlib
 import io
 import json
+import os
 import socket
+import subprocess
 import tarfile
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -10,9 +12,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.db import _deduplicate_markers
+from app.db import _deduplicate_markers, _migrate_source_blacklist_state
 from app.models import AgentAck
-from app.services import alerts, backups
+from app.schemas import SourceBlacklistCreate, SourceBlacklistPreviewResponse
+from app.services import alerts, backups, cidr
 from app.services.access import access_profile, load_linux_setup_script, load_windows_setup_script
 from app.services.audit import redact
 from app.services.backups import (
@@ -25,7 +28,13 @@ from app.services.backups import (
     retained_scheduled_backup_ids,
     verify_backup,
 )
-from app.services.cidr import match_source_ip, normalize_cidr, normalize_source_ip
+from app.services.cidr import (
+    match_source_blacklist,
+    normalize_source_blacklist_pattern,
+    normalize_source_domain,
+    normalize_source_ip,
+    preview_source_blacklist,
+)
 from app.services.crypto import calculate_bundle_hash, sign_bundle, verify_bundle
 from app.services.subscriptions import (
     SubscriptionError,
@@ -53,8 +62,8 @@ def test_access_assets_are_selected_from_immutable_environment_profiles() -> Non
 
     assert test_profile.fqdn == "test-proxy.1oa.com.cn"
     assert production_profile.fqdn == "proxy.1oa.com.cn"
-    assert test_profile.macos_shortcut_url.startswith("https://www.icloud.com/shortcuts/")
-    assert production_profile.macos_shortcut_url.startswith("https://www.icloud.com/shortcuts/")
+    assert test_profile.macos_shortcut_url == "/shortcuts/grouproxy-macos-test.shortcut"
+    assert production_profile.macos_shortcut_url == "/shortcuts/grouproxy-macos-production.shortcut"
     assert "test-proxy.1oa.com.cn" in test_linux
     assert "proxy.1oa.com.cn" in production_linux
     assert "test-proxy.1oa.com.cn" in test_windows
@@ -63,30 +72,69 @@ def test_access_assets_are_selected_from_immutable_environment_profiles() -> Non
     assert test_windows.replace("test-proxy.1oa.com.cn", "proxy.1oa.com.cn") == production_windows
 
 
-def test_access_scripts_remain_http_only_and_windows_script_only_switches_proxy() -> None:
+def test_access_scripts_are_parameterless_proxy_toggles() -> None:
     script = load_linux_setup_script(SimpleNamespace(environment="test"))
     windows = load_windows_setup_script(SimpleNamespace(environment="test"))
 
-    assert "--uninstall" in script
+    assert "if proxy_is_enabled; then" in script
     assert "gsettings set org.gnome.system.proxy mode manual" in script
+    assert "gsettings set org.gnome.system.proxy mode none" in script
     assert "kwriteconfig" in script
-    assert "HTTPS transport is intentionally disabled." in script
+    assert "This proxy toggle does not accept parameters" in script
+    assert "--uninstall" not in script
     assert "ca-certificates" not in script.lower()
     assert "update-ca-certificates" not in script.lower()
     assert "ProxyEnable" in windows
     assert "ProxyServer" in windows
-    assert "$Disable" in windows
+    assert "$proxyEnabled" in windows
+    assert "InternetSetOption" in windows
+    assert "$Disable" not in windows
+    assert "param(" not in windows
     assert "ipinfo.io" not in windows
     assert "Read-Host" not in windows
     assert "proxy-backup" not in windows
     assert "HTTP_PROXY" not in windows
 
 
+def test_linux_access_script_toggles_managed_user_files(tmp_path) -> None:
+    script_path = access_profile(SimpleNamespace(environment="test")).linux_script_path
+    config_root = tmp_path / "config"
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(config_root),
+    }
+
+    first = subprocess.run(
+        ["bash", str(script_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    shell_file = config_root / "grouproxy" / "proxy.env"
+    environment_file = config_root / "environment.d" / "90-grouproxy-proxy.conf"
+    assert "Grouproxy proxy is now enabled" in first.stdout
+    assert shell_file.is_file()
+    assert environment_file.is_file()
+
+    second = subprocess.run(
+        ["bash", str(script_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert "Grouproxy proxy is now disabled" in second.stdout
+    assert not shell_file.exists()
+    assert not environment_file.exists()
+
+
 def test_bundle_signature_round_trip_is_deterministic() -> None:
     bundle = {
         "schema_version": 1,
         "node_id": "codedev",
-        "allow_cidrs": ["10.32.12.0/24"],
+        "marker": "stable",
         "issued_at": datetime(2026, 8, 28, tzinfo=timezone.utc).isoformat(),
     }
     signed = sign_bundle(bundle, "test-secret")
@@ -94,17 +142,360 @@ def test_bundle_signature_round_trip_is_deterministic() -> None:
     assert verify_bundle(signed, "test-secret") == (True, "")
     assert signed["bundle_hash"] == calculate_bundle_hash(signed)
 
-    signed["allow_cidrs"] = ["192.0.2.0/24"]
+    signed["marker"] = "changed"
     assert verify_bundle(signed, "test-secret") == (False, "bundle_hash_mismatch")
 
 
-def test_cidr_normalization_and_preview_match() -> None:
-    cidrs = [normalize_cidr("10.32.12.9/24"), normalize_cidr("2001:db8::1/64")]
+def test_source_network_normalization_and_match() -> None:
+    networks = [
+        normalize_source_blacklist_pattern("network", "10.32.12.9/24"),
+        normalize_source_blacklist_pattern("network", "2001:db8::1/64"),
+    ]
 
-    assert cidrs == ["10.32.12.0/24", "2001:db8::/64"]
+    assert networks == ["10.32.12.0/24", "2001:db8::/64"]
     assert normalize_source_ip("10.32.12.111") == "10.32.12.111"
-    assert match_source_ip("10.32.12.111", cidrs) == "10.32.12.0/24"
-    assert match_source_ip("192.0.2.1", cidrs) is None
+    assert match_source_blacklist(
+        "10.32.12.111",
+        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[0]}],
+    ) == "10.32.12.0/24"
+    assert match_source_blacklist(
+        "2001:db8::42",
+        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[1]}],
+    ) == "2001:db8::/64"
+    assert match_source_blacklist(
+        "192.0.2.1",
+        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[0]}],
+    ) is None
+
+
+def test_source_blacklist_normalization_and_match() -> None:
+    assert normalize_source_blacklist_pattern("ip", " 192.0.2.10 ") == "192.0.2.10"
+    assert normalize_source_blacklist_pattern("network", "10.0.0.8/24") == "10.0.0.0/24"
+    assert normalize_source_blacklist_pattern("domain", "Blocked.Example.") == "blocked.example"
+    rules = [
+        {"scope": "global", "site_id": None, "kind": "ip", "pattern": "192.0.2.10"},
+        {"scope": "site", "site_id": "site-a", "kind": "network", "pattern": "10.0.0.0/24"},
+        {"scope": "global", "site_id": None, "kind": "domain", "pattern": "blocked.example"},
+    ]
+    assert match_source_blacklist("192.0.2.10", rules) == "192.0.2.10"
+    assert match_source_blacklist("10.0.0.12", rules) == "10.0.0.0/24"
+    assert match_source_blacklist("198.51.100.5", rules) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Blocked.Example.", "blocked.example"),
+        ("localhost", "localhost"),
+        ("xn--mnich-kva.example", "xn--mnich-kva.example"),
+        ("service-1.internal.example", "service-1.internal.example"),
+    ],
+)
+def test_source_domain_normalization_accepts_ascii_hostnames(value: str, expected: str) -> None:
+    assert normalize_source_domain(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        " https://blocked.example",
+        "https://blocked.example",
+        "blocked.example/path",
+        "blocked.example:443",
+        "*.blocked.example",
+        "blocked example",
+        "blocked\\texample",
+        "m\u00fcnich.example",
+        "-blocked.example",
+        "blocked-.example",
+        "blocked..example",
+        "192.0.2.1",
+        "2001:db8::1",
+        "127.1",
+        "0177.0.0.1",
+        "0x7f.0.0.1",
+        "2130706433",
+    ],
+)
+def test_source_domain_normalization_rejects_non_hostnames(value: str) -> None:
+    with pytest.raises(ValueError, match="invalid_source_blacklist_domain"):
+        normalize_source_domain(value)
+
+
+def test_source_blacklist_create_normalizes_and_rejects_domain_patterns() -> None:
+    rule = SourceBlacklistCreate(kind="domain", pattern="Blocked.Example.")
+    assert rule.pattern == "blocked.example"
+
+    with pytest.raises(ValueError, match="invalid_source_blacklist_pattern"):
+        SourceBlacklistCreate(kind="domain", pattern="https://blocked.example")
+
+
+def test_source_blacklist_preview_is_indeterminate_for_domain_rules() -> None:
+    response = SourceBlacklistPreviewResponse(
+        allowed=True,
+        matched_pattern=None,
+        reason="allowed",
+        source_blacklist=[
+            {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
+            {"scope": "site", "kind": "domain", "pattern": "blocked.example"},
+            {"scope": "global", "kind": "domain", "pattern": "blocked.example"},
+        ],
+    )
+
+    assert response.allowed is None
+    assert response.reason == "domain_resolution_required"
+    assert response.outcome == "indeterminate"
+    assert response.unresolved_domain_patterns == ["blocked.example"]
+
+
+def test_source_blacklist_preview_stays_blocked_when_ip_rule_matches() -> None:
+    response = SourceBlacklistPreviewResponse(
+        allowed=False,
+        matched_pattern="192.0.2.1",
+        reason="source_blacklisted",
+        source_blacklist=[
+            {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
+            {"scope": "site", "kind": "domain", "pattern": "blocked.example"},
+        ],
+    )
+
+    assert response.allowed is False
+    assert response.reason == "source_blacklisted"
+    assert response.outcome == "blocked"
+    assert response.unresolved_domain_patterns == ["blocked.example"]
+
+
+def test_source_blacklist_preview_helper_reports_domain_resolution_required() -> None:
+    result = preview_source_blacklist(
+        "198.51.100.5",
+        [{"scope": "global", "kind": "domain", "pattern": "blocked.example"}],
+    )
+
+    assert result == {
+        "allowed": None,
+        "matched_pattern": None,
+        "reason": "domain_resolution_required",
+        "outcome": "indeterminate",
+        "unresolved_domain_patterns": ["blocked.example"],
+    }
+
+
+def test_source_blacklist_preview_helper_keeps_definitive_results() -> None:
+    rules = [
+        {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
+        {"scope": "global", "kind": "domain", "pattern": "blocked.example"},
+    ]
+    assert preview_source_blacklist("192.0.2.1", rules)["allowed"] is False
+    assert preview_source_blacklist("192.0.2.1", rules)["reason"] == "source_blacklisted"
+    assert preview_source_blacklist("198.51.100.5", [], site_shutdown=True) == {
+        "allowed": False,
+        "matched_pattern": None,
+        "reason": "shutdown",
+        "outcome": "blocked",
+        "unresolved_domain_patterns": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_blacklist_startup_migration_normalizes_or_removes_bad_documents() -> None:
+    created_at = datetime(2026, 9, 14, tzinfo=timezone.utc)
+
+    class Cursor:
+        def __init__(self, documents: list[dict[str, object]]) -> None:
+            self.documents = list(documents)
+
+        def __aiter__(self):
+            async def values():
+                for document in self.documents:
+                    yield document
+
+            return values()
+
+    class Collection:
+        def __init__(self, documents: list[dict[str, object]]) -> None:
+            self.documents = documents
+
+        def find(self, _: dict[str, object]) -> Cursor:
+            return Cursor(self.documents)
+
+        async def delete_one(self, query: dict[str, object]) -> None:
+            self.documents[:] = [
+                document for document in self.documents if document["_id"] != query["_id"]
+            ]
+
+        async def update_one(self, query: dict[str, object], update: dict[str, object]) -> None:
+            for document in self.documents:
+                if document["_id"] == query["_id"]:
+                    document.update(update["$set"])  # type: ignore[arg-type]
+                    return
+            raise AssertionError(f"missing document {query!r}")
+
+    source_rules = Collection(
+        [
+            {
+                "_id": "global",
+                "scope": "global",
+                "site_id": None,
+                "kind": "ip",
+                "pattern": "192.0.2.10",
+                "comment": "global",
+                "enabled": True,
+                "created_by": "admin",
+                "created_at": created_at,
+            },
+            {
+                "_id": "site",
+                "scope": "site",
+                "site_id": "site-a",
+                "kind": "network",
+                "pattern": "198.51.100.42/24",
+                "comment": "network",
+                "enabled": True,
+                "created_by": "admin",
+                "created_at": created_at,
+            },
+            {
+                "_id": "wrong-global-target",
+                "scope": "global",
+                "site_id": "site-a",
+                "kind": "ip",
+                "pattern": "192.0.2.10",
+                "comment": "global",
+                "enabled": True,
+                "created_by": "admin",
+                "created_at": created_at,
+            },
+            {
+                "_id": "duplicate",
+                "scope": "global",
+                "site_id": None,
+                "kind": "ip",
+                "pattern": "192.0.2.10",
+                "comment": "duplicate",
+                "enabled": True,
+                "created_by": "admin",
+                "created_at": created_at,
+            },
+            {
+                "_id": "invalid-kind",
+                "scope": "global",
+                "site_id": None,
+                "kind": "cidr",
+                "pattern": "192.0.2.0/24",
+                "enabled": True,
+            },
+            {
+                "_id": "orphan-site",
+                "scope": "site",
+                "site_id": "missing-site",
+                "kind": "ip",
+                "pattern": "192.0.2.11",
+                "enabled": True,
+            },
+            {
+                "_id": "invalid-enabled",
+                "scope": "global",
+                "site_id": None,
+                "kind": "ip",
+                "pattern": "192.0.2.12",
+                "enabled": "true",
+            },
+        ]
+    )
+    collections = {
+        "Site": Collection([{"_id": "site-a"}]),
+        "SourceBlacklist": source_rules,
+    }
+
+    class Database:
+        def __getitem__(self, name: str) -> Collection:
+            return collections[name]
+
+        async def list_collection_names(self) -> list[str]:
+            return list(collections)
+
+    updated, removed = await _migrate_source_blacklist_state(Database())
+
+    assert (updated, removed) == (1, 5)
+    assert source_rules.documents == [
+        {
+            "_id": "global",
+            "scope": "global",
+            "site_id": None,
+            "kind": "ip",
+            "pattern": "192.0.2.10",
+            "comment": "global",
+            "enabled": True,
+            "created_by": "admin",
+            "created_at": created_at,
+        },
+        {
+            "_id": "site",
+            "scope": "site",
+            "site_id": "site-a",
+            "kind": "network",
+            "pattern": "198.51.100.0/24",
+            "comment": "network",
+            "enabled": True,
+            "created_by": "admin",
+            "created_at": created_at,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_effective_source_blacklist_ignores_malformed_rules_at_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = [
+        SimpleNamespace(id="global", scope="global", site_id=None, kind="ip", pattern="192.0.2.10"),
+        SimpleNamespace(
+            id="site",
+            scope="site",
+            site_id="site-a",
+            kind="network",
+            pattern="198.51.100.0/24",
+        ),
+        SimpleNamespace(
+            id="wrong-global",
+            scope="global",
+            site_id="site-a",
+            kind="ip",
+            pattern="192.0.2.11",
+        ),
+        SimpleNamespace(
+            id="bad-kind",
+            scope="global",
+            site_id=None,
+            kind="cidr",
+            pattern="192.0.2.0/24",
+        ),
+        SimpleNamespace(id="bad-pattern", scope="site", site_id="site-a", kind="domain", pattern="https://bad.example"),
+        SimpleNamespace(
+            id="other-site",
+            scope="site",
+            site_id="site-b",
+            kind="ip",
+            pattern="192.0.2.12",
+        ),
+    ]
+
+    class Query:
+        async def to_list(self) -> list[SimpleNamespace]:
+            return entries
+
+    class SourceBlacklistModel:
+        @classmethod
+        def find(cls, query: dict[str, object]) -> Query:
+            assert query["enabled"] is True
+            return Query()
+
+    monkeypatch.setattr(cidr, "SourceBlacklist", SourceBlacklistModel)
+
+    assert await cidr.effective_source_blacklist("site-a") == [
+        {"scope": "global", "site_id": None, "kind": "ip", "pattern": "192.0.2.10"},
+        {"scope": "site", "site_id": "site-a", "kind": "network", "pattern": "198.51.100.0/24"},
+    ]
 
 
 def test_audit_redaction_covers_nested_node_secrets() -> None:

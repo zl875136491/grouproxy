@@ -4,19 +4,15 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Archive,
-  ArrowLeftRight,
   Ban,
   BellRing,
   BookOpen,
   Boxes,
   ClipboardList,
-  FileClock,
   Gauge,
-  KeyRound,
   LogIn,
   LogOut,
   Menu,
-  Network,
   PanelLeftClose,
   PanelLeftOpen,
   Radio,
@@ -57,10 +53,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "POLICY",
     items: [
-      { href: "/sites", label: "Sites & CIDRs", icon: Network, matches: ["/sites"] },
-      { href: "/exceptions", label: "Policy exceptions", icon: KeyRound },
-      { href: "/cross-site", label: "Cross-site", icon: ArrowLeftRight },
-      { href: "/blacklist", label: "Destination deny", icon: Ban },
+      { href: "/blacklist", label: "Source blacklist", icon: Ban },
     ],
   },
   {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,15 +35,23 @@ import (
 )
 
 const (
-	monitorVersion                = "0.4.0"
+	monitorVersion                = "0.5.0"
 	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
 	maxProxyDelayTargets          = 500
+	maxSourceDomainRules          = 256
+	maxSourceDomainAddresses      = 64
+	sourceDomainLookupTimeout     = 5 * time.Second
+	sourceDomainResolveDeadline   = 30 * time.Second
 	// Expected SHA-256 of sing-box v1.13.19 Linux amd64 binary
 	// Source: singbox/README.md
 	expectedSingboxSHA256 = "7e9dcd7239c49478a576d79f272751e5ed1c2aba7cc08ab1b2bd69c00c904ba1"
 )
+
+var lookupSourceDomainIPs = func(ctx context.Context, domain string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", domain)
+}
 
 type agent struct {
 	cfg               config.Config
@@ -104,7 +113,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	
+
 	// Verify sing-box binary integrity at startup
 	if !*skipIntegrityCheck {
 		if err := verifySingboxIntegrity(cfg.SingboxBin); err != nil {
@@ -116,7 +125,7 @@ func main() {
 	} else {
 		log.Println("WARNING: Skipping sing-box binary integrity verification (development mode)")
 	}
-	
+
 	if *validate {
 		if _, err := client.New(cfg.BackendURL, cfg.TokenFile); err != nil {
 			log.Fatalf("validate agent credentials: %v", err)
@@ -130,12 +139,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("load state: %v", err)
 	}
-	// Older monitor state may contain the retired proxy Basic-auth block and
-	// the former port 80 contract. Normalize it before any last-good restore so
-	// a restart cannot resurrect credentials or bind the old listener.
+	// Older monitor state may contain retired authentication, listener, and
+	// policy fields. Normalize it before any last-good restore so a restart
+	// cannot resurrect obsolete credentials, routing rules, or source policy.
+	retiredSourcePolicy := hasRetiredSourcePolicy(stateValue.LastGoodBundle)
 	if sanitizeLegacyBundle(stateValue.LastGoodBundle) {
 		if err := state.Save(cfg.StateDir, stateValue); err != nil {
 			log.Printf("sanitize persisted monitor state: %v", err)
+		}
+	}
+	if retiredSourcePolicy {
+		if err := clearLastGoodSourceBlacklistSnapshot(cfg.StateDir); err != nil {
+			log.Printf("clear retired source policy snapshot: %v", err)
+		}
+		// Replace a pre-rewrite nft table before attempting sing-box recovery.
+		// If the historical config cannot be restored, its retired allowlist must
+		// not remain active in front of the new default allow-all behavior.
+		if err := installAllowAllFirewallBaseline(cfg); err != nil {
+			log.Printf("clear retired firewall policy: %v", err)
 		}
 	}
 	apiClient, err := client.New(cfg.BackendURL, cfg.TokenFile)
@@ -1279,6 +1300,13 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
 		return a.ackFailure(value, "routing_data_write_failed", err.Error(), false, false, false, false)
 	}
+	sourceRules, err := resolveSourceBlacklistRules(
+		ctx,
+		sourceBlacklistRules(value, stringValue(value["site_id"])),
+	)
+	if err != nil {
+		return a.ackFailure(value, "source_domain_resolution_failed", err.Error(), false, false, false, false)
+	}
 	configValue := renderSingbox(
 		value,
 		port,
@@ -1286,6 +1314,7 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 		a.cfg.ClashAPIListen,
 		subscriptionOutbounds,
 		a.cfg.ListenAddressOverride,
+		sourceRules,
 	)
 	versionsDir := filepath.Join(a.cfg.StateDir, "versions")
 	if err := os.MkdirAll(versionsDir, 0o700); err != nil {
@@ -1298,8 +1327,11 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err := a.runtime.Check(candidatePath); err != nil {
 		return a.ackFailure(value, "singbox_check_failed", err.Error(), true, false, false, false)
 	}
-	cidrs := stringSlice(value["allow_cidrs"])
-	nftScript := firewall.Render(firewallPort, cidrs, boolValue(value["shutdown"]))
+	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
+	for _, rule := range sourceRules {
+		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
+	}
+	nftScript := firewall.RenderSourceRules(firewallPort, nftRules, boolValue(value["shutdown"]))
 	if err := firewall.Check(nftScript); err != nil {
 		return a.ackFailure(value, "nft_check_failed", err.Error(), true, false, false, false)
 	}
@@ -1336,6 +1368,12 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	}
 	if !healthOK {
 		return a.rollback(value, candidatePath, "health_window_failed", processOK, portOK, apiOK)
+	}
+	// Persist only after the candidate has survived the health window. The
+	// snapshot materializes source-domain entries into concrete IP rules so
+	// restart/rollback remains available during a transient DNS outage.
+	if err := a.persistLastGoodSourceBlacklistRules(value, sourceRules); err != nil {
+		return err
 	}
 	if err := bundle.WriteJSON(a.cfg.SingboxConfig, configValue); err != nil {
 		return err
@@ -1431,6 +1469,14 @@ func (a *agent) restoreLastGoodFirewall() error {
 		if err == nil {
 			var persisted map[string]any
 			if json.Unmarshal(data, &persisted) == nil {
+				retiredSourcePolicy := hasRetiredSourcePolicy(persisted)
+				if sanitizeLegacyBundle(persisted) {
+					_ = bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good-bundle.json"), persisted)
+				}
+				if retiredSourcePolicy {
+					_ = clearLastGoodSourceBlacklistSnapshot(a.cfg.StateDir)
+					_ = installAllowAllFirewallBaseline(a.cfg)
+				}
 				lastGood = persisted
 			}
 		}
@@ -1439,16 +1485,24 @@ func (a *agent) restoreLastGoodFirewall() error {
 		return a.restoreLastGoodFirewallForBundle(lastGood)
 	}
 
-	// Legacy fallback for state written before bundles were persisted locally.
-	if a.cfg.FirewallMode != "apply" {
-		return nil
+	// Legacy state may contain only a last-good nft script generated from the
+	// retired allowlist. Never re-apply that fail-closed policy after upgrade;
+	// clear it to the new allow-all source baseline instead.
+	port := a.cfg.ListenPort
+	if port < 1 {
+		port = config.ProxyListenPort
 	}
-	path := filepath.Join(a.cfg.StateDir, "last-good-nft.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	script := firewall.RenderSourceRules(a.firewallPort(port), nil, false)
+	if err := firewall.Check(script); err != nil {
 		return err
 	}
-	return firewall.Apply(string(data))
+	if err := bundle.WriteBytes(filepath.Join(a.cfg.StateDir, "last-good-nft.json"), []byte(script), ".last-good-nft-*"); err != nil {
+		return err
+	}
+	if a.cfg.FirewallMode == "apply" {
+		return firewall.Apply(script)
+	}
+	return nil
 }
 
 func (a *agent) restoreLastGoodFirewallForBundle(lastGood map[string]any) error {
@@ -1460,7 +1514,15 @@ func (a *agent) restoreLastGoodFirewallForBundle(lastGood map[string]any) error 
 	if !ok {
 		return errors.New("last-good port invalid")
 	}
-	script := firewall.Render(a.firewallPort(port), stringSlice(lastGood["allow_cidrs"]), boolValue(lastGood["shutdown"]))
+	sourceRules, err := a.lastGoodSourceBlacklistRules(lastGood)
+	if err != nil {
+		return err
+	}
+	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
+	for _, rule := range sourceRules {
+		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
+	}
+	script := firewall.RenderSourceRules(a.firewallPort(port), nftRules, boolValue(lastGood["shutdown"]))
 	if err := firewall.Check(script); err != nil {
 		return err
 	}
@@ -1482,9 +1544,18 @@ func (a *agent) restoreLastGood() error {
 		if err == nil {
 			var persisted map[string]any
 			if json.Unmarshal(data, &persisted) == nil {
+				retiredSourcePolicy := hasRetiredSourcePolicy(persisted)
 				if sanitizeLegacyBundle(persisted) {
 					if writeErr := bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good-bundle.json"), persisted); writeErr != nil {
 						a.log.Printf("sanitize last-good bundle: %v", writeErr)
+					}
+				}
+				if retiredSourcePolicy {
+					if clearErr := clearLastGoodSourceBlacklistSnapshot(a.cfg.StateDir); clearErr != nil {
+						a.log.Printf("clear retired source policy snapshot: %v", clearErr)
+					}
+					if firewallErr := installAllowAllFirewallBaseline(a.cfg); firewallErr != nil {
+						a.log.Printf("clear retired firewall policy: %v", firewallErr)
 					}
 				}
 				lastGood = persisted
@@ -1495,7 +1566,10 @@ func (a *agent) restoreLastGood() error {
 		}
 	}
 	if lastGood == nil {
-		return nil
+		// A pre-bundle installation has no trustworthy source policy snapshot.
+		// Establish the new explicit-blacklist baseline instead of leaving an
+		// old allowlist nft table or route active across restart.
+		return a.restoreLastGoodFirewall()
 	}
 	listen, ok := lastGood["listen"].(map[string]any)
 	if !ok {
@@ -1539,11 +1613,16 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
 		return "", err
 	}
+	sourceRules, err := a.lastGoodSourceBlacklistRules(lastGood)
+	if err != nil {
+		return "", err
+	}
 	path := filepath.Join(a.cfg.StateDir, "last-good.json")
 	if data, err := os.ReadFile(path); err == nil {
 		var configValue map[string]any
 		if json.Unmarshal(data, &configValue) == nil {
 			ensureRoutingRules(configValue, a.cfg.StateDir)
+			ensureSourceBlacklistRules(configValue, sourceRules)
 			applySingboxIngress(configValue, port, boolValue(lastGood["shutdown"]), a.cfg.ListenAddressOverride)
 			if err := bundle.WriteJSON(path, configValue); err != nil {
 				return "", err
@@ -1558,11 +1637,103 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	if err := validateProxySelection(lastGood, subscriptionOutboundTags(outbounds)); err != nil {
 		return "", err
 	}
-	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds, a.cfg.ListenAddressOverride)
+	configValue := renderSingbox(lastGood, port, a.cfg.StateDir, a.cfg.ClashAPIListen, outbounds, a.cfg.ListenAddressOverride, sourceRules)
 	if err := bundle.WriteJSON(path, configValue); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// ensureSourceBlacklistRules migrates a persisted route configuration from
+// the retired inverted allowlist rule to the explicit source blacklist. Any
+// prior source matcher is removed before the current bundle entries are
+// prepended, so a restart cannot resurrect a stale fail-closed policy.
+func ensureSourceBlacklistRules(configValue map[string]any, sourceRules []sourceBlacklistRule) bool {
+	route, ok := configValue["route"].(map[string]any)
+	if !ok {
+		return removeRetiredDestinationBlockOutbound(configValue)
+	}
+	rawRules, ok := route["rules"].([]any)
+	if !ok {
+		return removeRetiredDestinationBlockOutbound(configValue)
+	}
+	filtered := make([]any, 0, len(rawRules))
+	changed := false
+	for _, raw := range rawRules {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			filtered = append(filtered, raw)
+			continue
+		}
+		if _, hasIP := rule["source_ip_cidr"]; hasIP {
+			changed = true
+			continue
+		}
+		if _, hasDomain := rule["source_domain"]; hasDomain {
+			changed = true
+			continue
+		}
+		// Destination deny rules belonged to the retired policy model. Remove
+		// only its explicit block routes; the direct/CN and subscription routes
+		// are operational routing, not source access policy.
+		if stringValue(rule["outbound"]) == "block" {
+			if _, hasDomain := rule["domain"]; hasDomain {
+				changed = true
+				continue
+			}
+			if _, hasIP := rule["ip_cidr"]; hasIP {
+				changed = true
+				continue
+			}
+		}
+		// An empty legacy allowlist rendered an unconditional reject with no
+		// matcher. The current contract has no non-source reject route, so drop
+		// it rather than carrying a fail-closed default into the allow-all model.
+		if stringValue(rule["action"]) == "reject" {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	generated := append(sourceBlacklistRouteRules(sourceRules), filtered...)
+	if len(generated) != len(rawRules) {
+		changed = true
+	}
+	if !changed {
+		// Even when the count is unchanged, compare the source prefix to catch
+		// a changed blacklist pattern in a reused last-good config.
+		for index, generatedRule := range generated {
+			if index >= len(rawRules) || fmt.Sprint(generatedRule) != fmt.Sprint(rawRules[index]) {
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		route["rules"] = generated
+	}
+	return removeRetiredDestinationBlockOutbound(configValue) || changed
+}
+
+func removeRetiredDestinationBlockOutbound(configValue map[string]any) bool {
+	rawOutbounds, ok := configValue["outbounds"].([]any)
+	if !ok {
+		return false
+	}
+	filtered := make([]any, 0, len(rawOutbounds))
+	changed := false
+	for _, raw := range rawOutbounds {
+		outbound, ok := raw.(map[string]any)
+		if ok && stringValue(outbound["type"]) == "block" && stringValue(outbound["tag"]) == "block" {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	if changed {
+		configValue["outbounds"] = filtered
+	}
+	return changed
 }
 
 func (a *agent) ackFailure(value map[string]any, code, message string, singboxOK, nftOK, healthOK, rollbackAttempted bool) error {
@@ -1809,6 +1980,31 @@ func (a *agent) firewallPort(listenPort int) int {
 	return listenPort
 }
 
+func allowAllFirewallBaseline(cfg config.Config) (int, string) {
+	port := cfg.ListenPort
+	if port < 1 {
+		port = config.ProxyListenPort
+	}
+	if cfg.FirewallPortOverride > 0 {
+		port = cfg.FirewallPortOverride
+	}
+	return port, firewall.RenderSourceRules(port, nil, false)
+}
+
+func installAllowAllFirewallBaseline(cfg config.Config) error {
+	_, script := allowAllFirewallBaseline(cfg)
+	if err := firewall.Check(script); err != nil {
+		return err
+	}
+	if err := bundle.WriteBytes(filepath.Join(cfg.StateDir, "last-good-nft.json"), []byte(script), ".last-good-nft-*"); err != nil {
+		return err
+	}
+	if cfg.FirewallMode == "apply" {
+		return firewall.Apply(script)
+	}
+	return nil
+}
+
 func applySingboxIngress(configValue map[string]any, port int, shutdown bool, listenAddress string) {
 	inbounds, ok := configValue["inbounds"].([]any)
 	if !ok || len(inbounds) == 0 {
@@ -1842,6 +2038,21 @@ func sanitizeLegacyBundle(value map[string]any) bool {
 		delete(value, "proxy_auth")
 		changed = true
 	}
+	// The canonical source policy is a flat source_blacklist array. Removing
+	// retired fields and migration-only nested data here keeps a restart from
+	// restoring old allowlist, destination-block, or alias behavior.
+	for _, key := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
+		if _, exists := value[key]; exists {
+			delete(value, key)
+			changed = true
+		}
+	}
+	if !isCanonicalSourceBlacklist(value) {
+		// Persist the empty canonical baseline rather than leaving a missing or
+		// nested migration shape for later restore code to interpret.
+		value["source_blacklist"] = []any{}
+		changed = true
+	}
 	if listen, ok := value["listen"].(map[string]any); ok {
 		if port, ok := asInt(listen["http_port"]); ok && port == 80 {
 			listen["http_port"] = config.ProxyListenPort
@@ -1851,6 +2062,257 @@ func sanitizeLegacyBundle(value map[string]any) bool {
 	return changed
 }
 
+func hasRetiredSourcePolicy(value map[string]any) bool {
+	if value == nil {
+		return false
+	}
+	for _, key := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
+		if _, exists := value[key]; exists {
+			return true
+		}
+	}
+	return !isCanonicalSourceBlacklist(value)
+}
+
+func isCanonicalSourceBlacklist(value map[string]any) bool {
+	return bundle.ValidateSourceBlacklist(bundle.Bundle(value)) == nil
+}
+
+// sourceBlacklistRule is the monitor's normalized source-side deny contract.
+// Bundles carry a flat array of global and current-site entries; the monitor
+// keeps the site check as a defensive guard against a mismatched bundle.
+type sourceBlacklistRule struct {
+	Scope   string `json:"scope"`
+	SiteID  string `json:"site_id,omitempty"`
+	Kind    string `json:"kind"`
+	Pattern string `json:"pattern"`
+}
+
+type sourceBlacklistSnapshot struct {
+	BundleHash string                `json:"bundle_hash"`
+	Rules      []sourceBlacklistRule `json:"rules"`
+}
+
+func clearLastGoodSourceBlacklistSnapshot(stateDir string) error {
+	err := os.Remove(filepath.Join(stateDir, "last-good-source-rules.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func sourceBlacklistRules(value map[string]any, siteID string) []sourceBlacklistRule {
+	if value == nil {
+		return nil
+	}
+	if !isCanonicalSourceBlacklist(value) {
+		return nil
+	}
+	entries := value["source_blacklist"].([]any)
+	result := make([]sourceBlacklistRule, 0)
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		scope, scopeOK := entry["scope"].(string)
+		kind, kindOK := entry["kind"].(string)
+		pattern, patternOK := entry["pattern"].(string)
+		if !scopeOK || !kindOK || !patternOK {
+			continue
+		}
+		entrySite := ""
+		if rawSite, exists := entry["site_id"]; exists && rawSite != nil {
+			var entrySiteOK bool
+			entrySite, entrySiteOK = rawSite.(string)
+			if !entrySiteOK || entrySite != strings.TrimSpace(entrySite) {
+				continue
+			}
+		}
+		switch scope {
+		case "global":
+			if entrySite != "" {
+				continue
+			}
+		case "site":
+			if entrySite == "" || entrySite != siteID {
+				continue
+			}
+		default:
+			continue
+		}
+		result = append(result, sourceBlacklistRule{Scope: scope, SiteID: entrySite, Kind: kind, Pattern: pattern})
+	}
+	return dedupeSourceBlacklistRules(result)
+}
+
+func dedupeSourceBlacklistRules(values []sourceBlacklistRule) []sourceBlacklistRule {
+	result := make([]sourceBlacklistRule, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		key := value.Scope + "\x00" + value.SiteID + "\x00" + value.Kind + "\x00" + value.Pattern
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+// resolveSourceBlacklistRules turns a source-domain rule into the exact IP
+// addresses currently assigned to it by the monitor node's resolver. sing-box
+// has no source-domain matcher for HTTP inbounds; emitting an unknown key
+// would silently skip the blacklist, so DNS resolution is part of applying a
+// domain rule. A lookup failure rejects the candidate and retains last-good.
+func resolveSourceBlacklistRules(ctx context.Context, rules []sourceBlacklistRule) ([]sourceBlacklistRule, error) {
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, sourceDomainResolveDeadline)
+	defer cancelResolve()
+	result := make([]sourceBlacklistRule, 0, len(rules))
+	domainCount := 0
+	for _, rule := range rules {
+		if rule.Kind != "domain" {
+			result = append(result, rule)
+			continue
+		}
+		domainCount++
+		if domainCount > maxSourceDomainRules {
+			return nil, errors.New("source_domain_rule_limit_exceeded")
+		}
+		lookupCtx, cancel := context.WithTimeout(resolveCtx, sourceDomainLookupTimeout)
+		addresses, err := lookupSourceDomainIPs(lookupCtx, rule.Pattern)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("source_domain_resolution_failed: %s: %w", rule.Pattern, err)
+		}
+		if len(addresses) == 0 {
+			return nil, fmt.Errorf("source_domain_resolution_failed: %s: no_addresses", rule.Pattern)
+		}
+		seenAddresses := make(map[string]struct{}, len(addresses))
+		resolvedCount := 0
+		for _, address := range addresses {
+			if address == nil {
+				continue
+			}
+			if ipv4 := address.To4(); ipv4 != nil {
+				address = ipv4
+			}
+			pattern := address.String()
+			if _, exists := seenAddresses[pattern]; exists {
+				continue
+			}
+			seenAddresses[pattern] = struct{}{}
+			resolvedCount++
+			if resolvedCount > maxSourceDomainAddresses {
+				return nil, fmt.Errorf("source_domain_resolution_too_many_addresses: %s", rule.Pattern)
+			}
+			result = append(result, sourceBlacklistRule{
+				Scope: rule.Scope, SiteID: rule.SiteID, Kind: "ip", Pattern: pattern,
+			})
+		}
+		if resolvedCount == 0 {
+			return nil, fmt.Errorf("source_domain_resolution_failed: %s: no_valid_addresses", rule.Pattern)
+		}
+	}
+	return dedupeSourceBlacklistRules(result), nil
+}
+
+func (a *agent) lastGoodSourceBlacklistRules(value map[string]any) ([]sourceBlacklistRule, error) {
+	if value == nil || hasRetiredSourcePolicy(value) {
+		// Historical bundles and malformed persisted state must not reuse a
+		// materialized snapshot created for a retired source-policy contract.
+		return nil, nil
+	}
+	expectedHash := stringValue(value["bundle_hash"])
+	path := filepath.Join(a.cfg.StateDir, "last-good-source-rules.json")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var snapshot sourceBlacklistSnapshot
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, fmt.Errorf("read last-good source rules: %w", err)
+		}
+		if expectedHash != "" && snapshot.BundleHash == expectedHash {
+			if err := validateMaterializedSourceRules(snapshot.Rules); err != nil {
+				return nil, err
+			}
+			return snapshot.Rules, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read last-good source rules: %w", err)
+	}
+	// This is a migration fallback only. A successfully applied modern bundle
+	// always has a materialized snapshot, so a temporary DNS failure cannot
+	// prevent restoration of a known-good configuration.
+	return resolveSourceBlacklistRules(
+		context.Background(),
+		sourceBlacklistRules(value, stringValue(value["site_id"])),
+	)
+}
+
+func validateMaterializedSourceRules(rules []sourceBlacklistRule) error {
+	for _, rule := range rules {
+		switch rule.Kind {
+		case "ip":
+			if net.ParseIP(rule.Pattern) == nil {
+				return errors.New("invalid_last_good_source_rules")
+			}
+		case "network":
+			if _, _, err := net.ParseCIDR(rule.Pattern); err != nil {
+				return errors.New("invalid_last_good_source_rules")
+			}
+		default:
+			return errors.New("invalid_last_good_source_rules")
+		}
+	}
+	return nil
+}
+
+func (a *agent) persistLastGoodSourceBlacklistRules(bundleValue map[string]any, rules []sourceBlacklistRule) error {
+	if err := validateMaterializedSourceRules(rules); err != nil {
+		return err
+	}
+	hashValue := stringValue(bundleValue["bundle_hash"])
+	if hashValue == "" {
+		return errors.New("missing_last_good_bundle_hash")
+	}
+	return bundle.WriteJSON(filepath.Join(a.cfg.StateDir, "last-good-source-rules.json"), sourceBlacklistSnapshot{
+		BundleHash: hashValue,
+		Rules:      rules,
+	})
+}
+
+func normalizeSourceCIDR(pattern string) string {
+	pattern = strings.TrimSpace(pattern)
+	if address := net.ParseIP(pattern); address != nil {
+		if address.To4() != nil {
+			// sing-box accepts a host address in source_ip_cidr and retaining the
+			// canonical host form keeps the bundle pattern visible in diagnostics.
+			return address.To4().String()
+		}
+		return address.String()
+	}
+	if _, network, err := net.ParseCIDR(pattern); err == nil && network != nil {
+		return network.String()
+	}
+	// Bundle validation rejects malformed IP/network values. Returning the
+	// original text here keeps rendering side-effect free for legacy snapshots.
+	return pattern
+}
+
+func sourceBlacklistRouteRules(sourceRules []sourceBlacklistRule) []any {
+	rules := make([]any, 0, len(sourceRules))
+	for _, entry := range sourceRules {
+		if entry.Kind != "ip" && entry.Kind != "network" {
+			continue
+		}
+		rules = append(rules, map[string]any{
+			"source_ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
+			"action":         "reject",
+		})
+	}
+	return rules
+}
+
 func renderSingbox(
 	value map[string]any,
 	port int,
@@ -1858,6 +2320,7 @@ func renderSingbox(
 	clashAPIListen string,
 	subscriptionOutbounds []any,
 	listenAddress string,
+	sourceRules []sourceBlacklistRule,
 ) map[string]any {
 	inbound := map[string]any{
 		"type":             "http",
@@ -1868,46 +2331,15 @@ func renderSingbox(
 	configValue := map[string]any{"inbounds": []any{inbound}}
 	applySingboxIngress(configValue, port, boolValue(value["shutdown"]), listenAddress)
 	routeRules := make([]any, 0)
-	allowCIDRs := stringSlice(value["allow_cidrs"])
-	if len(allowCIDRs) == 0 {
-		// An empty effective ACL is fail-closed at the sing-box layer too.
-		routeRules = append(routeRules, map[string]any{"action": "reject"})
-	} else {
-		// source_ip_cidr is a route matcher in sing-box.  Inverting the
-		// allow-list rejects every source that nftables would reject as well.
-		routeRules = append(routeRules, map[string]any{
-			"source_ip_cidr": allowCIDRs,
-			"invert":         true,
-			"action":         "reject",
-		})
-	}
-	if deny, ok := value["deny_destinations"].([]any); ok {
-		for _, raw := range deny {
-			entry, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			pattern := stringValue(entry["pattern"])
-			kind := stringValue(entry["kind"])
-			if pattern == "" {
-				continue
-			}
-			rule := map[string]any{"outbound": "block"}
-			switch kind {
-			case "ip", "cidr":
-				rule["ip_cidr"] = []string{pattern}
-			default:
-				rule["domain"] = []string{pattern}
-			}
-			routeRules = append(routeRules, rule)
-		}
-	}
-	// Pin CN domain and IP handling to local binary rule-sets. Explicit
-	// blacklist rules remain above this rule, so destination deny policy wins.
+	// Source policy is allow-all by default. Only explicit source blacklist
+	// entries produce reject rules; domain entries have already been resolved
+	// to source IPs by applyBundle/last-good restoration.
+	routeRules = append(routeRules, sourceBlacklistRouteRules(sourceRules)...)
+	// Pin CN domain and IP handling to local binary rule-sets. Source deny
+	// rules remain above this routing decision.
 	routeRules = append(routeRules, cnDirectRule())
 	outbounds := []any{
 		map[string]any{"type": "direct", "tag": "direct"},
-		map[string]any{"type": "block", "tag": "block"},
 	}
 	finalOutbound := "direct"
 	if len(subscriptionOutbounds) > 0 {

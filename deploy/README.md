@@ -14,8 +14,9 @@ No forwarding layer is used.
 - The dashboard is a separate Next.js process exposed directly on TCP `80`.
   Its built-in `/api/*` rewrite sends dashboard API calls to the private FastAPI
   backend listener.
-- The proxy has no HTTP Basic authentication. Per-site source CIDRs are the
-  network access boundary.
+- The proxy has no HTTP Basic authentication. Source access is allow-all by
+  default; explicit global or site-scoped source blacklist rules are the only
+  network deny boundary.
 
 The access page serves immutable, pre-generated workstation assets. The
 `test` environment uses `test-proxy.1oa.com.cn`; production uses
@@ -23,20 +24,21 @@ The access page serves immutable, pre-generated workstation assets. The
 select the test pair; every other value selects production. The endpoint is
 always HTTP CONNECT on TCP `1080` and has no proxy authentication layer.
 
-`linux-setup-proxy.sh` and `linux-setup-proxy-test.sh` write proxy variables
-with port `1080`, update GNOME or KDE when their settings tools are available,
-and can remove only their own changes with `--uninstall`. The dashboard
+`linux-setup-proxy.sh` and `linux-setup-proxy-test.sh` are parameterless
+current-user toggles. Each run detects the current shell/desktop proxy state:
+it enables the HTTP CONNECT proxy when disabled and turns it off when enabled.
+They update GNOME or KDE when their settings tools are available. The dashboard
 downloads the matching file from `GET /api/v1/access/linux-setup.sh` and the
 matching PowerShell file from `GET /api/v1/access/windows-setup.ps1`.
 Keep the `deploy/` directory beside the deployed backend package (for example
 `/opt/grouproxy/deploy`) because the backend reads these checked-in files
 directly; do not replace them with request-time templates.
 
-The Windows asset configures the current user's WinINET proxy and user-level
-`HTTP_PROXY`/`HTTPS_PROXY` variables, runs optional direct and proxy checks, and
-supports `-Disable` to restore the saved state. It does not install a
-certificate or proxy credentials. macOS uses the environment-specific iCloud
-shortcut shown on the access page.
+The Windows asset reads the current user's WinINET `ProxyEnable` setting and
+reverses it without parameters: it writes the environment-specific proxy when
+enabling and turns the system proxy off when it is already enabled. It does not
+install a certificate or proxy credentials. macOS uses the environment-specific
+`.shortcut` download shown on the access page.
 
 HTTPS destinations remain end-to-end inside the HTTP CONNECT tunnel.
 
@@ -68,7 +70,7 @@ source `node_modules` directory. `GROUPROXY_BACKEND_API_URL` is a build-time
 value because Next.js writes the `/api/*` rewrite into the production output.
 The dashboard also forwards `/healthz` and `/readyz`; after restarting both
 processes, `curl http://<dashboard-domain>/healthz` must report backend version
-`0.4.0`. A 404 from `/api/v1/subscriptions/single-node` means the running
+`0.5.0`. A 404 from `/api/v1/subscriptions/single-node` means the running
 backend/dashboard artifact is older than this source tree, not that the URI
 failed validation.
 

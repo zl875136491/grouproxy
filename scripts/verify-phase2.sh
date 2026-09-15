@@ -11,6 +11,8 @@ set +a
 
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 AUTH_HEADER="Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}"
+TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://${GROUPROXY_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}:${GROUPROXY_TEST_FRONTEND_PORT:-3000}}"
+curl() { command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"; }
 FIXTURE="$ROOT_DIR/scripts/fixtures/phase2-singbox.json"
 INVALID_FIXTURE="$ROOT_DIR/scripts/fixtures/phase2-invalid.txt"
 SOURCE_NAME="phase2-fixture"

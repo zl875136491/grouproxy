@@ -17,8 +17,7 @@ func testBundle() Bundle {
 		"site_id":             "site-1",
 		"node_id":             "node-1",
 		"listen":              map[string]any{"http_port": 1080},
-		"allow_cidrs":         []string{"10.0.0.0/8"},
-		"deny_destinations":   []any{},
+		"source_blacklist":    []any{},
 		"shutdown":            false,
 		"issued_at":           time.Now().UTC().Format(time.RFC3339),
 		"expires_at":          time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
@@ -40,14 +39,116 @@ func TestSignVerifyAndCanonicalHash(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsReplayAndMalformedACL(t *testing.T) {
+func TestValidateRejectsReplayAndRetiredPolicyFields(t *testing.T) {
 	signed := signForTest(testBundle(), "secret")
 	if _, err := Validate(signed, "secret", 2); err == nil || err.Error() != "bundle_replay" {
 		t.Fatalf("replay error = %v", err)
 	}
-	signed["allow_cidrs"] = []string{"not-a-cidr"}
-	if _, err := Validate(signed, "secret", 0); err == nil || err.Error() != "invalid_allow_cidr" {
-		t.Fatalf("ACL error = %v", err)
+	for _, field := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
+		value := testBundle()
+		value[field] = []any{}
+		if _, err := Validate(signForTest(value, "secret"), "secret", 0); err == nil || err.Error() != "retired_policy_field" {
+			t.Fatalf("%s error = %v", field, err)
+		}
+	}
+}
+
+func TestValidateAllowsCanonicalSourceBlacklist(t *testing.T) {
+	value := testBundle()
+	value["source_blacklist"] = []any{
+		map[string]any{"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
+		map[string]any{"scope": "site", "site_id": "site-1", "kind": "network", "pattern": "2001:db8::/32"},
+		map[string]any{"scope": "global", "kind": "domain", "pattern": "blocked.example"},
+	}
+	signed := signForTest(value, "secret")
+	if _, err := Validate(signed, "secret", 0); err != nil {
+		t.Fatalf("source blacklist bundle rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsMalformedSourceBlacklist(t *testing.T) {
+	value := testBundle()
+	value["source_blacklist"] = []any{map[string]any{
+		"scope": "global", "kind": "ip", "pattern": "not-an-ip",
+	}}
+	signed := signForTest(value, "secret")
+	if _, err := Validate(signed, "secret", 0); err == nil || err.Error() != "invalid_source_blacklist_ip" {
+		t.Fatalf("malformed source blacklist error = %v", err)
+	}
+}
+
+func TestValidateRejectsMissingOrNestedSourceBlacklist(t *testing.T) {
+	missing := testBundle()
+	delete(missing, "source_blacklist")
+	if _, err := Validate(signForTest(missing, "secret"), "secret", 0); err == nil || err.Error() != "missing_source_blacklist" {
+		t.Fatalf("missing source blacklist error = %v", err)
+	}
+
+	nested := testBundle()
+	nested["source_blacklist"] = map[string]any{
+		"global": []any{map[string]any{"kind": "ip", "pattern": "192.0.2.1"}},
+	}
+	if _, err := Validate(signForTest(nested, "secret"), "secret", 0); err == nil || err.Error() != "invalid_source_blacklist_entries" {
+		t.Fatalf("nested source blacklist error = %v", err)
+	}
+
+	legacyCIDRKind := testBundle()
+	legacyCIDRKind["source_blacklist"] = []any{map[string]any{
+		"scope": "global", "kind": "cidr", "pattern": "192.0.2.0/24",
+	}}
+	if _, err := Validate(signForTest(legacyCIDRKind, "secret"), "secret", 0); err == nil || err.Error() != "invalid_source_blacklist_kind" {
+		t.Fatalf("legacy cidr kind error = %v", err)
+	}
+
+	typedSlice := testBundle()
+	typedSlice["source_blacklist"] = []map[string]any{{
+		"scope": "global", "kind": "ip", "pattern": "192.0.2.1",
+	}}
+	if _, err := Validate(signForTest(typedSlice, "secret"), "secret", 0); err == nil || err.Error() != "invalid_source_blacklist_entries" {
+		t.Fatalf("non-JSON source blacklist slice error = %v", err)
+	}
+}
+
+func TestValidateRejectsNonCanonicalSourcePatternsAndWrongSite(t *testing.T) {
+	testCases := []struct {
+		name  string
+		entry map[string]any
+		err   string
+	}{
+		{
+			name:  "noncanonical IPv6",
+			entry: map[string]any{"scope": "global", "kind": "ip", "pattern": "2001:0DB8::1"},
+			err:   "invalid_source_blacklist_ip",
+		},
+		{
+			name:  "network with host bits",
+			entry: map[string]any{"scope": "global", "kind": "network", "pattern": "192.0.2.7/24"},
+			err:   "invalid_source_blacklist_network",
+		},
+		{
+			name:  "noncanonical domain",
+			entry: map[string]any{"scope": "global", "kind": "domain", "pattern": "Blocked.Example."},
+			err:   "invalid_source_blacklist_domain",
+		},
+		{
+			name:  "URL domain",
+			entry: map[string]any{"scope": "global", "kind": "domain", "pattern": "https://blocked.example"},
+			err:   "invalid_source_blacklist_domain",
+		},
+		{
+			name:  "wrong site",
+			entry: map[string]any{"scope": "site", "site_id": "site-2", "kind": "ip", "pattern": "192.0.2.1"},
+			err:   "invalid_source_blacklist_site",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := testBundle()
+			value["source_blacklist"] = []any{testCase.entry}
+			if _, err := Validate(signForTest(value, "secret"), "secret", 0); err == nil || err.Error() != testCase.err {
+				t.Fatalf("error = %v, want %q", err, testCase.err)
+			}
+		})
 	}
 }
 

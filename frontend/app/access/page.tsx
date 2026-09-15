@@ -7,14 +7,11 @@ import {
   Clipboard,
   Clock3,
   Download,
-  ExternalLink,
   FileCode2,
   Laptop,
   Monitor,
-  Network,
   Terminal,
 } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { getAccessConfig, getLinuxSetupScript, getWindowsSetupScript } from "../../lib/api";
 import { writeClipboard } from "../../lib/clipboard";
@@ -33,7 +30,6 @@ type CodeSnippetProps = {
   content: string;
   copiedId: string;
   onCopy: () => void;
-  onDownload?: () => void;
 };
 
 const bashTokens = /(#.*$)|(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')|(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)|(\b(?:export|if|then|fi|for|in|do|done|case|esac|function|local)\b)|(--?[A-Za-z][A-Za-z0-9-]*)|(https?:\/\/[^\s\"'`]+)/gm;
@@ -67,7 +63,7 @@ function highlightCode(content: string, language: CodeLanguage) {
   return fragments;
 }
 
-function CodeSnippet({ id, filename, language, content, copiedId, onCopy, onDownload }: CodeSnippetProps) {
+function CodeSnippet({ id, filename, language, content, copiedId, onCopy }: CodeSnippetProps) {
   const copied = copiedId === id;
   return (
     <div className="access-doc-codeblock">
@@ -75,7 +71,6 @@ function CodeSnippet({ id, filename, language, content, copiedId, onCopy, onDown
         <div className="access-doc-code-meta"><FileCode2 size={14} aria-hidden="true" /><code>{filename}</code><span>{language}</span></div>
         <div className="row-actions">
           <IconButton className="access-doc-code-action" label={copied ? "Copied" : "Copy"} onClick={onCopy}>{copied ? <Check size={14} /> : <Clipboard size={14} />}</IconButton>
-          {onDownload ? <IconButton className="access-doc-code-action" label="Download" onClick={onDownload}><Download size={14} /></IconButton> : null}
         </div>
       </div>
       <pre className="access-doc-code"><code>{highlightCode(content, language)}</code></pre>
@@ -99,8 +94,8 @@ function PlatformCard({ id, icon, title, description, children }: { id: string; 
   );
 }
 
-function MacOSShortcutLink({ href, title, unavailable = false, t }: { href?: string; title: string; unavailable?: boolean; t: (key: string, values?: Record<string, string | number>) => string }) {
-  const content = <><img src="/apple-shortcuts-icon.jpg" alt="" width={44} height={44} /><span className="access-doc-shortcut-copy"><strong>{title}</strong><span>{t("macOS shortcut")}</span></span>{unavailable ? <Clock3 size={16} aria-hidden="true" /> : <ExternalLink size={16} aria-hidden="true" />}</>;
+function MacOSShortcutLink({ href, filename, title, unavailable = false, t }: { href?: string; filename?: string; title: string; unavailable?: boolean; t: (key: string, values?: Record<string, string | number>) => string }) {
+  const content = <><img src="/apple-shortcuts-icon.jpg" alt="" width={44} height={44} /><span className="access-doc-shortcut-copy"><strong>{title}</strong><span>{t("macOS shortcut")}</span></span>{unavailable ? <Clock3 size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}</>;
   if (unavailable) {
     return (
       <button className="access-doc-shortcut-link" type="button" onClick={() => notifyToast({ title: t("Feature in development") })} aria-label={`${title} - ${t("Feature in development")}`}>
@@ -109,9 +104,19 @@ function MacOSShortcutLink({ href, title, unavailable = false, t }: { href?: str
     );
   }
   return (
-    <a className="access-doc-shortcut-link" href={href} target="_blank" rel="noreferrer" aria-label={`${title} - ${t("macOS shortcut")}`}>
+    <a className="access-doc-shortcut-link" href={href} download={filename} aria-label={`${title} - ${t("Download")}`}>
       {content}
     </a>
+  );
+}
+
+function ScriptDownloadLink({ icon, title, subtitle, onDownload, t }: { icon: ReactNode; title: string; subtitle: string; onDownload: () => void; t: (key: string, values?: Record<string, string | number>) => string }) {
+  return (
+    <button className="access-doc-shortcut-link access-doc-script-download-link" type="button" onClick={onDownload} aria-label={`${title} - ${t("Download")}`}>
+      <span className="access-doc-download-icon" aria-hidden="true">{icon}</span>
+      <span className="access-doc-shortcut-copy"><strong>{title}</strong><span>{subtitle}</span></span>
+      <Download size={16} aria-hidden="true" />
+    </button>
   );
 }
 
@@ -130,10 +135,14 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-const macOSShortcutUrls = {
-  quickAccess: {
-    test: "https://www.icloud.com/shortcuts/d0b8a9e0e4a745de945cbc56d94424a8",
-    production: "https://www.icloud.com/shortcuts/569e37fe985148449327b3e1e1c1f68e",
+const macOSShortcutDownloads = {
+  test: {
+    href: "/shortcuts/grouproxy-macos-test.shortcut",
+    filename: "grouproxy-macos-test.shortcut",
+  },
+  production: {
+    href: "/shortcuts/grouproxy-macos-production.shortcut",
+    filename: "grouproxy-macos-production.shortcut",
   },
 } as const;
 
@@ -146,12 +155,11 @@ export default function AccessPage() {
 
   const config = accessConfig.data;
   const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:1080";
-  const windowsQuickCommand = "Set-ExecutionPolicy -Scope Process Bypass -Force\n.\\grouproxy-windows-setup.ps1\n\n.\\grouproxy-windows-setup.ps1 -Disable";
-  const linuxQuickCommand = "chmod +x ./grouproxy-linux-setup.sh\n./grouproxy-linux-setup.sh\n\n./grouproxy-linux-setup.sh --uninstall";
+  const linuxQuickCommand = config ? `export HTTP_PROXY=${shellQuote(endpoint)}\nexport HTTPS_PROXY="$HTTP_PROXY"\nexport NO_PROXY="localhost,127.0.0.1,::1"` : "";
+  const windowsQuickCommand = config ? `$settings = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"\nSet-ItemProperty -Path $settings -Name ProxyServer -Value "${config.fqdn}:${config.port}"\nSet-ItemProperty -Path $settings -Name ProxyEnable -Value 1` : "";
   const windowsValidationCommand = config ? `$ProxyUrl = \"${endpoint}\"\nTest-NetConnection -ComputerName \"${config.fqdn}\" -Port ${config.port}\nInvoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl` : "";
   const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
-  const windowsAllowlistCommand = config ? `$ProxyUrl = \"${endpoint}\"\n$SourceAddress = Invoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl\n$SourceAddress.Trim()` : "";
-  const linuxAllowlistCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
+  const macOSShortcut = config ? macOSShortcutDownloads[config.environment] : undefined;
   const accessReady = Boolean(config && linuxScript.data && windowsScript.data);
 
   useEffect(() => {
@@ -193,7 +201,7 @@ export default function AccessPage() {
               className="access-docs-page-header"
               eyebrow="ACCESS GUIDE"
               title="Proxy access"
-              description="Connect your workstation, verify the route, and maintain source access from one place."
+              description="Connect your workstation, verify the route, and use reusable setup scripts from one place."
               icon={<BookOpen size={18} />}
             />
             <div className="access-endpoint-bar"><div className="access-endpoint-status"><StatusBadge status="enabled" /><span>{t(config.environment === "test" ? "Test environment" : "Production environment")}</span></div><code>{endpoint}</code><span className="access-endpoint-port">{t("Port")} {formatNumber(config.port, { useGrouping: false })}</span></div>
@@ -202,26 +210,27 @@ export default function AccessPage() {
           <section className="access-doc-section" aria-labelledby="access-quick-start">
             <SectionHeading id="access-quick-start" title={t("Quick start")} description={t("Choose an operating system and use the shortest supported setup path.")} />
             <div className="access-doc-platform-grid">
-              <PlatformCard id="access-quick-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Download the setup script and run it as the current user.")}>
-                <CodeSnippet id="linux-quick" filename="grouproxy-linux-setup.sh" language="bash" content={linuxQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-quick", linuxQuickCommand, t("Linux"))} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} />
+              <PlatformCard id="access-quick-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Set proxy variables for the current shell.")}>
+                <CodeSnippet id="linux-quick" filename="proxy-env.sh" language="bash" content={linuxQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-quick", linuxQuickCommand, t("Linux"))} />
+                <p className="access-doc-card-note">{t("These variables apply to the current shell and its child processes.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-quick-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Use the downloaded script to turn the current user's Windows system proxy on or off.")}>
-                <CodeSnippet id="windows-quick" filename="grouproxy-windows-setup.ps1" language="powershell" content={windowsQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-quick", windowsQuickCommand, t("Windows"))} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} />
-                <p className="access-doc-card-note">{t("Run without options to enable the proxy. Run with -Disable to turn it off.")}</p>
+              <PlatformCard id="access-quick-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Set the current user's Windows system proxy directly.")}>
+                <CodeSnippet id="windows-quick" filename="set-proxy.ps1" language="powershell" content={windowsQuickCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-quick", windowsQuickCommand, t("Windows"))} />
+                <p className="access-doc-card-note">{t("Set ProxyEnable to 0 in the same location to turn the proxy off.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Use the shortcut prepared for the selected deployment environment.")}>
-                <MacOSShortcutLink href={macOSShortcutUrls.quickAccess[config.environment]} title={t("Enable proxy script")} t={t} />
+              <PlatformCard id="access-quick-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Download the shortcut, import it into the Shortcuts app, and run it.")}>
+                <MacOSShortcutLink href={macOSShortcut?.href} filename={macOSShortcut?.filename} title={t("Enable proxy script")} t={t} />
               </PlatformCard>
             </div>
           </section>
 
           <section className="access-doc-section" aria-labelledby="access-testing">
-            <SectionHeading id="access-testing" title={t("Testing and validation")} description={t("Confirm the listener and proxy route, then use the returned address to maintain source access.")} />
+            <SectionHeading id="access-testing" title={t("Testing and validation")} description={t("Confirm the listener and the actual HTTP CONNECT route.")} />
             <div className="access-doc-platform-grid">
-              <PlatformCard id="access-testing-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Check the listener and return the address seen through the proxy.")}>
+              <PlatformCard id="access-testing-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Check the listener and verify traffic reaches the network through the proxy.")}>
                 <CodeSnippet id="linux-validation" filename="grouproxy-check.sh" language="bash" content={linuxValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-validation", linuxValidationCommand, t("Linux"))} />
               </PlatformCard>
-              <PlatformCard id="access-testing-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Check the listener and return the address seen through the proxy.")}>
+              <PlatformCard id="access-testing-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Check the listener and verify traffic reaches the network through the proxy.")}>
                 <CodeSnippet id="windows-validation" filename="grouproxy-check.ps1" language="powershell" content={windowsValidationCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-validation", windowsValidationCommand, t("Windows"))} />
               </PlatformCard>
               <PlatformCard id="access-testing-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("This macOS shortcut is in development.")}>
@@ -230,20 +239,19 @@ export default function AccessPage() {
             </div>
           </section>
 
-          <section className="access-doc-section" aria-labelledby="access-allowlist">
-            <SectionHeading id="access-allowlist" title={t("Allowlist")} description={t("Use the returned address to locate or add the matching source CIDR.")} />
+          <section className="access-doc-section" aria-labelledby="access-reusable-scripts">
+            <SectionHeading id="access-reusable-scripts" title={t("Reusable scripts")} description={t("Download the script once, then run the same file whenever you need to switch the proxy on or off.")} />
             <div className="access-doc-platform-grid">
-              <PlatformCard id="access-allowlist-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Collect the proxy source address, then open site policy to maintain the allowlist.")}>
-                <CodeSnippet id="linux-allowlist" filename="grouproxy-source-address.sh" language="bash" content={linuxAllowlistCommand} copiedId={copiedId} onCopy={() => copySnippet("linux-allowlist", linuxAllowlistCommand, t("Linux"))} />
-                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
+              <PlatformCard id="access-reusable-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
+                <ScriptDownloadLink icon={<Terminal size={24} />} title={t("grouproxy-linux-setup.sh")} subtitle={t("Bash script")} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} t={t} />
+                <p className="access-doc-card-note">{t("After downloading, make the file executable and run it. Each run checks the current proxy state and switches it to the opposite state; then reopen the terminal and affected applications.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-allowlist-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Collect the proxy source address, then open site policy to maintain the allowlist.")}>
-                <CodeSnippet id="windows-allowlist" filename="grouproxy-source-address.ps1" language="powershell" content={windowsAllowlistCommand} copiedId={copiedId} onCopy={() => copySnippet("windows-allowlist", windowsAllowlistCommand, t("Windows"))} />
-                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
+              <PlatformCard id="access-reusable-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
+                <ScriptDownloadLink icon={<Monitor size={24} />} title={t("grouproxy-windows-setup.ps1")} subtitle={t("PowerShell script")} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
+                <p className="access-doc-card-note">{t("After downloading, run it directly from PowerShell. Each run checks the current proxy state and switches it to the opposite state; then restart affected applications.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-allowlist-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("This macOS shortcut is in development.")}>
-                <MacOSShortcutLink unavailable title={t("Manage source CIDRs")} t={t} />
-                <Link className="access-doc-card-link" href="/sites"><Network size={15} aria-hidden="true" />{t("Manage source CIDRs")}</Link>
+              <PlatformCard id="access-reusable-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Download the shortcut, import it into the Shortcuts app, and run it.")}>
+                <MacOSShortcutLink href={macOSShortcut?.href} filename={macOSShortcut?.filename} title={t("Reusable setup script")} t={t} />
               </PlatformCard>
             </div>
           </section>
@@ -261,8 +269,8 @@ export default function AccessPage() {
               <div className="access-docs-rail-children"><a href="#access-testing-linux">{t("Linux")}</a><a href="#access-testing-windows">{t("Windows")}</a><a href="#access-testing-macos">{t("macOS")}</a></div>
             </div>
             <div className="access-docs-rail-group">
-              <a className="access-docs-rail-parent" href="#access-allowlist">{t("Allowlist")}</a>
-              <div className="access-docs-rail-children"><a href="#access-allowlist-linux">{t("Linux")}</a><a href="#access-allowlist-windows">{t("Windows")}</a><a href="#access-allowlist-macos">{t("macOS")}</a></div>
+              <a className="access-docs-rail-parent" href="#access-reusable-scripts">{t("Reusable scripts")}</a>
+              <div className="access-docs-rail-children"><a href="#access-reusable-linux">{t("Linux")}</a><a href="#access-reusable-windows">{t("Windows")}</a><a href="#access-reusable-macos">{t("macOS")}</a></div>
             </div>
             <div className="access-docs-rail-endpoint"><span>{t("Environment")}</span><strong>{t(config.environment === "test" ? "Test environment" : "Production environment")}</strong><code>{config.fqdn}:{config.port}</code></div>
           </nav>

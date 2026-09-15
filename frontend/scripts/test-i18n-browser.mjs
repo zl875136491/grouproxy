@@ -6,6 +6,7 @@ import path from "node:path";
 
 const frontendURL = process.env.GROUPROXY_BROWSER_FRONTEND_URL || "http://127.0.0.1:3000";
 const backendURL = process.env.GROUPROXY_BROWSER_BACKEND_URL || "http://127.0.0.1:8000";
+const frontendOrigin = new URL(frontendURL).origin;
 const browserPath = process.env.GROUPROXY_BROWSER_PATH || "/connections";
 const itcode = process.env.GROUPROXY_BROWSER_ITCODE;
 const password = process.env.GROUPROXY_BROWSER_PASSWORD;
@@ -185,7 +186,7 @@ function readValue(result) {
 async function login() {
   const response = await fetch(`${backendURL}/api/v1/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: frontendOrigin },
     body: JSON.stringify({ itcode, password }),
   });
   if (!response.ok) throw new Error(`Browser test login failed with HTTP ${response.status}`);
@@ -333,6 +334,7 @@ try {
             id: card.querySelector('h3')?.id || '',
             tagName: action?.tagName || '',
             href: action instanceof HTMLAnchorElement ? action.href : '',
+            download: action instanceof HTMLAnchorElement ? action.download : '',
           };
         })
         .filter((shortcut) => shortcut.id.endsWith('-macos')))()`);
@@ -340,11 +342,22 @@ try {
         {
           id: "access-quick-macos",
           tagName: "A",
-          href: "https://www.icloud.com/shortcuts/d0b8a9e0e4a745de945cbc56d94424a8",
+          href: `${frontendOrigin}/shortcuts/grouproxy-macos-test.shortcut`,
+          download: "grouproxy-macos-test.shortcut",
         },
-        { id: "access-testing-macos", tagName: "BUTTON", href: "" },
-        { id: "access-allowlist-macos", tagName: "BUTTON", href: "" },
+        { id: "access-testing-macos", tagName: "BUTTON", href: "", download: "" },
+        {
+          id: "access-reusable-macos",
+          tagName: "A",
+          href: `${frontendOrigin}/shortcuts/grouproxy-macos-test.shortcut`,
+          download: "grouproxy-macos-test.shortcut",
+        },
       ]);
+      assert.equal(
+        await evaluate("document.getElementById('access-source-blocking') === null"),
+        true,
+        "Source blocking must not appear in the access guide",
+      );
       await evaluate(`(() => {
         const action = document.getElementById('access-testing-macos')
           ?.closest('.access-doc-platform-card')
@@ -357,7 +370,7 @@ try {
         "in-development shortcut toast",
       );
       assert.deepEqual(browserErrors, [], `Access page threw browser errors: ${browserErrors.join(" | ")}`);
-      console.log("Access shortcuts use the configured iCloud URL and in-development toast.");
+      console.log("Access shortcuts download the environment-specific file and retain the in-development toast.");
     }
     console.log(`Rendered ${browserPath} with ${visualState.stylesheets} stylesheet(s).`);
   } else {
@@ -403,7 +416,7 @@ try {
   if (session?.access_token) {
     await fetch(`${backendURL}/api/v1/auth/logout`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${session.access_token}`, Origin: frontendOrigin },
     }).catch(() => undefined);
   }
   client?.close();

@@ -13,7 +13,15 @@ GQUAN_DELIVERY_MODE="${GROUPROXY_TEST_GQUAN_DELIVERY_MODE:-app}"
 GQUAN_APP_TOKEN="${GROUPROXY_TEST_GQUAN_APP_TOKEN:-}"
 GQUAN_TEST_CODE="${GROUPROXY_TEST_GQUAN_CODE:-123456}"
 PROXY_ACCESS_FQDN="${GROUPROXY_TEST_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}"
-TEST_CLIENT_CIDR="${GROUPROXY_TEST_CLIENT_CIDR:-10.32.12.0/24}"
+TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://127.0.0.1:${FRONTEND_PORT}}"
+export GROUPROXY_CORS_ALLOWED_ORIGINS="${GROUPROXY_CORS_ALLOWED_ORIGINS:-http://${PROXY_ACCESS_FQDN},http://${PROXY_ACCESS_FQDN}:${FRONTEND_PORT},http://127.0.0.1:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT}}"
+
+# Browser management writes are protected by the backend's Origin check. The
+# bootstrap calls below are trusted test-console requests, so give them the
+# same explicit origin a browser on the test frontend would send.
+curl() {
+  command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"
+}
 
 case "$GQUAN_DELIVERY_MODE" in
   app)
@@ -193,8 +201,8 @@ done
 curl -fsS "$BACKEND_URL/readyz" >/dev/null
 
 bootstrap_node() {
-  local slug="$1" name="$2" port="$3" cidr="$4" extra_cidr="$5" client_cidr="$6" api_port="$7"
-  local firewall_port="$8" firewall_mode="$9" listen_address="${10:-}" ingress_overrides="" allow_cidrs
+  local slug="$1" name="$2" port="$3" api_port="$4" firewall_port="$5" firewall_mode="$6"
+  local listen_address="${7:-}" ingress_overrides=""
   local sites site_id nodes node_id response draft draft_id release
 
   if [[ "$port" != "1080" ]]; then
@@ -213,7 +221,6 @@ bootstrap_node() {
     printf 'The primary test proxy uses its default 0.0.0.0:1080 listener.\n' >&2
     exit 2
   fi
-  allow_cidrs="$(jq -nc --arg cidr "$cidr" --arg extra "$extra_cidr" --arg client "$client_cidr" '[ $cidr, $extra, $client ] | map(select(length > 0))')"
   sites="$(curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites")"
   site_id="$(jq -r --arg slug "$slug" '.[] | select(.slug == $slug) | .id' <<<"$sites" | head -n 1)"
   [[ -n "$site_id" && "$site_id" != "null" ]] || { printf 'site %s not found\n' "$slug" >&2; exit 1; }
@@ -232,17 +239,13 @@ bootstrap_node() {
   fi
   printf '%s\n' "$node_id" > "$TESTENV_DIR/node-${name}.id"
 
-  for policy_cidr in "$cidr" "$extra_cidr" "$client_cidr"; do
-    [[ -n "$policy_cidr" ]] || continue
-    if ! curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites/${site_id}/cidrs" | jq -e --arg cidr "$policy_cidr" '.[] | select(.cidr == $cidr)' >/dev/null; then
-      curl -fsS -X POST "$BACKEND_URL/api/v1/sites/${site_id}/cidrs" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg cidr "$policy_cidr" '{cidr:$cidr,comment:"phase1 test policy"}')" >/dev/null
-    fi
-  done
-
-  draft="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/drafts" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg site "$site_id" --arg node "$node_id" --argjson cidrs "$allow_cidrs" '{site_id:$site,node_ids:[$node],diff:{allow_cidrs:$cidrs,http_only:true},note:"phase1 network validation"}')")"
+  # Source access is allow-all by default. Do not seed legacy SiteCIDR records
+  # or send retired allow_cidrs in the draft: phase 1 creates and cleans up
+  # explicit source-blacklist entries when it needs to exercise deny behavior.
+  draft="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/drafts" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -d "$(jq -nc --arg site "$site_id" --arg node "$node_id" '{site_id:$site,node_ids:[$node],diff:{},note:"phase1 allow-all source baseline"}')")"
   draft_id="$(jq -r '.id' <<<"$draft")"
   jq . <<<"$draft" > "$TESTENV_DIR/draft-${name}.json"
-  release="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-network-${name}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
+  release="$(curl -fsS -X POST "$BACKEND_URL/api/v1/config/releases" -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" -H 'Content-Type: application/json' -H "Idempotency-Key: phase1-source-baseline-${name}" -d "$(jq -nc --arg draft "$draft_id" --arg site "$site_id" --arg node "$node_id" '{draft_id:$draft,site_id:$site,node_ids:[$node],expected_current_version:null}')")"
   jq . <<<"$release" > "$TESTENV_DIR/release-${name}.json"
 
   local state_dir="$TESTENV_DIR/monitor-${name}"
@@ -282,11 +285,11 @@ if [[ ! -x "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" ]] || \
 fi
 
 # The primary node matches the deployed :1080 listener. The same-host nuc
-# simulation uses a distinct, network-visible test port. Both still enforce
-# their signed source-CIDR policy in sing-box; nftables stays dry-run so this
+# simulation uses a distinct, network-visible test port. Both use the signed
+# allow-all/source-blacklist policy in sing-box; nftables stays dry-run so this
 # harness never rewrites the developer host firewall.
-bootstrap_node north codedev 1080 "$TEST_CLIENT_CIDR" 127.0.0.1/32 "" 19090 1080 dry-run ""
-bootstrap_node east nuc 18081 10.32.13.0/24 "$TEST_CLIENT_CIDR" 127.0.0.1/32 19091 18081 dry-run 0.0.0.0
+bootstrap_node north codedev 1080 19090 1080 dry-run ""
+bootstrap_node east nuc 18081 19091 18081 dry-run 0.0.0.0
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND_PORT" >/dev/null 2>&1; then
   (

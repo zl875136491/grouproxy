@@ -38,9 +38,9 @@ func TestRollbackUsesPortOverrideAndKeepsLastGoodConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	lastGood := map[string]any{
-		"listen":      map[string]any{"http_port": 1080},
-		"allow_cidrs": []string{"10.32.12.0/24"},
-		"shutdown":    false,
+		"listen":           map[string]any{"http_port": 1080},
+		"source_blacklist": []any{},
+		"shutdown":         false,
 	}
 	agent := &agent{
 		cfg: config.Config{
@@ -83,8 +83,7 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 	}
 	config := renderSingbox(
 		map[string]any{
-			"allow_cidrs":       []string{"10.32.12.0/24"},
-			"deny_destinations": []any{map[string]any{"kind": "domain", "pattern": "blocked.test"}},
+			"source_blacklist": []any{map[string]any{"scope": "global", "kind": "ip", "pattern": "192.0.2.1"}},
 		},
 		18080,
 		stateDir,
@@ -98,6 +97,7 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 			"password":    "secret",
 		}},
 		"",
+		[]sourceBlacklistRule{{Scope: "global", Kind: "ip", Pattern: "192.0.2.1"}},
 	)
 	route := config["route"].(map[string]any)
 	if route["final"] != "subscription" {
@@ -140,12 +140,13 @@ func TestRenderSingboxSupportsLoopbackIngress(t *testing.T) {
 		t.Fatalf("ensure routing data: %v", err)
 	}
 	config := renderSingbox(
-		map[string]any{"allow_cidrs": []string{"10.32.12.0/24"}},
+		map[string]any{"source_blacklist": []any{}},
 		18080,
 		stateDir,
 		"127.0.0.1:19090",
 		nil,
 		"127.0.0.1",
+		nil,
 	)
 	inbound := config["inbounds"].([]any)[0].(map[string]any)
 	if inbound["listen"] != "127.0.0.1" || inbound["listen_port"] != 18080 {
@@ -162,10 +163,10 @@ func TestEnsureLastGoodConfigReappliesOperationalIngress(t *testing.T) {
 		t.Fatalf("ensure routing data: %v", err)
 	}
 	lastGood := map[string]any{
-		"allow_cidrs": []string{"10.32.12.0/24"},
-		"shutdown":    false,
+		"source_blacklist": []any{},
+		"shutdown":         false,
 	}
-	persisted := renderSingbox(lastGood, 18080, stateDir, "127.0.0.1:19090", nil, "")
+	persisted := renderSingbox(lastGood, 18080, stateDir, "127.0.0.1:19090", nil, "", nil)
 	persistedData, err := json.Marshal(persisted)
 	if err != nil {
 		t.Fatal(err)
@@ -237,14 +238,27 @@ func TestSanitizeLegacyBundleRemovesAuthAndPinsPort(t *testing.T) {
 func TestRestoreLastGoodFirewallUsesOverridePort(t *testing.T) {
 	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 18080, FirewallMode: "dry-run"}}
 	lastGood := map[string]any{
-		"listen":      map[string]any{"http_port": 1080},
-		"allow_cidrs": []string{"10.32.12.0/24"},
+		"listen":           map[string]any{"http_port": 1080},
+		"source_blacklist": []any{},
 	}
 	if err := agent.restoreLastGoodFirewallForBundle(lastGood); err != nil {
 		t.Fatalf("render last-good firewall: %v", err)
 	}
-	script := firewall.Render(agent.firewallPort(1080), []string{"10.32.12.0/24"}, false)
+	script := firewall.RenderSourceRules(agent.firewallPort(1080), nil, false)
 	if !strings.Contains(script, "tcp dport 18080") || strings.Contains(script, "tcp dport 1080") {
 		t.Fatalf("firewall override was not selected:\n%s", script)
+	}
+}
+
+func TestAllowAllFirewallBaselineUsesOverridePort(t *testing.T) {
+	port, script := allowAllFirewallBaseline(config.Config{
+		ListenPort:           1080,
+		FirewallPortOverride: 18080,
+	})
+	if port != 18080 {
+		t.Fatalf("baseline port = %d, want 18080", port)
+	}
+	if !strings.Contains(script, "tcp dport 18080 accept") || strings.Contains(script, "saddr") || strings.Contains(script, " drop") {
+		t.Fatalf("baseline did not clear source policy:\n%s", script)
 	}
 }

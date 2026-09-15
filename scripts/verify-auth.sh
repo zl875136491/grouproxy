@@ -16,6 +16,8 @@ set +a
 
 BACKEND_URL="http://127.0.0.1:${GROUPROXY_PORT:-8000}"
 AUTH_CODE="${GROUPROXY_GQUAN_TEST_CODE:?Missing GROUPROXY_GQUAN_TEST_CODE}"
+TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://${GROUPROXY_PROXY_ACCESS_FQDN:-test-proxy.1oa.com.cn}:${GROUPROXY_TEST_FRONTEND_PORT:-3000}}"
+curl() { command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"; }
 ITCODE="phase3-auth-$(openssl rand -hex 5)"
 INITIAL_PASSWORD="phase3-auth-password"
 UPDATED_PASSWORD="phase3-updated-password"

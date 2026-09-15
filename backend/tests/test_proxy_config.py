@@ -6,7 +6,13 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 import main as main_module
-from app.schemas import AgentProxyConfigBatch, NodeNameUpdate, ProxyGroupSnapshot
+from app.schemas import (
+    AgentProxyConfigBatch,
+    DraftCreate,
+    NodeNameUpdate,
+    ProxyGroupSnapshot,
+    SourceBlacklistCreate,
+)
 from app.services import bundles
 
 
@@ -52,19 +58,8 @@ async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
     selected_outbound: str,
     expected_selection: dict[str, str] | None,
 ) -> None:
-    class EmptyBlacklistQuery:
-        async def to_list(self) -> list[object]:
-            return []
-
-    class EmptyBlacklist:
-        enabled = object()
-
-        @classmethod
-        def find(cls, *_: object) -> EmptyBlacklistQuery:
-            return EmptyBlacklistQuery()
-
-    async def no_cidrs(_: str) -> tuple[list[str], list[str]]:
-        return [], []
+    async def no_source_blacklist(_: str) -> list[dict[str, str | None]]:
+        return []
 
     async def current_subscription(**_: object) -> dict[str, object]:
         return {
@@ -79,8 +74,7 @@ async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
     async def current_tags(_: str) -> set[str]:
         return {"current"}
 
-    monkeypatch.setattr(bundles, "DestinationBlacklist", EmptyBlacklist)
-    monkeypatch.setattr(bundles, "effective_cidrs", no_cidrs)
+    monkeypatch.setattr(bundles, "effective_source_blacklist", no_source_blacklist)
     monkeypatch.setattr(bundles, "selected_subscription_bundle", current_subscription)
     monkeypatch.setattr(bundles, "_selected_subscription_tags", current_tags)
 
@@ -102,6 +96,199 @@ async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
     )
 
     assert result.get("proxy_selection") == expected_selection
+
+
+@pytest.mark.asyncio
+async def test_bundle_uses_only_effective_source_blacklist_and_allows_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def source_rules(_: str) -> list[dict[str, str | None]]:
+        return [
+            {
+                "scope": "global",
+                "site_id": None,
+                "kind": "ip",
+                "pattern": "192.0.2.1",
+            },
+            {
+                "scope": "site",
+                "site_id": "site-1",
+                "kind": "domain",
+                "pattern": "blocked.example",
+            },
+        ]
+
+    async def no_subscription(**_: object) -> None:
+        return None
+
+    monkeypatch.setattr(bundles, "effective_source_blacklist", source_rules)
+    monkeypatch.setattr(bundles, "selected_subscription_bundle", no_subscription)
+    monkeypatch.setattr(bundles, "_selected_subscription_tags", lambda _: _async_set())
+
+    site = SimpleNamespace(id="site-1", shutdown=False)
+    node = SimpleNamespace(agent_id="node-1")
+    settings = SimpleNamespace(
+        bundle_hmac_secret="bundle-secret-for-test",
+        bundle_ttl_days=30,
+        subscription_inline_max_bytes=128_000,
+        backend_public_url="http://127.0.0.1:8000",
+    )
+    result = await bundles.build_signed_bundle(
+        site=site,
+        node=node,
+        desired_version=2,
+        release_id="release-source-policy",
+        settings=settings,
+    )
+
+    assert result["source_blacklist"] == await source_rules("site-1")
+    assert "allow_cidrs" not in result
+    assert "deny_destinations" not in result
+
+
+async def _async_set() -> set[str]:
+    return set()
+
+
+def test_source_blacklist_contract_is_registered() -> None:
+    routes = {
+        (route.path, method)
+        for route in main_module.app.routes
+        for method in (route.methods or set())
+    }
+    assert ("/api/v1/source-blacklist", "GET") in routes
+    assert ("/api/v1/source-blacklist", "POST") in routes
+    assert ("/api/v1/source-blacklist/{entry_id}", "DELETE") in routes
+    assert ("/api/v1/source-blacklist/preview", "POST") in routes
+    retired_paths = {
+        "/api/v1/blacklist",
+        "/api/v1/blacklist/preview",
+        "/api/v1/blacklist/{entry_id}",
+        "/api/v1/blacklist/sources",
+        "/api/v1/blacklist/sources/{entry_id}",
+        "/api/v1/sites/{site_id}/cidrs",
+        "/api/v1/sites/{site_id}/cidrs/{cidr_id}",
+        "/api/v1/cidrs/preview",
+        "/api/v1/exceptions",
+        "/api/v1/exceptions/{exception_id}",
+        "/api/v1/cross-site-allows",
+        "/api/v1/destination-blacklist",
+    }
+    assert not any(path in retired_paths for path, _ in routes)
+
+
+def test_source_blacklist_schema_enforces_scope_target() -> None:
+    with pytest.raises(ValueError):
+        SourceBlacklistCreate(scope="site", kind="ip", pattern="192.0.2.1")
+    with pytest.raises(ValueError):
+        SourceBlacklistCreate(
+            scope="global", site_id="site-1", kind="ip", pattern="192.0.2.1"
+        )
+
+
+def test_retired_policy_fields_are_removed_from_draft_and_bundle_payloads() -> None:
+    from app.services.bundles import strip_retired_policy_fields
+
+    payload = {
+        "allow_cidrs": ["10.0.0.0/8"],
+        "nested": {
+            "acl_sources": ["legacy"],
+            "deny_sources": ["legacy"],
+            "keep": True,
+        },
+        "source_blacklist": [{"kind": "ip", "pattern": "192.0.2.1"}],
+    }
+    assert strip_retired_policy_fields(payload) == {
+        "nested": {"keep": True},
+        "source_blacklist": [{"kind": "ip", "pattern": "192.0.2.1"}],
+    }
+
+
+def test_audit_output_hides_retired_policy_fields_without_mutating_history() -> None:
+    before = {"deny_sources": ["192.0.2.1"], "keep": "before"}
+    after = {"nested": {"allow_cidrs": ["10.0.0.0/8"], "keep": "after"}}
+    event = SimpleNamespace(
+        event_id="event-1",
+        actor="admin",
+        actor_role="admin",
+        request_id="request-1",
+        source_ip="192.0.2.10",
+        action="config_draft.create",
+        target_type="config_draft",
+        target_id="draft-1",
+        before=before,
+        after=after,
+        result="success",
+        error="",
+        immutable_hash="hash",
+        previous_hash="",
+        at=datetime(2026, 9, 14, tzinfo=timezone.utc),
+    )
+
+    result = main_module._audit_out(event)
+
+    assert result.before == {"keep": "before"}
+    assert result.after == {"nested": {"keep": "after"}}
+    assert before == {"deny_sources": ["192.0.2.1"], "keep": "before"}
+    assert after == {"nested": {"allow_cidrs": ["10.0.0.0/8"], "keep": "after"}}
+
+
+@pytest.mark.asyncio
+async def test_create_draft_audits_the_cleaned_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    site = SimpleNamespace(id="site-1", config_revision=7)
+    node = SimpleNamespace(id="node-1")
+    audit_event: dict[str, object] = {}
+
+    class Query:
+        async def to_list(self) -> list[object]:
+            return [node]
+
+    class NodeModel:
+        site_id = object()
+
+        @classmethod
+        def find(cls, _: object) -> Query:
+            return Query()
+
+    class DraftModel:
+        def __init__(self, **values: object) -> None:
+            self.id = "draft-1"
+            self.__dict__.update(values)
+
+        async def insert(self) -> None:
+            return None
+
+    async def get_site(_: str) -> object:
+        return site
+
+    async def source_rules(_: str) -> list[dict[str, str]]:
+        return []
+
+    async def record_audit(**values: object) -> None:
+        audit_event.update(values)
+
+    monkeypatch.setattr(main_module, "Site", SimpleNamespace(get=get_site))
+    monkeypatch.setattr(main_module, "Node", NodeModel)
+    monkeypatch.setattr(main_module, "ConfigDraft", DraftModel)
+    monkeypatch.setattr(main_module, "effective_source_blacklist", source_rules)
+    monkeypatch.setattr(main_module, "append_audit", record_audit)
+    monkeypatch.setattr(main_module, "_actor", lambda: "admin")
+    monkeypatch.setattr(main_module, "_draft_out", lambda draft: draft)
+
+    result = await main_module.create_draft(
+        DraftCreate(
+            site_id="site-1",
+            diff={"deny_sources": ["192.0.2.1"], "keep": "value"},
+        ),
+        "admin",
+    )
+
+    assert result.diff == {"keep": "value"}
+    assert audit_event["after"] == {
+        "site_id": "site-1",
+        "risk_level": "medium",
+        "diff": {"keep": "value"},
+    }
 
 
 @pytest.mark.asyncio

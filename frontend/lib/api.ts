@@ -98,47 +98,32 @@ export type ProxySelectionRequest = {
   note?: string;
 };
 
-export type CIDREntry = {
-  id: string;
-  site_id: string;
-  cidr: string;
-  comment: string;
-  enabled: boolean;
-};
-
-export type CIDRPreview = {
-  allowed: boolean;
-  matched_cidr: string | null;
-  reason: string;
-  effective_cidrs: string[];
-};
-
-export type TravelException = {
-  id: string;
-  cidr: string;
-  comment: string;
-  owner: string;
-  expires_at: string;
-  enabled: boolean;
-  created_at: string;
-};
-
-export type CrossSiteAllow = {
-  id: string;
-  from_site_id: string;
-  to_site_id: string;
-  enabled: boolean;
-  comment: string;
-  updated_at: string;
-};
-
-export type DestinationBlacklist = {
-  id: string;
+export type SourceBlacklistRule = {
+  scope: "global" | "site";
+  site_id: string | null;
+  kind: "ip" | "network" | "domain";
   pattern: string;
-  kind: "domain" | "ip" | "cidr";
+};
+
+export type SourceBlacklist = SourceBlacklistRule & {
+  id: string;
   comment: string;
   enabled: boolean;
+  created_by: string;
   created_at: string;
+};
+
+export type SourceBlacklistDistribution = {
+  site_id: string;
+  node_ids: string[];
+  state: "released" | "no_nodes" | "no_effect";
+  release: Release | null;
+};
+
+export type SourceBlacklistMutation = {
+  rule: SourceBlacklist;
+  operation: "created" | "deleted";
+  distribution: SourceBlacklistDistribution[];
 };
 
 export type SubscriptionSource = {
@@ -218,8 +203,7 @@ export type Draft = {
   validation: {
     valid?: boolean;
     errors?: string[];
-    effective_cidrs?: string[];
-    acl_sources?: Record<string, string[]>;
+    source_blacklist?: SourceBlacklistRule[];
   };
   risk_level: string;
   status: string;
@@ -795,59 +779,24 @@ export function setSiteShutdown(siteId: string, shutdown: boolean) {
   return request<Site>(`/api/v1/sites/${siteId}/shutdown`, jsonRequest("POST", { shutdown }));
 }
 
-export function getSiteCIDRs(siteId: string) {
-  return request<CIDREntry[]>(`/api/v1/sites/${siteId}/cidrs`);
+export function getSourceBlacklist() {
+  return request<SourceBlacklist[]>("/api/v1/source-blacklist");
 }
 
-export function addCIDR(siteId: string, value: Omit<CIDREntry, "id" | "site_id">) {
-  return request<CIDREntry>(`/api/v1/sites/${siteId}/cidrs`, jsonRequest("POST", value));
-}
-
-export function deleteCIDR(siteId: string, cidrId: string) {
-  return request<void>(`/api/v1/sites/${siteId}/cidrs/${cidrId}`, jsonRequest("DELETE"));
-}
-
-export function previewCIDR(siteId: string, sourceIP: string) {
-  return request<CIDRPreview>(
-    "/api/v1/cidrs/preview",
-    jsonRequest("POST", { site_id: siteId, source_ip: sourceIP }),
+export function createSourceBlacklist(
+  value: Omit<SourceBlacklist, "id" | "created_by" | "created_at">,
+) {
+  return request<SourceBlacklistMutation>(
+    "/api/v1/source-blacklist",
+    jsonRequest("POST", value),
   );
 }
 
-export function getExceptions() {
-  return request<TravelException[]>("/api/v1/exceptions");
-}
-
-export function createException(value: Omit<TravelException, "id" | "created_at">) {
-  return request<TravelException>("/api/v1/exceptions", jsonRequest("POST", value));
-}
-
-export function deleteException(exceptionId: string) {
-  return request<void>(`/api/v1/exceptions/${exceptionId}`, jsonRequest("DELETE"));
-}
-
-export function getCrossSiteAllows() {
-  return request<CrossSiteAllow[]>("/api/v1/cross-site-allows");
-}
-
-export function saveCrossSiteAllow(
-  value: Omit<CrossSiteAllow, "id" | "updated_at">,
-) {
-  return request<CrossSiteAllow>("/api/v1/cross-site-allows", jsonRequest("PUT", value));
-}
-
-export function getBlacklist() {
-  return request<DestinationBlacklist[]>("/api/v1/blacklist");
-}
-
-export function createBlacklist(
-  value: Omit<DestinationBlacklist, "id" | "created_at">,
-) {
-  return request<DestinationBlacklist>("/api/v1/blacklist", jsonRequest("POST", value));
-}
-
-export function deleteBlacklist(entryId: string) {
-  return request<void>(`/api/v1/blacklist/${entryId}`, jsonRequest("DELETE"));
+export function deleteSourceBlacklist(entryId: string) {
+  return request<SourceBlacklistMutation>(
+    `/api/v1/source-blacklist/${encodeURIComponent(entryId)}`,
+    jsonRequest("DELETE"),
+  );
 }
 
 export function getSubscriptions() {
@@ -935,15 +884,6 @@ export function rollbackSiteSubscription(siteId: string) {
 
 export function getDrafts() {
   return request<Draft[]>("/api/v1/config/drafts");
-}
-
-export function createDraft(value: {
-  site_id: string;
-  node_ids?: string[];
-  diff: Record<string, unknown>;
-  note?: string;
-}) {
-  return request<Draft>("/api/v1/config/drafts", jsonRequest("POST", value));
 }
 
 export function getReleases(filters: { siteId?: string; status?: string; since?: string; until?: string } = {}) {

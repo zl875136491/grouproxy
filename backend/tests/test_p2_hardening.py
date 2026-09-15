@@ -60,18 +60,18 @@ def test_node_create_has_length_limits():
     assert "name" in str(exc_info.value).lower()
 
 
-def test_cidr_create_has_comment_limit():
-    """CIDR comment should have reasonable length limit."""
-    from app.schemas import CIDRCreate
+def test_source_blacklist_create_has_comment_limit():
+    """Source blacklist comments should have a reasonable length limit."""
+    from app.schemas import SourceBlacklistCreate
     from pydantic import ValidationError
     
     # Valid
-    cidr = CIDRCreate(cidr="10.0.0.0/24", comment="Test CIDR")
-    assert cidr.comment == "Test CIDR"
+    rule = SourceBlacklistCreate(kind="network", pattern="10.0.0.0/24", comment="Test rule")
+    assert rule.comment == "Test rule"
     
     # Comment too long (>512)
     with pytest.raises(ValidationError):
-        CIDRCreate(cidr="10.0.0.0/24", comment="x" * 600)
+        SourceBlacklistCreate(kind="network", pattern="10.0.0.0/24", comment="x" * 600)
 
 
 def test_subscription_publish_limits_site_list():
@@ -103,18 +103,18 @@ def test_draft_create_limits_node_list():
         DraftCreate(site_id="site1", node_ids=[f"n{i}" for i in range(150)])
 
 
-def test_destination_blacklist_has_pattern_limit():
-    """Blacklist pattern should have length limit."""
-    from app.schemas import DestinationBlacklistCreate
+def test_source_blacklist_has_pattern_limit():
+    """Source blacklist patterns should have a bounded length."""
+    from app.schemas import SourceBlacklistCreate
     from pydantic import ValidationError
     
     # Valid
-    rule = DestinationBlacklistCreate(pattern="example.com", kind="domain")
+    rule = SourceBlacklistCreate(pattern="example.com", kind="domain")
     assert rule.pattern == "example.com"
     
     # Pattern too long (>512)
     with pytest.raises(ValidationError):
-        DestinationBlacklistCreate(pattern="x" * 600, kind="domain")
+        SourceBlacklistCreate(pattern="x" * 600, kind="domain")
 
 
 # Test R4: sing-box binary integrity

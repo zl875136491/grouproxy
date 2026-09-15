@@ -169,9 +169,9 @@ async def refresh_deny_spike_alerts() -> None:
         await set_alert(
             fingerprint=f"deny-spike:{site_id}",
             category="deny_spike",
-            title="Destination denies increased sharply",
+            title="Source requests denied increased sharply",
             detail=(
-                f"{site.name}: {recent} denies in the last "
+                f"{site.name}: {recent} source requests denied in the last "
                 f"{settings.deny_spike_window_seconds}s (baseline {baseline})"
             ),
             site_id=site_id,

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -122,80 +122,100 @@ class NodeCreateResponse(NodeOut):
     agent_token: str
 
 
-class CIDRCreate(BaseModel):
-    cidr: str = Field(min_length=1, max_length=128)
+class SourceBlacklistCreate(BaseModel):
+    scope: Literal["global", "site"] = "global"
+    site_id: str | None = Field(default=None, max_length=128)
+    kind: Literal["ip", "network", "domain"] = "domain"
+    pattern: str = Field(min_length=1, max_length=512)
     comment: str = Field(default="", max_length=512)
     enabled: bool = True
 
+    @model_validator(mode="after")
+    def validate_scope_target(self) -> "SourceBlacklistCreate":
+        if self.scope == "site" and not (self.site_id or "").strip():
+            raise ValueError("site_id is required for site-scoped source rules")
+        if self.scope == "global" and self.site_id:
+            raise ValueError("site_id is not allowed for global source rules")
+        return self
 
-class CIDROut(BaseModel):
+    @model_validator(mode="after")
+    def validate_and_normalize_pattern(self) -> "SourceBlacklistCreate":
+        # Import lazily to keep this schema module usable by migration tools
+        # that load models without initializing the service layer.
+        from .services.cidr import normalize_source_blacklist_pattern
+
+        try:
+            self.pattern = normalize_source_blacklist_pattern(self.kind, self.pattern)
+        except ValueError as exc:
+            raise ValueError("invalid_source_blacklist_pattern") from exc
+        return self
+
+
+class SourceBlacklistOut(BaseModel):
     id: str
-    site_id: str
-    cidr: str
+    scope: Literal["global", "site"]
+    site_id: str | None
+    kind: Literal["ip", "network", "domain"]
+    pattern: str
     comment: str
     enabled: bool
+    created_by: str
+    created_at: datetime
 
 
-class CIDRPreviewRequest(BaseModel):
+class SourceBlacklistPreviewRequest(BaseModel):
     site_id: str = Field(max_length=128)
     source_ip: str = Field(min_length=1, max_length=128)
 
 
-class CIDRPreviewResponse(BaseModel):
-    allowed: bool
-    matched_cidr: str | None = None
+class SourceBlacklistPreviewResponse(BaseModel):
+    allowed: bool | None = Field(
+        description=(
+            "Whether the preview can affirmatively allow the source. Null means the "
+            "result is indeterminate until the monitor resolves domain rules."
+        )
+    )
+    matched_pattern: str | None = None
     reason: str
-    effective_cidrs: list[str]
+    source_blacklist: list[dict[str, Any]] = Field(default_factory=list)
+    outcome: Literal["allowed", "blocked", "indeterminate"] = Field(
+        default="allowed",
+        description=(
+            "A domain rule is indeterminate here because the monitor resolves it with "
+            "its own local DNS before enforcement."
+        ),
+    )
+    unresolved_domain_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Domain blacklist patterns that cannot be evaluated from a source IP alone."
+        ),
+    )
 
+    @model_validator(mode="after")
+    def mark_domain_only_preview_indeterminate(self) -> "SourceBlacklistPreviewResponse":
+        """Avoid claiming an IP is allowed when monitor DNS may deny it."""
 
-class TravelExceptionCreate(BaseModel):
-    cidr: str = Field(min_length=1, max_length=128)
-    comment: str = Field(default="", max_length=512)
-    owner: str = Field(default="", max_length=256)
-    expires_at: datetime
-    enabled: bool = True
-
-
-class TravelExceptionOut(BaseModel):
-    id: str
-    cidr: str
-    comment: str
-    owner: str
-    expires_at: datetime
-    enabled: bool
-    created_at: datetime
-
-
-class CrossSiteAllowUpdate(BaseModel):
-    from_site_id: str = Field(max_length=128)
-    to_site_id: str = Field(max_length=128)
-    enabled: bool = False
-    comment: str = Field(default="", max_length=512)
-
-
-class CrossSiteAllowOut(BaseModel):
-    id: str
-    from_site_id: str
-    to_site_id: str
-    enabled: bool
-    comment: str
-    updated_at: datetime
-
-
-class DestinationBlacklistCreate(BaseModel):
-    pattern: str = Field(min_length=1, max_length=512)
-    kind: Literal["domain", "ip", "cidr"] = "domain"
-    comment: str = Field(default="", max_length=512)
-    enabled: bool = True
-
-
-class DestinationBlacklistOut(BaseModel):
-    id: str
-    pattern: str
-    kind: Literal["domain", "ip", "cidr"]
-    comment: str
-    enabled: bool
-    created_at: datetime
+        self.unresolved_domain_patterns = sorted(
+            {
+                str(rule.get("pattern") or "")
+                for rule in self.source_blacklist
+                if str(rule.get("kind") or "").lower() == "domain"
+                and rule.get("enabled", True) is not False
+                and str(rule.get("pattern") or "")
+            }
+        )
+        if self.allowed and self.unresolved_domain_patterns:
+            self.allowed = None
+            self.reason = "domain_resolution_required"
+            self.outcome = "indeterminate"
+        elif self.allowed is True:
+            self.outcome = "allowed"
+        elif self.allowed is False:
+            self.outcome = "blocked"
+        else:
+            self.outcome = "indeterminate"
+        return self
 
 
 class SubscriptionSourceCreate(BaseModel):
@@ -349,6 +369,25 @@ class TaskOut(BaseModel):
     next_run_at: datetime
     locked_by: str
     lease_expires_at: datetime | None
+
+
+class SourceBlacklistDistributionOut(BaseModel):
+    """Per-site result of an automatic source-policy rollout."""
+
+    site_id: str
+    node_ids: list[str] = Field(default_factory=list)
+    state: Literal["released", "no_nodes", "no_effect"]
+    release: ReleaseOut | None = None
+
+
+class SourceBlacklistMutationOut(BaseModel):
+    """Rule mutation plus the normal releases created for affected sites."""
+
+    rule: SourceBlacklistOut
+    operation: Literal["created", "deleted"]
+    distribution: list[SourceBlacklistDistributionOut] = Field(default_factory=list)
+
+
 
 
 class SubscriptionRefreshResponse(BaseModel):
