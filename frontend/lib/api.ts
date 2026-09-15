@@ -256,6 +256,8 @@ export type Release = {
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
+  subscription_name: string;
+  subscription_source_id: string;
 };
 
 export type Task = {
@@ -873,6 +875,7 @@ export function getSubscriptionVersionContent(sourceId: string, versionId: strin
 export function createSubscriptionSource(value: {
   name: string;
   url: string;
+  scheme?: "http" | "https";
   fetch_interval_sec?: number;
   max_body_bytes?: number;
   redirect_limit?: number;
@@ -1009,12 +1012,13 @@ export function getLogs(filters: { siteId?: string; nodeId?: string; action?: "a
   return request<AccessLog[]>(`/api/v1/logs${query.size ? `?${query.toString()}` : ""}`);
 }
 
-export function getConnections(filters: { siteId?: string; nodeId?: string; since?: string; until?: string } = {}) {
+export function getConnections(filters: { siteId?: string; nodeId?: string; since?: string; until?: string; limit?: number } = {}) {
   const query = new URLSearchParams();
   if (filters.siteId) query.set("site_id", filters.siteId);
   if (filters.nodeId) query.set("node_id", filters.nodeId);
   if (filters.since) query.set("since", filters.since);
   if (filters.until) query.set("until", filters.until);
+  if (filters.limit) query.set("limit", String(filters.limit));
   return request<ConnectionSnapshot[]>(`/api/v1/connections${query.size ? `?${query.toString()}` : ""}`);
 }
 

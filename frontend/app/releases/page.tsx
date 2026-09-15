@@ -43,6 +43,21 @@ function rangeStart(value: RangeFilter): string | undefined {
   return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
+function releaseNodeNames(release: Release, nodeLabels: Map<string, string>) {
+  return release.node_ids.map((nodeId) => nodeLabels.get(nodeId) || nodeId).join(", ");
+}
+
+function releasePathLabel(
+  release: Release,
+  nodeLabels: Map<string, string>,
+  t: (key: string, values?: Record<string, string | number>) => string,
+) {
+  return t("{subscription} → {node}", {
+    subscription: (release.subscription_name || "").trim() || t("No subscription"),
+    node: releaseNodeNames(release, nodeLabels) || t("No nodes"),
+  });
+}
+
 export default function ReleasesPage() {
   return <Suspense fallback={<LoadingState rows={9} />}><ReleasesWorkspace /></Suspense>;
 }
@@ -125,7 +140,7 @@ function ReleasesWorkspace() {
 
   if (session === null) return <LoadingState rows={9} />;
   if (!session) return <SessionGate />;
-  if (drafts.isLoading || releases.isLoading || sites.isLoading) return <LoadingState rows={9} />;
+  if (drafts.isLoading || releases.isLoading || sites.isLoading || nodes.isLoading) return <LoadingState rows={9} />;
   if (drafts.isError || releases.isError || sites.isError) {
     const issue = drafts.error || releases.error || sites.error;
     return <ErrorState error={issue instanceof Error ? issue.message : "Unable to load release state."} onRetry={() => void Promise.all([drafts.refetch(), releases.refetch(), sites.refetch()])} />;
@@ -164,7 +179,7 @@ function ReleasesWorkspace() {
             {listView === "drafts" ? (
               openDrafts.length ? <div className="release-list release-scroll-list">{openDrafts.map((draft) => <div className={cnReleaseRow(selectedDraft?.id === draft.id)} key={draft.id}><button type="button" onClick={() => router.replace(`/releases?draft=${draft.id}`)}><span><strong>{t(siteNames.get(draft.site_id) || draft.site_id)}</strong><small>{t("Revision v{revision} · {date}", { revision: formatNumber(draft.source_revision), date: formatDate(draft.created_at) })}</small></span><StatusBadge status={draft.risk_level} /></button><Button size="sm" variant="primary" onClick={() => setPublishTarget(draft)}><Play size={14} />{t("Publish")}</Button></div>)}</div> : <EmptyState title="No publishable drafts" detail="Create a configuration draft from a site workspace." />
             ) : (
-              releaseItems.length ? <div className="release-list release-scroll-list">{releaseItems.map((release) => <button type="button" className={`release-history-row release-history-card ${selectedRelease?.release_id === release.release_id ? "release-row-selected" : ""}`} onClick={() => router.replace(`/releases?release=${release.release_id}`)} key={release.release_id}><span className="release-history-icon"><FileCheck2 size={17} /></span><span><strong>{t(siteNames.get(release.site_id) || release.site_id)}</strong><small>{formatDate(release.created_at)} · {t("{count} nodes", { count: formatNumber(release.node_ids.length) })}</small></span><StatusBadge status={release.status} /></button>)}</div> : <EmptyState title="No releases recorded" />
+              releaseItems.length ? <div className="release-list release-scroll-list">{releaseItems.map((release) => <button type="button" className={`release-history-row release-history-card ${selectedRelease?.release_id === release.release_id ? "release-row-selected" : ""}`} onClick={() => router.replace(`/releases?release=${release.release_id}`)} key={release.release_id}><span className="release-history-icon"><FileCheck2 size={17} /></span><span><strong>{releasePathLabel(release, nodeLabels, t)}</strong><small>{t(siteNames.get(release.site_id) || release.site_id)} · {formatDate(release.created_at)}</small></span><StatusBadge status={release.status} /></button>)}</div> : <EmptyState title="No releases recorded" />
             )}
           </Panel>
         </div>
@@ -224,16 +239,16 @@ function ReleaseDetail({ release, detail, siteName, nodeLabels, loading, error }
       <div className="release-workbench-title">
         <div>
           <span className="panel-kicker">{t("RELEASE")}</span>
-          <div className="release-title-line"><h2>{siteName}</h2><StatusBadge status={release.status === "succeeded" ? "published" : release.status} /></div>
+          <div className="release-title-line"><h2>{releasePathLabel(release, nodeLabels, t)}</h2><StatusBadge status={release.status === "succeeded" ? "published" : release.status} /></div>
           <p>
+            <span>{siteName}</span>
             <span>{t("Version flow")}: <strong>v{formatNumber(Math.max(0, (desiredVersion || 0) - 1))} → v{formatNumber(desiredVersion || 0)}</strong></span>
             <span>{t("Elapsed")}: {elapsedMs === null ? "-" : formatDuration(elapsedMs)}</span>
-            <span>{t("Release ID")}: <code>{shortHash(release.release_id, 16)}</code></span>
           </p>
         </div>
       </div>
     </header>
-    <section className="release-kpi-strip"><div><span>{t("ACK rate")}</span><strong>{ackItems.length} / {release.node_ids.length} <em>{t("{value}% acknowledged", { value: formatNumber(ackRate) })}</em></strong><small>{t("Target nodes acknowledged")}</small></div><div><span>{t("Target bundle hash")}</span><strong className="mono release-kpi-hash">{shortHash(ackItems[0]?.bundle_hash || release.desired_release_id, 16)}</strong><small>{t("Desired release bundle")}</small></div><div><span>{t("Core component status")}</span><strong className={release.status === "succeeded" ? "release-kpi-good" : ""}>{release.status === "succeeded" ? t("Healthy") : t(release.stage.replaceAll("_", " "))}</strong><small>sing-box · nftables · {t("health probe")}</small></div><div><span>{t("Completed at")}</span><strong>{release.finished_at ? formatDate(release.finished_at, true) : t("In progress")}</strong><small>{release.finished_at ? t("Release completed") : t("Awaiting final ACK")}</small></div></section>
+    <section className="release-kpi-strip"><div><span>{t("ACK rate")}</span><strong>{ackItems.length} / {release.node_ids.length} <em>{t("{value}% acknowledged", { value: formatNumber(ackRate) })}</em></strong><small>{t("Target nodes acknowledged")}</small></div><div><span>{t("Subscription")}</span><strong>{(release.subscription_name || "").trim() || t("No subscription")}</strong><small>{releaseNodeNames(release, nodeLabels) || t("No nodes")}</small></div><div><span>{t("Core component status")}</span><strong className={release.status === "succeeded" ? "release-kpi-good" : ""}>{release.status === "succeeded" ? t("Healthy") : t(release.stage.replaceAll("_", " "))}</strong><small>sing-box · nftables · {t("health probe")}</small></div><div><span>{t("Completed at")}</span><strong>{release.finished_at ? formatDate(release.finished_at, true) : t("In progress")}</strong><small>{release.finished_at ? t("Release completed") : t("Awaiting final ACK")}</small></div></section>
     <ol className="release-workbench-pipeline">{releaseStages.map((stage, index) => { const complete = release.status === "succeeded" ? index <= position : index < position; const current = !complete && index === position; return <li className={`${complete ? "stage-complete" : ""} ${current ? "stage-current" : ""}`} key={stage}><span>{complete ? <Check size={15} /> : index + 1}</span><strong>{t(stage.replaceAll("_", " "))}</strong><small>{t(stageDescriptionKeys[stage])}</small></li>; })}</ol>
     <section className="release-workbench-main"><nav className="release-workbench-tabs" role="tablist"><button className={activeTab === "nodes" ? "active" : ""} onClick={() => setActiveTab("nodes")}>{t("Nodes and probes")} <b>{release.node_ids.length}</b></button><button className={activeTab === "trace" ? "active" : ""} onClick={() => setActiveTab("trace")}>{t("Full trace")}</button><button className={activeTab === "diff" ? "active" : ""} onClick={() => setActiveTab("diff")}>{t("Config diff")}</button><span>{t("Live coordination")}</span></nav>{activeTab === "nodes" ? <><div className="release-node-table"><div className="release-node-table-head"><span>{t("Target node")}</span><span>{t("Version state")}</span><span>{t("Component checks")}</span><span>{t("ACK")}</span><span>{t("Elapsed")}</span></div>{release.node_ids.map((nodeId) => { const ack = ackItems.find((item) => item.node_id === nodeId); const outcome = ack ? (ack.ok && ack.health_ok ? "succeeded" : "failed") : "pending"; return <div className="release-node-table-row" key={nodeId}><div className="release-node-name"><Server size={15} /><strong>{nodeLabels.get(nodeId) || nodeId}</strong><small className="mono">{nodeId}</small></div><div><strong>{ack ? `v${ack.applied_version}` : `v${desiredVersion || "-"}`}</strong><small>{ack ? t("Applied") : t("Desired")}</small></div><div className="release-node-checks"><StatusBadge status={ack ? ack.singbox_ok ? "valid" : "failed" : "pending"} /><StatusBadge status={ack ? ack.nft_ok ? "valid" : "failed" : "pending"} /><StatusBadge status={ack ? ack.health_ok ? "healthy" : "failed" : "pending"} /></div><StatusBadge status={outcome} /><span>{ack ? formatDate(ack.received_at, true) : "-"}</span></div>; })}</div><div className="release-terminal"><header><span>{t("Node execution and probe trace")}</span><StatusBadge status={release.status === "succeeded" ? "archived" : "running"} /></header><pre>{(data?.events || []).map((event) => `[${formatDate(event.timestamp, true)}] [${event.source}] ${event.message}`).join("\n") || t("Waiting for execution events...")}</pre></div></> : activeTab === "trace" ? <div className="release-trace-panel">{(data?.events || []).map((event, index) => <div className={`release-trace-event release-trace-${event.level}`} key={`${event.timestamp}-${event.source}-${index}`}><time>{formatDate(event.timestamp, true)}</time><strong>{event.source}</strong><span>{event.message}</span></div>)}</div> : <pre className="release-diff-panel">{JSON.stringify(data?.task?.result || { desired_release_id: release.desired_release_id, previous_release_id: release.previous_release_id }, null, 2)}</pre>}</section>
     <footer className="release-workbench-footer"><span>{t("Release ID")} <code>{shortHash(release.release_id, 18)}</code><button onClick={() => void copy(release.release_id, "release")}>{copied === "release" ? <Check size={13} /> : <Clipboard size={13} />}</button></span><span>{t("Task ID")} <code>{shortHash(release.task_id || "-", 18)}</code><button onClick={() => void copy(release.task_id || "", "task")}>{copied === "task" ? <Check size={13} /> : <Clipboard size={13} />}</button></span><span>{t("Baseline")}: <code>{shortHash(release.previous_release_id || "-", 14)}</code></span><span>{t("Coordination")}: <strong className="release-kpi-good">{release.status === "succeeded" ? t("Converged") : t(release.status)}</strong></span><span>{t("Trigger")}: {t(data?.task?.task_type || "Manual")}</span></footer>

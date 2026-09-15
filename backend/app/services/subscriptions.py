@@ -40,6 +40,11 @@ SUPPORTED_OUTBOUND_TYPES = {
     "vmess",
     "wireguard",
 }
+# Full panel configs also ship grouping/DNS/direct objects. Grouproxy keeps its
+# own selector and default routes, so those entries are ignored rather than
+# rejecting the whole document.
+CONTROL_OUTBOUND_TYPES = {"block", "direct", "dns", "selector", "urltest"}
+RESERVED_OUTBOUND_TAGS = {"block", "direct", "subscription"}
 MAX_SUBSCRIPTION_NODES = 128
 MAX_FIELD_LENGTH = 8_192
 MAX_VALUE_DEPTH = 12
@@ -457,25 +462,51 @@ def _canonical_subscription_content(content: bytes) -> bytes:
     return content
 
 
-def normalize_source_url(value: str) -> str:
-    """Accept only HTTP upstreams while the deployment is explicitly HTTP-only."""
+def _subscription_scheme(value: str | None) -> str:
+    scheme = (value or "").strip().lower()
+    if scheme not in {"http", "https"}:
+        raise SubscriptionError("subscription_url_scheme_not_allowed")
+    return scheme
 
+
+def _default_subscription_port(scheme: str) -> int:
+    return 443 if scheme == "https" else 80
+
+
+def normalize_source_url(value: str, *, scheme: str | None = None) -> str:
+    """Accept HTTP or HTTPS upstreams. An explicit scheme overrides the URL."""
+
+    raw = value.strip()
+    chosen = _subscription_scheme(scheme) if scheme else None
+    if chosen and "://" not in raw:
+        raw = f"{chosen}://{raw.lstrip('/')}"
     try:
-        parsed = urlsplit(value.strip())
+        parsed = urlsplit(raw)
         _ = parsed.port
     except ValueError as exc:
         raise SubscriptionError("invalid_subscription_url") from exc
-    if parsed.scheme.lower() != "http" or not parsed.hostname:
+    actual = chosen or parsed.scheme.lower()
+    if actual not in {"http", "https"} or not parsed.hostname:
         raise SubscriptionError("subscription_url_scheme_not_allowed")
     if parsed.username is not None or parsed.password is not None:
         # Credential handling needs encrypted secret storage; do not silently
         # accept a URL whose auth component would be lost during safe fetching.
         raise SubscriptionError("subscription_url_credentials_not_supported")
-    return urlunsplit(("http", parsed.netloc, parsed.path or "/", parsed.query, ""))
+    netloc = parsed.netloc
+    if chosen and parsed.scheme.lower() != chosen:
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        port = parsed.port
+        if port is None or port == _default_subscription_port(parsed.scheme.lower()):
+            netloc = host
+        else:
+            netloc = f"{host}:{port}"
+    return urlunsplit((actual, netloc, parsed.path or "/", parsed.query, ""))
 
 
 def source_url_hint(value: str) -> str:
-    """A stable display value which intentionally excludes path and credentials."""
+    """A stable display value. Credentials and query strings are omitted."""
 
     if not value:
         return "uploaded"
@@ -484,9 +515,13 @@ def source_url_hint(value: str) -> str:
         host = parsed.hostname or ""
         if ":" in host:
             host = f"[{host}]"
-        if parsed.port and parsed.port != 80:
+        default_port = _default_subscription_port(parsed.scheme.lower()) if parsed.scheme else 80
+        if parsed.port and parsed.port != default_port:
             host = f"{host}:{parsed.port}"
-        return f"{parsed.scheme}://{host}"
+        path = parsed.path or ""
+        if path in {"", "/"}:
+            path = ""
+        return f"{parsed.scheme}://{host}{path}"
     except ValueError:
         return "http://[invalid]"
 
@@ -494,7 +529,7 @@ def source_url_hint(value: str) -> str:
 def _validate_url_shape(value: str) -> tuple[Any, int]:
     normalized = normalize_source_url(value)
     parsed = urlsplit(normalized)
-    port = parsed.port or 80
+    port = parsed.port or _default_subscription_port(parsed.scheme.lower())
     if port < 1 or port > 65535:
         raise SubscriptionError("invalid_subscription_url")
     return parsed, port
@@ -528,23 +563,29 @@ async def _resolve_public_addresses(host: str, port: int) -> list[str]:
 
 
 def _request_url(parsed: Any, address: str, port: int) -> str:
+    scheme = _subscription_scheme(parsed.scheme)
     host = f"[{address}]" if ":" in address else address
-    netloc = host if port == 80 else f"{host}:{port}"
-    return urlunsplit(("http", netloc, parsed.path or "/", parsed.query, ""))
+    default_port = _default_subscription_port(scheme)
+    netloc = host if port == default_port else f"{host}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
 
 
 def _host_header(parsed: Any, port: int) -> str:
+    scheme = _subscription_scheme(parsed.scheme)
     host = parsed.hostname or ""
     if ":" in host:
         host = f"[{host}]"
-    return host if port == 80 else f"{host}:{port}"
+    default_port = _default_subscription_port(scheme)
+    return host if port == default_port else f"{host}:{port}"
 
 
 async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
-    """Fetch an HTTP subscription with redirect-by-redirect SSRF validation.
+    """Fetch an HTTP or HTTPS subscription with redirect-by-redirect SSRF checks.
 
     Requests are connected to a validated address while retaining the original
-    Host header. Redirects are validated to prevent DNS rebinding attacks:
+    Host header. HTTPS fetches skip certificate verification so internal or
+    privately signed upstreams still work. Redirects are validated to prevent
+    DNS rebinding attacks:
     - Each redirect's hostname is independently DNS-resolved and validated
     - Only public IPs are allowed (no private/local addresses)
     - Cached validation prevents attackers from rebinding DNS mid-fetch
@@ -560,6 +601,7 @@ async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
         follow_redirects=False,
         timeout=timeout,
         trust_env=False,
+        verify=False,
     ) as client:
         for redirect_index in range(source.redirect_limit + 1):
             parsed, port = _validate_url_shape(current)
@@ -575,11 +617,15 @@ async def fetch_source_bytes(source: SubscriptionSource) -> bytes:
                 validated_hosts[hostname] = addresses
             
             endpoint = _request_url(parsed, addresses[0], port)
+            extensions = {}
+            if parsed.scheme.lower() == "https" and hostname:
+                extensions["sni_hostname"] = hostname
             try:
                 async with client.stream(
                     "GET",
                     endpoint,
                     headers={"Host": _host_header(parsed, port), "Accept": "*/*"},
+                    extensions=extensions,
                 ) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location", "")
@@ -681,20 +727,28 @@ def _validate_value(value: Any, depth: int = 0) -> None:
 
 
 def _validate_outbounds(items: Any) -> int:
-    if not isinstance(items, list) or not items or len(items) > MAX_SUBSCRIPTION_NODES:
+    if not isinstance(items, list) or not items:
         raise SubscriptionError("subscription_outbounds_invalid")
     tags: set[str] = set()
-    for index, item in enumerate(items):
+    for item in items:
         outbound = _mapping(item, "subscription_outbound_invalid")
         kind = _string(outbound.get("type"), "subscription_outbound_type_invalid").lower()
+        if kind in CONTROL_OUTBOUND_TYPES:
+            continue
         if kind not in SUPPORTED_OUTBOUND_TYPES:
             raise SubscriptionError("subscription_outbound_type_unsupported")
-        tag = _string(outbound.get("tag", f"subscription-{index + 1}"), "subscription_tag_invalid")
-        if tag in {"direct", "block", "subscription"} or tag in tags:
+        tag = _string(outbound.get("tag", f"subscription-{len(tags) + 1}"), "subscription_tag_invalid")
+        if tag in RESERVED_OUTBOUND_TAGS:
+            continue
+        if tag in tags:
             raise SubscriptionError("subscription_tag_invalid")
+        if len(tags) + 1 > MAX_SUBSCRIPTION_NODES:
+            raise SubscriptionError("subscription_outbounds_invalid")
         tags.add(tag)
         _validate_value(outbound)
-    return len(items)
+    if not tags:
+        raise SubscriptionError("subscription_outbounds_invalid")
+    return len(tags)
 
 
 def _parse_singbox(value: Any) -> ParsedSubscription:
@@ -724,7 +778,12 @@ def _parse_sip008(value: Any) -> ParsedSubscription:
 def _parse_clash(value: Any) -> ParsedSubscription:
     document = _mapping(value, "subscription_clash_invalid")
     proxies = document.get("proxies")
-    if not isinstance(proxies, list) or not proxies or len(proxies) > MAX_SUBSCRIPTION_NODES:
+    providers = document.get("proxy-providers") or document.get("proxy_providers")
+    if not isinstance(proxies, list) or not proxies:
+        if isinstance(providers, dict) and providers:
+            raise SubscriptionError("subscription_clash_profile_unsupported")
+        raise SubscriptionError("subscription_clash_invalid")
+    if len(proxies) > MAX_SUBSCRIPTION_NODES:
         raise SubscriptionError("subscription_clash_invalid")
     names: set[str] = set()
     supported = {"ss", "shadowsocks", "trojan", "vmess", "vless"}
@@ -801,17 +860,24 @@ def subscription_outbound_tags(content: bytes, format: str) -> set[str]:
     if not isinstance(items, list):
         return set()
     tags: set[str] = set()
-    for index, item in enumerate(items):
+    for item in items:
         if not isinstance(item, dict):
             continue
         if format == "sing-box":
+            kind = str(item.get("type") or "").strip().lower()
+            if kind in CONTROL_OUTBOUND_TYPES:
+                continue
             raw_tag = item.get("tag")
+            tag = str(raw_tag).strip() if raw_tag is not None else ""
+            if tag in RESERVED_OUTBOUND_TAGS:
+                continue
         elif format == "sip008":
             raw_tag = item.get("remarks")
+            tag = str(raw_tag).strip() if raw_tag is not None else ""
         else:
             raw_tag = item.get("name")
-        tag = str(raw_tag).strip() if raw_tag is not None else ""
-        tags.add(tag or f"subscription-{index + 1}")
+            tag = str(raw_tag).strip() if raw_tag is not None else ""
+        tags.add(tag or f"subscription-{len(tags) + 1}")
     return tags
 
 

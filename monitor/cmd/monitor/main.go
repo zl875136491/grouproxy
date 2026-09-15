@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -68,7 +69,7 @@ type agent struct {
 	// syncError only represents the latest inability to reach the control plane.
 	// Configuration failures are persisted in state.LastError and reported on the
 	// configuration dimension without making a healthy monitor look offline.
-	syncError string
+	syncError             string
 	lastTrafficAt         time.Time
 	lastBytesUp           int64
 	lastBytesDown         int64
@@ -1280,7 +1281,11 @@ func (a *agent) probeThroughProxy(targetURL string) (bool, string, int64) {
 	if err != nil {
 		return false, "proxy_config_unavailable", time.Since(started).Milliseconds()
 	}
-	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
+	transport := &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // upstream certs are untrusted
+	}
 	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   8 * time.Second,

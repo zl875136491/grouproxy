@@ -2871,6 +2871,7 @@ Object.assign(messages["zh-CN"], {
   "subscription_refresh_unexpected_error": "订阅刷新时发生意外错误。",
   "subscription_ssrf_blocked": "订阅地址指向受限网络，已阻止请求。",
   "subscription_clash_invalid": "Clash 订阅内容无效。",
+  "subscription_clash_profile_unsupported": "这是完整 Clash 客户端配置，不是节点列表。请改用 sing-box 订阅地址。",
   "subscription_outbound_type_invalid": "订阅包含不支持的出站类型。",
   "Backup maintenance failed": "备份维护失败",
   "Backup verification failed": "备份校验失败",
@@ -2956,6 +2957,7 @@ Object.assign(messages.en, {
   "subscription_refresh_unexpected_error": "The subscription refresh encountered an unexpected error.",
   "subscription_ssrf_blocked": "The subscription URL points to a restricted network.",
   "subscription_clash_invalid": "The Clash subscription content is invalid.",
+  "subscription_clash_profile_unsupported": "This is a full Clash client profile, not a node list. Use the sing-box subscription URL instead.",
   "subscription_outbound_type_invalid": "The subscription contains an unsupported outbound type.",
   "Backup maintenance failed": "Backup maintenance failed",
   "Backup verification failed": "Backup verification failed",
@@ -3041,6 +3043,7 @@ Object.assign(messages.es, {
   "subscription_refresh_unexpected_error": "La actualización de la suscripción tuvo un error inesperado.",
   "subscription_ssrf_blocked": "La URL de la suscripción apunta a una red restringida.",
   "subscription_clash_invalid": "El contenido de la suscripción Clash no es válido.",
+  "subscription_clash_profile_unsupported": "Esto es un perfil de cliente Clash completo, no una lista de nodos. Usa la URL de suscripción sing-box.",
   "subscription_outbound_type_invalid": "La suscripción contiene un tipo de salida no compatible.",
   "Backup maintenance failed": "El mantenimiento de la copia falló",
   "Backup verification failed": "La verificación de la copia falló",
@@ -3135,6 +3138,9 @@ Object.assign(messages["zh-CN"], {
   "Type": "类型",
   "CIDR": "CIDR 网段",
   "blacklist_node_required": "请选择要下发规则的节点。",
+  "Protocol": "协议",
+  "Subscription URL": "订阅地址",
+  "subscription_url_scheme_not_allowed": "订阅地址只支持 HTTP 或 HTTPS。",
 });
 Object.assign(messages.en, {
   "Blacklist": "Blacklist",
@@ -3186,6 +3192,9 @@ Object.assign(messages.en, {
   "preview_target_required": "Provide a source address or destination host.",
   "CIDR": "CIDR",
   "blacklist_node_required": "Select at least one node for this rule.",
+  "Protocol": "Protocol",
+  "Subscription URL": "Subscription URL",
+  "subscription_url_scheme_not_allowed": "Subscription URLs must use HTTP or HTTPS.",
 });
 Object.assign(messages.es, {
   "Blacklist": "Lista negra",
@@ -3237,6 +3246,43 @@ Object.assign(messages.es, {
   "preview_target_required": "Proporciona una dirección de origen o un host de destino.",
   "CIDR": "CIDR",
   "blacklist_node_required": "Selecciona al menos un nodo para esta regla.",
+  "Protocol": "Protocolo",
+  "Subscription URL": "URL de suscripción",
+  "subscription_url_scheme_not_allowed": "Las URL de suscripción solo admiten HTTP o HTTPS.",
+});
+
+Object.assign(messages["zh-CN"], {
+  "Created {date}": "创建于 {date}",
+  "{subscription} → {node}": "{subscription} → {node}",
+  "No subscription": "未绑定订阅",
+  "No nodes": "无节点",
+  "TARGETS": "目标",
+  "Traffic overview": "流量概览",
+  "Total {value}": "总计 {value}",
+  "No traffic samples": "暂无流量采样",
+  "Live sing-box sessions and per-node traffic overview.": "sing-box 实时会话与各节点流量概览。",
+});
+Object.assign(messages.en, {
+  "Created {date}": "Created {date}",
+  "{subscription} → {node}": "{subscription} → {node}",
+  "No subscription": "No subscription",
+  "No nodes": "No nodes",
+  "TARGETS": "TARGETS",
+  "Traffic overview": "Traffic overview",
+  "Total {value}": "Total {value}",
+  "No traffic samples": "No traffic samples",
+  "Live sing-box sessions and per-node traffic overview.": "Live sing-box sessions and per-node traffic overview.",
+});
+Object.assign(messages.es, {
+  "Created {date}": "Creado {date}",
+  "{subscription} → {node}": "{subscription} → {node}",
+  "No subscription": "Sin suscripción",
+  "No nodes": "Sin nodos",
+  "TARGETS": "OBJETIVOS",
+  "Traffic overview": "Resumen de tráfico",
+  "Total {value}": "Total {value}",
+  "No traffic samples": "No hay muestras de tráfico",
+  "Live sing-box sessions and per-node traffic overview.": "Sesiones activas de sing-box y resumen de tráfico por nodo.",
 });
 
 function normalizeMessageKey(key: string) {

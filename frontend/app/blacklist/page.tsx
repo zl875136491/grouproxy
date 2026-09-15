@@ -12,7 +12,7 @@ import { SessionGate, useManagementSession } from "../../components/session-gate
 import { Button, ConfirmDialog, DetailDialog, Panel, StatusBadge } from "../../components/ui";
 
 export default function BlacklistPage() {
-  const { t, formatDate } = usePreferences();
+  const { t, formatDate, formatNumber } = usePreferences();
   const searchParams = useSearchParams();
   const session = useManagementSession();
   const queryClient = useQueryClient();
@@ -152,17 +152,29 @@ export default function BlacklistPage() {
         contentClassName="policy-form-dialog"
       >
         <form className="policy-dialog-form" onSubmit={submit}>
-          <fieldset>
-            <legend>{t("Nodes")}</legend>
-            <div className="checkbox-stack">
-              {nodeItems.map((node) => (
-                <label key={node.id}>
-                  <input type="checkbox" checked={nodeIds.includes(node.agent_id)} onChange={() => toggleNode(node.agent_id)} />
-                  <span>{node.name} <span className="mono">{node.agent_id}</span></span>
-                </label>
-              ))}
+          <div className="blacklist-node-picker">
+            <div className="subscription-selection-heading">
+              <div>
+                <span className="panel-kicker">{t("TARGETS")}</span>
+                <strong>{t("Nodes")}</strong>
+              </div>
+              <span>{t("{count} selected", { count: formatNumber(nodeIds.length) })}</span>
             </div>
-          </fieldset>
+            <div className="subscription-site-checks publish-site-checks blacklist-node-checks" role="group" aria-label={t("Nodes")}>
+              {nodeItems.map((node) => {
+                const selected = nodeIds.includes(node.agent_id);
+                return (
+                  <label className={selected ? "subscription-site-selected" : ""} key={node.id}>
+                    <input className="site-radio-input" type="checkbox" checked={selected} onChange={() => toggleNode(node.agent_id)} />
+                    <span className="site-choice-copy">
+                      <strong>{node.name}</strong>
+                      <small className="mono">{node.agent_id}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
           <label>
             <span>{t("Direction")}</span>
             <select value={direction} onChange={(event) => setDirection(event.target.value as SourceBlacklist["direction"])}>

@@ -335,33 +335,56 @@ func stringList(value any) ([]string, error) {
 }
 
 func validateOutbounds(entries []any) ([]any, error) {
-	if len(entries) == 0 || len(entries) > maxNodes {
+	if len(entries) == 0 {
 		return nil, errors.New("subscription_outbounds_invalid")
+	}
+	controlTypes := map[string]bool{
+		"block":    true,
+		"direct":   true,
+		"dns":      true,
+		"selector": true,
+		"urltest":  true,
 	}
 	tags := map[string]bool{}
 	result := make([]any, 0, len(entries))
-	for index, raw := range entries {
+	for _, raw := range entries {
 		entry, ok := raw.(map[string]any)
 		if !ok {
 			return nil, errors.New("subscription_outbound_invalid")
 		}
 		kind, err := requiredString(entry["type"])
-		if err != nil || !supportedTypes[strings.ToLower(kind)] {
+		if err != nil {
+			return nil, errors.New("subscription_outbound_type_unsupported")
+		}
+		kind = strings.ToLower(kind)
+		if controlTypes[kind] {
+			continue
+		}
+		if !supportedTypes[kind] {
 			return nil, errors.New("subscription_outbound_type_unsupported")
 		}
 		tag, tagErr := optionalString(entry["tag"])
 		if tagErr != nil {
 			return nil, errors.New("subscription_tag_invalid")
 		}
+		if tag == "direct" || tag == "block" || tag == "subscription" {
+			continue
+		}
 		if tag == "" {
-			tag = fmt.Sprintf("subscription-%d", index+1)
+			tag = fmt.Sprintf("subscription-%d", len(result)+1)
 			entry["tag"] = tag
 		}
-		if tag == "direct" || tag == "block" || tag == "subscription" || tags[tag] {
+		if tags[tag] {
 			return nil, errors.New("subscription_tag_invalid")
+		}
+		if len(result)+1 > maxNodes {
+			return nil, errors.New("subscription_outbounds_invalid")
 		}
 		tags[tag] = true
 		result = append(result, entry)
+	}
+	if len(result) == 0 {
+		return nil, errors.New("subscription_outbounds_invalid")
 	}
 	return result, nil
 }

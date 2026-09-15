@@ -48,8 +48,31 @@ func TestParseSupportedFormatsAndHash(t *testing.T) {
 
 func TestParseRejectsControlOwnedOutbound(t *testing.T) {
 	_, err := Parse([]byte(`[{"type":"direct","tag":"direct"}]`), "sing-box")
-	if err == nil || err.Error() != "subscription_outbound_type_unsupported" {
+	if err == nil || err.Error() != "subscription_outbounds_invalid" {
 		t.Fatalf("Parse() error = %v", err)
+	}
+}
+
+func TestParseKeepsLeafOutboundsFromFullSingboxConfig(t *testing.T) {
+	content := []byte(`{
+  "log": {"level": "info"},
+  "outbounds": [
+    {"type": "urltest", "tag": "auto", "outbounds": ["edge-a"]},
+    {"type": "selector", "tag": "manual", "outbounds": ["edge-a"]},
+    {"type": "direct", "tag": "direct"},
+    {"type": "vless", "tag": "edge-a", "server": "198.51.100.20", "server_port": 443, "uuid": "f128b39b-fcaa-46fd-adf6-c1f746956645"}
+  ]
+}`)
+	outbounds, err := Parse(content, "sing-box")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(outbounds) != 1 {
+		t.Fatalf("outbound count = %d", len(outbounds))
+	}
+	entry := outbounds[0].(map[string]any)
+	if entry["tag"] != "edge-a" || entry["type"] != "vless" {
+		t.Fatalf("leaf outbound = %#v", entry)
 	}
 }
 

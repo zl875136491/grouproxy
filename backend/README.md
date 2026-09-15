@@ -42,9 +42,15 @@ selection records plus these management operations:
 - serve a selected large blob only to the node whose Desired Bundle references
   its hash.
 
-HTTP subscription URLs are HTTP-only, have no embedded credentials, and are
-never returned by the API. Fetching validates all DNS results and every
-redirect against SSRF targets. Uploaded and direct single-node sources are
+HTTP subscription URLs may be `http://` or `https://`, have no embedded
+credentials, and are never returned by the API. HTTPS fetches use
+`verify=False` because internal upstreams often present untrusted
+certificates. Fetching validates all DNS results and every redirect against
+SSRF targets. Full sing-box client documents are accepted: grouping
+outbounds such as `selector`, `urltest`, `direct`, and `dns` are ignored and
+only endpoint outbounds are counted. Clash Meta client profiles that only
+declare `proxy-providers` are rejected; use a node list (`proxies`) or a
+sing-box outbound document. Uploaded and direct single-node sources are
 intentionally immutable and are not scheduled for refresh. The single-node
 importer normalizes raw `vless://` and `vmess://` values into one sing-box
 outbound. A Reality URI must include the endpoint UUID, host and port, SNI,

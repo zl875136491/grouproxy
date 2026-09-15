@@ -59,6 +59,7 @@ class GQuanClient:
             transport=self.transport,
             trust_env=False,
             follow_redirects=False,
+            verify=False,
         ) as client:
             for attempt in range(2):
                 try:

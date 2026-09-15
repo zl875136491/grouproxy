@@ -31,6 +31,25 @@ import { Button, ConfirmDialog, DetailDialog, Panel, RefreshButton, StatusBadge 
 
 type FormMode = "add" | null;
 type SourceType = "http" | "single_node" | "upload";
+type SourceScheme = "http" | "https";
+
+function composeSourceURL(scheme: SourceScheme, value: string) {
+  const trimmed = value.trim();
+  const withoutScheme = trimmed.replace(/^(https?):\/\//i, "");
+  return `${scheme}://${withoutScheme}`;
+}
+
+function schemeFromURL(value: string): SourceScheme | null {
+  const match = value.trim().match(/^(https?):\/\//i);
+  return match ? (match[1].toLowerCase() as SourceScheme) : null;
+}
+
+function applySourceURLInput(value: string): { scheme?: SourceScheme; url: string } {
+  const detected = schemeFromURL(value);
+  if (!detected) return { url: value };
+  return { scheme: detected, url: value.trim().replace(/^(https?):\/\//i, "") };
+}
+
 type SourceStateFilter = "" | "current" | "failed" | "pending";
 
 function sourceRefreshState(source: SubscriptionSource): Exclude<SourceStateFilter, ""> {
@@ -63,6 +82,7 @@ export default function SubscriptionsPage() {
   const [sourceTypeFilter, setSourceTypeFilter] = useState<"" | SourceType>("");
   const [sourceStateFilter, setSourceStateFilter] = useState<SourceStateFilter>("");
   const [sourceName, setSourceName] = useState("");
+  const [sourceScheme, setSourceScheme] = useState<SourceScheme>("http");
   const [sourceURL, setSourceURL] = useState("");
   const [fetchInterval, setFetchInterval] = useState("21600");
   const [singleNodeURI, setSingleNodeURI] = useState("");
@@ -84,11 +104,13 @@ export default function SubscriptionsPage() {
   const sourceCreate = useMutation({
     mutationFn: () => createSubscriptionSource({
       name: sourceName.trim(),
-      url: sourceURL.trim(),
+      url: composeSourceURL(sourceScheme, sourceURL),
+      scheme: sourceScheme,
       fetch_interval_sec: Number(fetchInterval),
     }),
     onSuccess: async (result) => {
       setSourceName("");
+      setSourceScheme("http");
       setSourceURL("");
       setSingleNodeURI("");
       setFormMode(null);
@@ -167,13 +189,13 @@ export default function SubscriptionsPage() {
     () => sourceItems.filter((source) => (
       (!sourceTypeFilter || source.source_type === sourceTypeFilter)
       && (!sourceStateFilter || sourceRefreshState(source) === sourceStateFilter)
-    )),
+    )).slice().sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)),
     [sourceItems, sourceStateFilter, sourceTypeFilter],
   );
 
   useEffect(() => {
-    if (!selectedSourceId && sourceItems[0]) setSelectedSourceId(sourceItems[0].id);
-  }, [selectedSourceId, sourceItems]);
+    if (!selectedSourceId && filteredSourceItems[0]) setSelectedSourceId(filteredSourceItems[0].id);
+  }, [filteredSourceItems, selectedSourceId]);
 
   useEffect(() => {
     if (!currentVersion) return;
@@ -233,19 +255,19 @@ export default function SubscriptionsPage() {
           >
             <Play size={16} /> {t("Publish")}
           </Button>
-          <Button variant="primary" onClick={() => { sourceCreate.reset(); singleNodeCreate.reset(); upload.reset(); setSourceType("http"); setFormMode("add"); }}><CirclePlus size={16} /> {t("Add source")}</Button>
+          <Button variant="primary" onClick={() => { sourceCreate.reset(); singleNodeCreate.reset(); upload.reset(); setSourceType("http"); setSourceScheme("http"); setFormMode("add"); }}><CirclePlus size={16} /> {t("Add source")}</Button>
         </>}
       />
       <DetailDialog open={formMode === "add"} onOpenChange={(open) => { if (!open && !sourcePending) setFormMode(null); }} title="Add source" description="Choose a subscription site connection or paste one VLESS / VMess node." contentClassName="source-dialog-content">
         <form className="source-dialog-form" onSubmit={submitSource}>
           <fieldset className="source-type-radios">
             <legend>{t("Source type")}</legend>
-            <label><input type="radio" name="source-type" checked={sourceType === "http"} onChange={() => setSourceType("http")} /><span><strong>{t("Subscription site connection")}</strong><small>HTTP</small></span></label>
+            <label><input type="radio" name="source-type" checked={sourceType === "http"} onChange={() => setSourceType("http")} /><span><strong>{t("Subscription site connection")}</strong><small>HTTP / HTTPS</small></span></label>
             <label><input type="radio" name="source-type" checked={sourceType === "single_node"} onChange={() => setSourceType("single_node")} /><span><strong>{t("Single node")}</strong><small>VLESS / VMess</small></span></label>
             <label><input type="radio" name="source-type" checked={sourceType === "upload"} onChange={() => setSourceType("upload")} /><span><strong>{t("Subscription file")}</strong><small>YAML / JSON</small></span></label>
           </fieldset>
           <label><span>{t(sourceType === "single_node" ? "Name (optional)" : "Name")}</span><input autoFocus value={sourceName} maxLength={120} onChange={(event) => setSourceName(event.target.value)} placeholder={sourceType === "http" ? t("Regional upstream") : sourceType === "upload" ? t("Imported upstream") : t("VLESS Reality Vision")} /></label>
-          {sourceType === "http" ? <><label><span>{t("HTTP URL")}</span><input type="url" value={sourceURL} onChange={(event) => setSourceURL(event.target.value)} placeholder="http://upstream.example/subscription" /></label><label><span>{t("Refresh interval")}</span><select value={fetchInterval} onChange={(event) => setFetchInterval(event.target.value)}><option value="3600">{t("1 hour")}</option><option value="21600">{t("6 hours")}</option><option value="86400">{t("24 hours")}</option></select></label></> : sourceType === "single_node" ? <label><span>{t("Single-node URI")}</span><textarea value={singleNodeURI} onChange={(event) => setSingleNodeURI(event.target.value)} placeholder="vless://uuid@host:port?... or vmess://base64-json" spellCheck={false} /></label> : <label><span>{t("Subscription file")}</span><input type="file" accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>}
+          {sourceType === "http" ? <><div className="source-url-row"><label><span>{t("Protocol")}</span><select value={sourceScheme} onChange={(event) => { setSourceScheme(event.target.value as SourceScheme); setSourceURL((current) => current.replace(/^(https?):\/\//i, "")); }}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label><label className="source-url-field"><span>{t("Subscription URL")}</span><input value={sourceURL} onChange={(event) => { const next = applySourceURLInput(event.target.value); if (next.scheme) setSourceScheme(next.scheme); setSourceURL(next.url); }} placeholder="upstream.example/subscription" autoComplete="off" /></label></div><label><span>{t("Refresh interval")}</span><select value={fetchInterval} onChange={(event) => setFetchInterval(event.target.value)}><option value="3600">{t("1 hour")}</option><option value="21600">{t("6 hours")}</option><option value="86400">{t("24 hours")}</option></select></label></> : sourceType === "single_node" ? <label><span>{t("Single-node URI")}</span><textarea value={singleNodeURI} onChange={(event) => setSingleNodeURI(event.target.value)} placeholder="vless://uuid@host:port?... or vmess://base64-json" spellCheck={false} /></label> : <label><span>{t("Subscription file")}</span><input type="file" accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>}
           <div className="form-actions"><Button type="button" disabled={sourcePending} onClick={() => setFormMode(null)}>{t("Cancel")}</Button><Button variant="primary" type="submit" disabled={sourcePending || (sourceType === "http" ? !sourceName.trim() || !sourceURL.trim() : sourceType === "single_node" ? !singleNodeURI.trim() : !sourceName.trim() || !uploadFile)}>{sourcePending ? t("Adding...") : t("Add source")}</Button></div>
         </form>
       </DetailDialog>
@@ -268,7 +290,11 @@ export default function SubscriptionsPage() {
               const state = sourceRefreshState(source);
               return <div className={`subscription-source-row ${currentSource?.id === source.id ? "subscription-source-selected" : ""}`} key={source.id}>
                 <button type="button" className="subscription-source-select" onClick={() => { setSelectedSourceId(source.id); setSelectedVersionId(""); }}>
-                  <span><strong>{source.name}</strong><small>{source.source_type === "http" ? source.url_hint : t(source.source_type === "single_node" ? "Single VLESS or VMess node" : "Imported file")} · {source.last_refresh_at ? t("Refreshed {date}", { date: formatDate(source.last_refresh_at) }) : t("Not refreshed")}</small></span>
+                  <span>
+                    <strong>{source.name}</strong>
+                    <small>{source.source_type === "http" ? source.url_hint : t(source.source_type === "single_node" ? "Single VLESS or VMess node" : "Imported file")}</small>
+                    <small>{t("Created {date}", { date: formatDate(source.created_at) })} · {t("Updated {date}", { date: formatDate(source.updated_at) })}</small>
+                  </span>
                 </button>
                 <div className="subscription-source-actions">
                   {source.refreshable ? <RefreshButton label={t("Refresh {name}", { name: source.name })} disabled={refresh.isPending} onRefresh={async () => { const result = await refresh.mutateAsync(source.id); return waitForRefreshTask(result.task.task_id); }} /> : null}

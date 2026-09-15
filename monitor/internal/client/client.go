@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,7 +49,17 @@ func New(baseURL, tokenFile string) (*Client, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token file")
 	}
-	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, HTTPClient: &http.Client{Timeout: 10 * time.Second}}, nil
+	return &Client{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Token:   token,
+		HTTPClient: &http.Client{
+			Timeout: 10 * time.Second,
+			// Control-plane certificates are not a trust root in this deployment.
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
+	}, nil
 }
 
 func (c *Client) request(method, path string, query url.Values, body any, out any) error {

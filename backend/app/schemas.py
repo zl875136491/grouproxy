@@ -224,6 +224,7 @@ class SourceBlacklistPreviewResponse(BaseModel):
 class SubscriptionSourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     url: str = Field(min_length=1, max_length=2048)
+    scheme: Literal["http", "https"] | None = None
     fetch_interval_sec: int = Field(default=21_600, ge=300, le=604_800)
     max_body_bytes: int = Field(default=2_000_000, ge=1_024, le=10_000_000)
     redirect_limit: int = Field(default=3, ge=0, le=5)
@@ -352,6 +353,8 @@ class ReleaseOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+    subscription_name: str = ""
+    subscription_source_id: str = ""
 
 
 class TaskOut(BaseModel):

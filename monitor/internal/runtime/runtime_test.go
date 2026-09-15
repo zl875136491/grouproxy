@@ -27,6 +27,35 @@ func TestStartClosesMonitorCopyOfLogFile(t *testing.T) {
 	}
 }
 
+func TestApplyDoesNotTreatAForeignListenerAsASuccessfulReload(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "sing-box")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"outbounds":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &Manager{
+		Binary:     binary,
+		StateDir:   dir,
+		ListenPort: port,
+		RunProcess: true,
+	}
+	ok, applyErr := manager.Apply(configPath)
+	if ok || applyErr == nil {
+		t.Fatalf("Apply() ok=%v err=%v; leftover listener must not count as a reload", ok, applyErr)
+	}
+}
+
 func TestLinuxTCPListenerFindsBoundPortWithoutDialingIt(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

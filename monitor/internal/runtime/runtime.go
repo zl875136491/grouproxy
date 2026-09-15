@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,7 +23,10 @@ type Manager struct {
 	ListenPort int
 	APIAddress string
 	RunProcess bool
+
+	mu         sync.Mutex
 	process    *exec.Cmd
+	done       chan struct{}
 	activePath string
 }
 
@@ -33,13 +38,43 @@ func (m *Manager) Check(configPath string) error {
 	return nil
 }
 
-func (m *Manager) stop() {
+func (m *Manager) processAliveLocked() bool {
 	if m.process == nil || m.process.Process == nil {
-		return
+		return false
 	}
-	_ = m.process.Process.Signal(syscall.SIGTERM)
-	_, _ = m.process.Process.Wait()
+	if m.done == nil {
+		return true
+	}
+	select {
+	case <-m.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m *Manager) stopLocked() {
+	if m.process != nil && m.process.Process != nil {
+		_ = m.process.Process.Signal(syscall.SIGTERM)
+		if m.done != nil {
+			select {
+			case <-m.done:
+			case <-time.After(3 * time.Second):
+				_ = m.process.Process.Kill()
+				<-m.done
+			}
+		} else {
+			_, _ = m.process.Process.Wait()
+		}
+	}
 	m.process = nil
+	m.done = nil
+}
+
+func (m *Manager) stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopLocked()
 }
 
 func (m *Manager) start(configPath string) error {
@@ -62,8 +97,16 @@ func (m *Manager) start(configPath string) error {
 	// The child inherits its descriptors; the monitor must close its copy so
 	// rotated logs can be reclaimed and shutdown does not retain the handle.
 	_ = logFile.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	m.mu.Lock()
 	m.process = cmd
+	m.done = done
 	m.activePath = configPath
+	m.mu.Unlock()
 	return nil
 }
 
@@ -127,6 +170,61 @@ func linuxTCPListener(port int) (listening, known bool) {
 	return false, known
 }
 
+func managedSingbox(cmdline []byte, binary, stateDir string) bool {
+	if stateDir == "" {
+		return false
+	}
+	parts := bytes.Split(bytes.TrimRight(cmdline, "\x00"), []byte{0})
+	if len(parts) == 0 {
+		return false
+	}
+	name := filepath.Base(string(parts[0]))
+	if name != "sing-box" && string(parts[0]) != binary {
+		return false
+	}
+	joined := string(bytes.ReplaceAll(cmdline, []byte{0}, []byte{' '}))
+	return strings.Contains(joined, stateDir)
+}
+
+func (m *Manager) stopStrays() {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	m.mu.Lock()
+	owned := 0
+	if m.process != nil && m.process.Process != nil {
+		owned = m.process.Process.Pid
+	}
+	binary := m.Binary
+	stateDir := m.StateDir
+	m.mu.Unlock()
+	for _, entry := range entries {
+		pid, convErr := strconv.Atoi(entry.Name())
+		if convErr != nil || pid <= 1 || pid == self || pid == owned {
+			continue
+		}
+		cmdline, readErr := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if readErr != nil || !managedSingbox(cmdline, binary, stateDir) {
+			continue
+		}
+		proc, findErr := os.FindProcess(pid)
+		if findErr != nil {
+			continue
+		}
+		_ = proc.Signal(syscall.SIGTERM)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := proc.Signal(syscall.Signal(0)); err != nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = proc.Kill()
+	}
+}
+
 func (m *Manager) Apply(candidatePath string) (bool, error) {
 	if err := m.Check(candidatePath); err != nil {
 		return false, err
@@ -137,14 +235,43 @@ func (m *Manager) Apply(candidatePath string) (bool, error) {
 	}
 	previous := m.activePath
 	m.stop()
+	m.stopStrays()
 	if err := m.start(candidatePath); err != nil {
 		if previous != "" {
 			_ = m.start(previous)
 		}
 		return false, err
 	}
-	if waitPort(m.ListenPort, 5*time.Second) {
-		return true, nil
+	deadline := time.Now().Add(5 * time.Second)
+	var portSeen time.Time
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		alive := m.processAliveLocked()
+		m.mu.Unlock()
+		if !alive {
+			m.stop()
+			if previous != "" {
+				_ = m.start(previous)
+				_ = waitPort(m.ListenPort, 5*time.Second)
+			}
+			return false, fmt.Errorf("sing-box exited before listening on %d", m.ListenPort)
+		}
+		if waitPort(m.ListenPort, 100*time.Millisecond) {
+			if portSeen.IsZero() {
+				portSeen = time.Now()
+			}
+			if time.Since(portSeen) >= 250*time.Millisecond {
+				m.mu.Lock()
+				alive = m.processAliveLocked()
+				m.mu.Unlock()
+				if alive {
+					return true, nil
+				}
+				break
+			}
+			continue
+		}
+		portSeen = time.Time{}
 	}
 	m.stop()
 	if previous != "" {
@@ -162,7 +289,9 @@ func (m *Manager) Health(ctx context.Context) (processOK, portOK, apiOK bool) {
 	if !m.RunProcess {
 		return true, true, true
 	}
-	processOK = m.process != nil && m.process.ProcessState == nil
+	m.mu.Lock()
+	processOK = m.processAliveLocked()
+	m.mu.Unlock()
 	portOK = waitPort(m.ListenPort, 500*time.Millisecond)
 	apiOK = m.APIAddress == "" || waitAddress(m.APIAddress, 500*time.Millisecond)
 	return

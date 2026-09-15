@@ -44,6 +44,7 @@ from app.services.subscriptions import (
     normalize_source_url,
     refresh_subscription_source,
     single_node_source_name,
+    source_url_hint,
     subscription_outbound_tags,
 )
 from main import _safe_probe_target
@@ -982,12 +983,94 @@ def test_subscription_outbound_tags_match_monitor_fallback_names() -> None:
     ) == {"subscription-1"}
 
 
-def test_subscription_url_rejects_tls_and_embedded_credentials() -> None:
+def test_full_singbox_client_config_keeps_only_leaf_outbounds() -> None:
+    content = json.dumps(
+        {
+            "log": {"level": "info"},
+            "outbounds": [
+                {"type": "urltest", "tag": "auto", "outbounds": ["edge-a"]},
+                {"type": "selector", "tag": "manual", "outbounds": ["edge-a"]},
+                {"type": "direct", "tag": "direct"},
+                {
+                    "type": "vless",
+                    "tag": "edge-a",
+                    "server": "198.51.100.20",
+                    "server_port": 443,
+                    "uuid": "f128b39b-fcaa-46fd-adf6-c1f746956645",
+                },
+            ],
+        }
+    ).encode()
+    parsed = inspect_subscription(content)
+    assert parsed.format == "sing-box"
+    assert parsed.node_count == 1
+    assert subscription_outbound_tags(content, "sing-box") == {"edge-a"}
+
+
+def test_clash_meta_profile_without_inline_proxies_is_rejected() -> None:
+    content = (
+        b"proxy-providers:\n"
+        b"  p:\n"
+        b"    type: http\n"
+        b"    url: https://example.com/nodes\n"
+        b"proxy-groups:\n"
+        b"  - name: g\n"
+        b"    type: select\n"
+        b"    use: [p]\n"
+    )
+    with pytest.raises(SubscriptionError, match="subscription_clash_profile_unsupported"):
+        inspect_subscription(content)
+
+
+def test_subscription_url_accepts_http_and_https_and_rejects_credentials() -> None:
     assert normalize_source_url("http://example.com/subscription") == "http://example.com/subscription"
-    with pytest.raises(SubscriptionError, match="subscription_url_scheme_not_allowed"):
+    assert (
         normalize_source_url("https://example.com/subscription")
+        == "https://example.com/subscription"
+    )
+    assert (
+        normalize_source_url("example.com/subscription", scheme="https")
+        == "https://example.com/subscription"
+    )
+    assert (
+        normalize_source_url("http://example.com:8080/sub", scheme="https")
+        == "https://example.com:8080/sub"
+    )
+    assert (
+        normalize_source_url("https://example.com/sub", scheme="http")
+        == "http://example.com/sub"
+    )
+    assert source_url_hint("https://example.com:8443/subscription") == "https://example.com:8443/subscription"
+    assert source_url_hint("https://example.com/subscription") == "https://example.com/subscription"
+    with pytest.raises(SubscriptionError, match="subscription_url_scheme_not_allowed"):
+        normalize_source_url("ftp://example.com/subscription")
     with pytest.raises(SubscriptionError, match="subscription_url_credentials_not_supported"):
         normalize_source_url("http://operator:secret@example.com/subscription")
+
+
+@pytest.mark.asyncio
+async def test_subscription_fetch_disables_tls_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> bool:
+            return False
+
+    monkeypatch.setattr("app.services.subscriptions.httpx.AsyncClient", _FakeClient)
+    source = SimpleNamespace(
+        url="https://127.0.0.1/subscription",
+        max_body_bytes=2_000_000,
+        redirect_limit=3,
+    )
+    with pytest.raises(SubscriptionError, match="subscription_ssrf_blocked"):
+        await fetch_source_bytes(source)
+    assert captured.get("verify") is False
 
 
 @pytest.mark.asyncio
@@ -1257,3 +1340,82 @@ async def test_telemetry_sequence_collision_purges_after_cursor_already_reset(
     assert accepted is True
     assert deleted == [{"node_id": "codedev", "kind": "connection_snapshot"}]
     assert cursor.last_sequence == 12
+
+
+def test_subscription_version_id_from_bundle_reads_desired_payload() -> None:
+    import main as main_module
+
+    assert (
+        main_module._subscription_version_id_from_bundle(
+            {"subscription": {"version_id": "6aa8e7018a60e479f3dca9f2", "hash": "abc"}}
+        )
+        == "6aa8e7018a60e479f3dca9f2"
+    )
+    assert main_module._subscription_version_id_from_bundle({"subscription": {}}) == ""
+    assert main_module._subscription_version_id_from_bundle({"blacklist": []}) == ""
+    assert main_module._subscription_version_id_from_bundle(None) == ""
+
+
+def test_release_out_includes_subscription_labels() -> None:
+    import main as main_module
+
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    out = main_module._release_out(
+        SimpleNamespace(
+            release_id="rel-1",
+            site_id="site-1",
+            node_ids=["codedev"],
+            desired_release_id="desired-1",
+            previous_release_id=None,
+            task_id="task-1",
+            status="succeeded",
+            stage="succeeded",
+            progress=100,
+            error="",
+            rollback_reason="",
+            started_at=now,
+            finished_at=now,
+            created_at=now,
+        ),
+        subscription_name="ssdnote",
+        subscription_source_id="src-1",
+    )
+    assert out.subscription_name == "ssdnote"
+    assert out.subscription_source_id == "src-1"
+
+
+@pytest.mark.asyncio
+async def test_subscription_labels_for_releases_join_desired_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main as main_module
+
+    desired = SimpleNamespace(
+        release_id="rel-1",
+        bundle={"subscription": {"version_id": "ver-1"}},
+    )
+    version = SimpleNamespace(id="ver-1", source_id="src-1")
+    source = SimpleNamespace(id="src-1", name="ssdnote")
+
+    class _Desired:
+        @staticmethod
+        def find(_query: object) -> SimpleNamespace:
+            async def to_list() -> list[SimpleNamespace]:
+                return [desired]
+
+            return SimpleNamespace(to_list=to_list)
+
+    async def fake_version_get(item_id: str) -> SimpleNamespace | None:
+        return version if item_id == "ver-1" else None
+
+    async def fake_source_get(item_id: str) -> SimpleNamespace | None:
+        return source if item_id == "src-1" else None
+
+    monkeypatch.setattr(main_module, "DesiredRelease", _Desired)
+    monkeypatch.setattr(main_module.SubscriptionVersion, "get", fake_version_get)
+    monkeypatch.setattr(main_module.SubscriptionSource, "get", fake_source_get)
+
+    labels = await main_module._subscription_labels_for_releases(
+        [SimpleNamespace(release_id="rel-1")]
+    )
+    assert labels == {"rel-1": ("ssdnote", "src-1")}

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from beanie.exceptions import CollectionWasNotInitialized
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -468,7 +469,73 @@ def _draft_out(draft: ConfigDraft) -> DraftOut:
     )
 
 
-def _release_out(release: ConfigRelease) -> ReleaseOut:
+def _subscription_version_id_from_bundle(bundle: Any) -> str:
+    if not isinstance(bundle, dict):
+        return ""
+    subscription = bundle.get("subscription")
+    if not isinstance(subscription, dict):
+        return ""
+    return str(subscription.get("version_id") or "").strip()
+
+
+async def _documents_by_id(model: Any, ids: list[str]) -> dict[str, Any]:
+    unique = [item for item in dict.fromkeys(ids) if item]
+    if not unique:
+        return {}
+    loaded = await asyncio.gather(*[model.get(item) for item in unique])
+    documents: dict[str, Any] = {}
+    for item_id, document in zip(unique, loaded, strict=True):
+        if document is None:
+            continue
+        documents[item_id] = document
+        documents[_model_id(document)] = document
+    return documents
+
+
+async def _subscription_labels_for_releases(
+    releases: list[ConfigRelease],
+) -> dict[str, tuple[str, str]]:
+    """Resolve the operator-facing subscription name for each release."""
+
+    if not releases:
+        return {}
+    try:
+        desired_docs = await DesiredRelease.find(
+            {"release_id": {"$in": [item.release_id for item in releases]}}
+        ).to_list()
+    except CollectionWasNotInitialized:
+        return {}
+    version_id_by_release: dict[str, str] = {}
+    for desired in desired_docs:
+        if desired.release_id in version_id_by_release:
+            continue
+        version_id = _subscription_version_id_from_bundle(desired.bundle)
+        if version_id:
+            version_id_by_release[desired.release_id] = version_id
+    versions = await _documents_by_id(
+        SubscriptionVersion, list(version_id_by_release.values())
+    )
+    sources = await _documents_by_id(
+        SubscriptionSource, [item.source_id for item in versions.values()]
+    )
+    labels: dict[str, tuple[str, str]] = {}
+    for release_id, version_id in version_id_by_release.items():
+        version = versions.get(version_id)
+        if version is None:
+            continue
+        source = sources.get(version.source_id)
+        if source is None:
+            continue
+        labels[release_id] = (source.name, _model_id(source))
+    return labels
+
+
+def _release_out(
+    release: ConfigRelease,
+    *,
+    subscription_name: str = "",
+    subscription_source_id: str = "",
+) -> ReleaseOut:
     return ReleaseOut(
         release_id=release.release_id,
         site_id=release.site_id,
@@ -484,7 +551,25 @@ def _release_out(release: ConfigRelease) -> ReleaseOut:
         started_at=release.started_at,
         finished_at=release.finished_at,
         created_at=release.created_at,
+        subscription_name=subscription_name,
+        subscription_source_id=subscription_source_id,
     )
+
+
+async def _release_outs(releases: list[ConfigRelease]) -> list[ReleaseOut]:
+    labels = await _subscription_labels_for_releases(releases)
+    return [
+        _release_out(
+            item,
+            subscription_name=labels.get(item.release_id, ("", ""))[0],
+            subscription_source_id=labels.get(item.release_id, ("", ""))[1],
+        )
+        for item in releases
+    ]
+
+
+async def _release_out_enriched(release: ConfigRelease) -> ReleaseOut:
+    return (await _release_outs([release]))[0]
 
 
 def _task_out(task: Task) -> TaskOut:
@@ -2178,7 +2263,9 @@ async def _read_subscription_upload(upload: UploadFile, max_body_bytes: int) -> 
 
 @app.get("/api/v1/subscriptions", response_model=SubscriptionCatalogOut)
 async def list_subscriptions(_: str = Depends(require_management)) -> SubscriptionCatalogOut:
-    sources = await SubscriptionSource.find_all().sort(+SubscriptionSource.name).to_list()
+    sources = await (
+        SubscriptionSource.find_all().sort(-SubscriptionSource.created_at).to_list()
+    )
     versions = (
         await SubscriptionVersion.find_all()
         .sort(-SubscriptionVersion.created_at)
@@ -2225,7 +2312,7 @@ async def create_subscription_source(
     _: str = Depends(require_management),
 ) -> SubscriptionRefreshResponse:
     try:
-        source_url = normalize_source_url(payload.url)
+        source_url = normalize_source_url(payload.url, scheme=payload.scheme)
     except SubscriptionError as exc:
         raise HTTPException(422, exc.code) from exc
     if await SubscriptionSource.find_one(SubscriptionSource.name == payload.name.strip()):
@@ -2638,7 +2725,7 @@ async def _distribute_source_blacklist_change(
                 site_id=site_id,
                 node_ids=[node.agent_id for node in plan.nodes],
                 state="released",
-                release=_release_out(release),
+                release=await _release_out_enriched(release),
             )
         )
     return _SourceBlacklistDistribution(
@@ -2678,7 +2765,7 @@ async def create_release(
         request_id=request_id,
         actor=_actor(),
     )
-    return _release_out(release)
+    return await _release_out_enriched(release)
 
 
 async def _publish_subscription_version(
@@ -2882,7 +2969,7 @@ async def publish_subscription_version(
     )
     return SubscriptionPublishOut(
         version=_subscription_version_out(version),
-        releases=[_release_out(item) for item in releases],
+        releases=await _release_outs(releases),
     )
 
 
@@ -2916,7 +3003,7 @@ async def rollback_site_subscription(
     )
     return SubscriptionPublishOut(
         version=_subscription_version_out(version),
-        releases=[_release_out(item) for item in releases],
+        releases=await _release_outs(releases),
     )
 
 
@@ -2973,7 +3060,7 @@ async def get_release_detail(
         )
     events.sort(key=lambda item: item.timestamp)
     return ReleaseDetailOut(
-        release=_release_out(release),
+        release=await _release_out_enriched(release),
         task=_task_out(task) if task else None,
         acknowledgements=[_ack_out(item) for item in acks],
         events=events,
@@ -3001,7 +3088,7 @@ async def list_releases(
     releases = await (
         ConfigRelease.find(query).sort(-ConfigRelease.created_at).limit(safe_limit).to_list()
     )
-    return [_release_out(item) for item in releases]
+    return await _release_outs(releases)
 
 
 @app.get("/api/v1/config/releases/{release_id}/acks", response_model=list[AgentAckOut])
@@ -3023,7 +3110,7 @@ async def get_release(release_id: str, _: str = Depends(require_management)) -> 
     release = await ConfigRelease.find_one(ConfigRelease.release_id == release_id)
     if release is None:
         raise HTTPException(404, "release_not_found")
-    return _release_out(release)
+    return await _release_out_enriched(release)
 
 
 @app.get("/api/v1/tasks", response_model=list[TaskOut])
@@ -3262,7 +3349,7 @@ async def select_node_proxy(
             ConfigRelease.task_id == existing_task.task_id
         )
         if existing_release is not None:
-            return _release_out(existing_release)
+            return await _release_out_enriched(existing_release)
         raise HTTPException(409, "release_idempotency_incomplete")
     snapshot = await _latest_proxy_config(node.agent_id)
     if snapshot is None:
@@ -3335,7 +3422,7 @@ async def select_node_proxy(
         draft.status = "expired"
         draft.updated_at = utcnow()
         await draft.save()
-        return _release_out(release)
+        return await _release_out_enriched(release)
     await append_audit(
         action="proxy_selection.update",
         target_type="node",
@@ -3351,7 +3438,7 @@ async def select_node_proxy(
             "release_id": release.release_id,
         },
     )
-    return _release_out(release)
+    return await _release_out_enriched(release)
 
 
 async def _latest_proxy_config(node_id: str) -> ProxyConfigSnapshot | None:
