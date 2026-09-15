@@ -5,9 +5,26 @@ export type Overview = {
   in_sync_nodes: number;
   drifted_nodes: number;
   connections: number;
+  bytes_up?: number;
+  bytes_down?: number;
+  rx_bps?: number;
+  tx_bps?: number;
+  node_traffic?: NodeTraffic[];
   open_circuits: number;
   open_alerts: number;
   http_only: boolean;
+};
+
+export type NodeTraffic = {
+  node_id: string;
+  name: string;
+  site_id: string;
+  liveness_status: string;
+  active_connections: number;
+  bytes_up: number;
+  bytes_down: number;
+  rx_bps: number;
+  tx_bps: number;
 };
 
 export type VerificationPurpose = "register" | "password_change" | "gquan_login";
@@ -16,7 +33,7 @@ export type AuthSession = {
   access_token: string;
   token_type: "bearer";
   itcode: string;
-  role: "admin" | "employee";
+  role: "root" | "admin" | "employee";
   expires_at: string;
 };
 
@@ -52,6 +69,11 @@ export type Node = {
   service_status: string;
   subscription_status: string;
   probe_status: string;
+  active_connections?: number;
+  bytes_up?: number;
+  bytes_down?: number;
+  rx_bps?: number;
+  tx_bps?: number;
   last_error: string;
 };
 
@@ -99,14 +121,19 @@ export type ProxySelectionRequest = {
 };
 
 export type SourceBlacklistRule = {
-  scope: "global" | "site";
-  site_id: string | null;
-  kind: "ip" | "network" | "domain";
+  id?: string;
+  node_id?: string;
+  direction: "source" | "destination";
+  kind: "ip" | "cidr" | "domain";
   pattern: string;
 };
 
-export type SourceBlacklist = SourceBlacklistRule & {
+export type SourceBlacklist = {
   id: string;
+  node_id: string;
+  direction: "source" | "destination";
+  kind: "ip" | "cidr" | "domain";
+  pattern: string;
   comment: string;
   enabled: boolean;
   created_by: string;
@@ -122,6 +149,7 @@ export type SourceBlacklistDistribution = {
 
 export type SourceBlacklistMutation = {
   rule: SourceBlacklist;
+  rules?: SourceBlacklist[];
   operation: "created" | "deleted";
   distribution: SourceBlacklistDistribution[];
 };
@@ -203,6 +231,7 @@ export type Draft = {
   validation: {
     valid?: boolean;
     errors?: string[];
+    blacklist?: SourceBlacklistRule[];
     source_blacklist?: SourceBlacklistRule[];
   };
   risk_level: string;
@@ -328,6 +357,22 @@ export type ConnectionTopItem = {
   bytes_down: number;
 };
 
+export type ConnectionLiveItem = {
+  id: string;
+  src_ip: string;
+  src_port: string;
+  dst_host: string;
+  dst_ip: string;
+  dst_port: string;
+  network: string;
+  inbound: string;
+  outbound_chain: string[];
+  bytes_up: number;
+  bytes_down: number;
+  start: string;
+  rule: string;
+};
+
 export type ConnectionSnapshot = {
   id: string;
   node_id: string;
@@ -336,9 +381,12 @@ export type ConnectionSnapshot = {
   active_connections: number;
   bytes_up: number;
   bytes_down: number;
+  rx_bps?: number;
+  tx_bps?: number;
   top_sources: ConnectionTopItem[];
   top_destinations: ConnectionTopItem[];
   top_users: ConnectionTopItem[];
+  connections?: ConnectionLiveItem[];
   api_available: boolean;
   received_at: string;
 };
@@ -399,6 +447,7 @@ export type AccessConfig = {
 
 export type Employee = {
   itcode: string;
+  role: "root" | "admin" | "employee";
   auth_source: string;
   is_active: boolean;
   created_at: string;
@@ -520,7 +569,7 @@ export function hasAuthenticatedSession() {
 export function managementSessionRole(): SessionRole | null {
   if (typeof window === "undefined") return null;
   const role = window.localStorage.getItem(roleKey);
-  return role === "admin" || role === "employee" ? role : null;
+  return role === "root" || role === "admin" || role === "employee" ? role : null;
 }
 
 export function clearManagementSession() {
@@ -730,6 +779,13 @@ export function getEmployees() {
   return request<Employee[]>("/api/v1/employees");
 }
 
+export function updateUserRole(itcode: string, role: "admin" | "employee") {
+  return request<Employee>(
+    `/api/v1/users/${encodeURIComponent(itcode)}/role`,
+    jsonRequest("PATCH", { role }),
+  );
+}
+
 export function getNodes() {
   return request<Node[]>("/api/v1/nodes");
 }
@@ -780,21 +836,26 @@ export function setSiteShutdown(siteId: string, shutdown: boolean) {
 }
 
 export function getSourceBlacklist() {
-  return request<SourceBlacklist[]>("/api/v1/source-blacklist");
+  return request<SourceBlacklist[]>("/api/v1/blacklist");
 }
 
-export function createSourceBlacklist(
-  value: Omit<SourceBlacklist, "id" | "created_by" | "created_at">,
-) {
+export function createSourceBlacklist(value: {
+  node_ids: string[];
+  direction: SourceBlacklist["direction"];
+  kind: SourceBlacklist["kind"];
+  pattern: string;
+  comment?: string;
+  enabled?: boolean;
+}) {
   return request<SourceBlacklistMutation>(
-    "/api/v1/source-blacklist",
+    "/api/v1/blacklist",
     jsonRequest("POST", value),
   );
 }
 
 export function deleteSourceBlacklist(entryId: string) {
   return request<SourceBlacklistMutation>(
-    `/api/v1/source-blacklist/${encodeURIComponent(entryId)}`,
+    `/api/v1/blacklist/${encodeURIComponent(entryId)}`,
     jsonRequest("DELETE"),
   );
 }

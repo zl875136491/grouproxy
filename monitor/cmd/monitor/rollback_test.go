@@ -39,7 +39,7 @@ func TestRollbackUsesPortOverrideAndKeepsLastGoodConfig(t *testing.T) {
 	}
 	lastGood := map[string]any{
 		"listen":           map[string]any{"http_port": 1080},
-		"source_blacklist": []any{},
+		"blacklist": []any{},
 		"shutdown":         false,
 	}
 	agent := &agent{
@@ -83,7 +83,7 @@ func TestRenderSingboxUsesSubscriptionForNonCNTraffic(t *testing.T) {
 	}
 	config := renderSingbox(
 		map[string]any{
-			"source_blacklist": []any{map[string]any{"scope": "global", "kind": "ip", "pattern": "192.0.2.1"}},
+			"blacklist": []any{map[string]any{"direction": "source", "kind": "ip", "pattern": "192.0.2.1"}},
 		},
 		18080,
 		stateDir,
@@ -140,7 +140,7 @@ func TestRenderSingboxSupportsLoopbackIngress(t *testing.T) {
 		t.Fatalf("ensure routing data: %v", err)
 	}
 	config := renderSingbox(
-		map[string]any{"source_blacklist": []any{}},
+		map[string]any{"blacklist": []any{}},
 		18080,
 		stateDir,
 		"127.0.0.1:19090",
@@ -163,7 +163,7 @@ func TestEnsureLastGoodConfigReappliesOperationalIngress(t *testing.T) {
 		t.Fatalf("ensure routing data: %v", err)
 	}
 	lastGood := map[string]any{
-		"source_blacklist": []any{},
+		"blacklist": []any{},
 		"shutdown":         false,
 	}
 	persisted := renderSingbox(lastGood, 18080, stateDir, "127.0.0.1:19090", nil, "", nil)
@@ -239,7 +239,7 @@ func TestRestoreLastGoodFirewallUsesOverridePort(t *testing.T) {
 	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 18080, FirewallMode: "dry-run"}}
 	lastGood := map[string]any{
 		"listen":           map[string]any{"http_port": 1080},
-		"source_blacklist": []any{},
+		"blacklist": []any{},
 	}
 	if err := agent.restoreLastGoodFirewallForBundle(lastGood); err != nil {
 		t.Fatalf("render last-good firewall: %v", err)

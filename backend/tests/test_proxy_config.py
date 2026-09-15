@@ -74,7 +74,7 @@ async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
     async def current_tags(_: str) -> set[str]:
         return {"current"}
 
-    monkeypatch.setattr(bundles, "effective_source_blacklist", no_source_blacklist)
+    monkeypatch.setattr(bundles, "effective_blacklist", no_source_blacklist)
     monkeypatch.setattr(bundles, "selected_subscription_bundle", current_subscription)
     monkeypatch.setattr(bundles, "_selected_subscription_tags", current_tags)
 
@@ -105,14 +105,12 @@ async def test_bundle_uses_only_effective_source_blacklist_and_allows_by_default
     async def source_rules(_: str) -> list[dict[str, str | None]]:
         return [
             {
-                "scope": "global",
-                "site_id": None,
+                "direction": "source",
                 "kind": "ip",
                 "pattern": "192.0.2.1",
             },
             {
-                "scope": "site",
-                "site_id": "site-1",
+                "direction": "destination",
                 "kind": "domain",
                 "pattern": "blocked.example",
             },
@@ -121,7 +119,7 @@ async def test_bundle_uses_only_effective_source_blacklist_and_allows_by_default
     async def no_subscription(**_: object) -> None:
         return None
 
-    monkeypatch.setattr(bundles, "effective_source_blacklist", source_rules)
+    monkeypatch.setattr(bundles, "effective_blacklist", source_rules)
     monkeypatch.setattr(bundles, "selected_subscription_bundle", no_subscription)
     monkeypatch.setattr(bundles, "_selected_subscription_tags", lambda _: _async_set())
 
@@ -141,7 +139,8 @@ async def test_bundle_uses_only_effective_source_blacklist_and_allows_by_default
         settings=settings,
     )
 
-    assert result["source_blacklist"] == await source_rules("site-1")
+    assert result["blacklist"] == await source_rules("node-1")
+    assert "source_blacklist" not in result
     assert "allow_cidrs" not in result
     assert "deny_destinations" not in result
 
@@ -156,14 +155,12 @@ def test_source_blacklist_contract_is_registered() -> None:
         for route in main_module.app.routes
         for method in (route.methods or set())
     }
+    assert ("/api/v1/blacklist", "GET") in routes
+    assert ("/api/v1/blacklist", "POST") in routes
+    assert ("/api/v1/blacklist/{entry_id}", "DELETE") in routes
+    assert ("/api/v1/blacklist/preview", "POST") in routes
     assert ("/api/v1/source-blacklist", "GET") in routes
-    assert ("/api/v1/source-blacklist", "POST") in routes
-    assert ("/api/v1/source-blacklist/{entry_id}", "DELETE") in routes
-    assert ("/api/v1/source-blacklist/preview", "POST") in routes
     retired_paths = {
-        "/api/v1/blacklist",
-        "/api/v1/blacklist/preview",
-        "/api/v1/blacklist/{entry_id}",
         "/api/v1/blacklist/sources",
         "/api/v1/blacklist/sources/{entry_id}",
         "/api/v1/sites/{site_id}/cidrs",
@@ -177,13 +174,16 @@ def test_source_blacklist_contract_is_registered() -> None:
     assert not any(path in retired_paths for path, _ in routes)
 
 
-def test_source_blacklist_schema_enforces_scope_target() -> None:
+def test_source_blacklist_schema_requires_nodes() -> None:
     with pytest.raises(ValueError):
-        SourceBlacklistCreate(scope="site", kind="ip", pattern="192.0.2.1")
+        SourceBlacklistCreate(kind="ip", pattern="192.0.2.1")
     with pytest.raises(ValueError):
-        SourceBlacklistCreate(
-            scope="global", site_id="site-1", kind="ip", pattern="192.0.2.1"
-        )
+        SourceBlacklistCreate(node_ids=["  "], kind="ip", pattern="192.0.2.1")
+    rule = SourceBlacklistCreate(
+        node_ids=["node-a"], kind="network", pattern="10.0.0.8/24"
+    )
+    assert rule.kind == "cidr"
+    assert rule.pattern == "10.0.0.0/24"
 
 
 def test_retired_policy_fields_are_removed_from_draft_and_bundle_payloads() -> None:
@@ -200,7 +200,6 @@ def test_retired_policy_fields_are_removed_from_draft_and_bundle_payloads() -> N
     }
     assert strip_retired_policy_fields(payload) == {
         "nested": {"keep": True},
-        "source_blacklist": [{"kind": "ip", "pattern": "192.0.2.1"}],
     }
 
 
@@ -236,7 +235,7 @@ def test_audit_output_hides_retired_policy_fields_without_mutating_history() -> 
 @pytest.mark.asyncio
 async def test_create_draft_audits_the_cleaned_diff(monkeypatch: pytest.MonkeyPatch) -> None:
     site = SimpleNamespace(id="site-1", config_revision=7)
-    node = SimpleNamespace(id="node-1")
+    node = SimpleNamespace(id="node-1", agent_id="node-1")
     audit_event: dict[str, object] = {}
 
     class Query:
@@ -270,7 +269,7 @@ async def test_create_draft_audits_the_cleaned_diff(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(main_module, "Site", SimpleNamespace(get=get_site))
     monkeypatch.setattr(main_module, "Node", NodeModel)
     monkeypatch.setattr(main_module, "ConfigDraft", DraftModel)
-    monkeypatch.setattr(main_module, "effective_source_blacklist", source_rules)
+    monkeypatch.setattr(main_module, "effective_blacklist", source_rules)
     monkeypatch.setattr(main_module, "append_audit", record_audit)
     monkeypatch.setattr(main_module, "_actor", lambda: "admin")
     monkeypatch.setattr(main_module, "_draft_out", lambda draft: draft)
@@ -570,6 +569,11 @@ async def test_node_rename_changes_only_display_name(monkeypatch: pytest.MonkeyP
         service_status="healthy",
         subscription_status="current",
         probe_status="unknown",
+        active_connections=0,
+        bytes_up=0,
+        bytes_down=0,
+        rx_bps=0,
+        tx_bps=0,
         last_error="",
         saved=False,
     )

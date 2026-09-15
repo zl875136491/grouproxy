@@ -1,0 +1,19 @@
+# Copy to /opt/grouproxy/etc/monitor.yaml. hmac_secret must match
+# GROUPROXY_BUNDLE_HMAC_SECRET on the Beijing control plane.
+
+backend_url: "http://<beijing-ip>:8000"
+node_id: "beijing"
+token_file: "/opt/grouproxy/etc/node.token"
+state_dir: "/opt/grouproxy/var"
+singbox_bin: "/opt/grouproxy/bin/sing-box"
+singbox_config: "/opt/grouproxy/var/sing-box.json"
+listen_port: 1080
+firewall_mode: apply
+poll_interval_seconds: 15
+heartbeat_interval_seconds: 15
+run_singbox: true
+hmac_secret: "<same-as-GROUPROXY_BUNDLE_HMAC_SECRET>"
+allow_insecure_http: true
+clash_api_listen: "127.0.0.1:9090"
+health_window_seconds: 30
+health_sample_seconds: 2

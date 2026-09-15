@@ -12,9 +12,11 @@ from starlette.testclient import TestClient
 # Test CORS configuration
 
 
-def test_cors_no_wildcard_ports():
+def test_cors_no_wildcard_ports(monkeypatch: pytest.MonkeyPatch):
     """CORS should use strict origin allowlist, not wildcard port regex."""
     from app.config import Settings
+
+    monkeypatch.delenv("GROUPROXY_CORS_ALLOWED_ORIGINS", raising=False)
 
     # Default development config
     settings = Settings(

@@ -13,7 +13,7 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
     itcode: str
-    role: Literal["admin", "employee"]
+    role: Literal["root", "admin", "employee"]
     expires_at: datetime
 
 
@@ -75,14 +75,19 @@ class SiteNameUpdate(BaseModel):
 
 
 class EmployeeOut(BaseModel):
-    """Management-safe view of a local employee account."""
+    """Management-safe view of a local account, including operators."""
 
     itcode: str
+    role: Literal["root", "admin", "employee"] = "employee"
     auth_source: str
     is_active: bool
     created_at: datetime
     password_changed_at: datetime | None
     last_login_at: datetime | None
+
+
+class RoleUpdate(BaseModel):
+    role: Literal["admin", "employee"]
 
 
 class NodeCreate(BaseModel):
@@ -115,6 +120,11 @@ class NodeOut(BaseModel):
     service_status: str
     subscription_status: str
     probe_status: str
+    active_connections: int = 0
+    bytes_up: int = 0
+    bytes_down: int = 0
+    rx_bps: int = 0
+    tx_bps: int = 0
     last_error: str
 
 
@@ -123,39 +133,39 @@ class NodeCreateResponse(NodeOut):
 
 
 class SourceBlacklistCreate(BaseModel):
-    scope: Literal["global", "site"] = "global"
-    site_id: str | None = Field(default=None, max_length=128)
-    kind: Literal["ip", "network", "domain"] = "domain"
+    node_ids: list[str] = Field(min_length=1, max_length=64)
+    direction: Literal["source", "destination"] = "source"
+    kind: Literal["ip", "cidr", "domain", "network"] = "domain"
     pattern: str = Field(min_length=1, max_length=512)
     comment: str = Field(default="", max_length=512)
     enabled: bool = True
 
     @model_validator(mode="after")
-    def validate_scope_target(self) -> "SourceBlacklistCreate":
-        if self.scope == "site" and not (self.site_id or "").strip():
-            raise ValueError("site_id is required for site-scoped source rules")
-        if self.scope == "global" and self.site_id:
-            raise ValueError("site_id is not allowed for global source rules")
-        return self
-
-    @model_validator(mode="after")
     def validate_and_normalize_pattern(self) -> "SourceBlacklistCreate":
-        # Import lazily to keep this schema module usable by migration tools
-        # that load models without initializing the service layer.
-        from .services.cidr import normalize_source_blacklist_pattern
+        from .services.cidr import canonicalize_kind, normalize_source_blacklist_pattern
 
         try:
+            self.kind = canonicalize_kind(self.kind)  # type: ignore[assignment]
             self.pattern = normalize_source_blacklist_pattern(self.kind, self.pattern)
         except ValueError as exc:
             raise ValueError("invalid_source_blacklist_pattern") from exc
+        seen: list[str] = []
+        for raw in self.node_ids:
+            node_id = raw.strip()
+            if not node_id or node_id in seen:
+                continue
+            seen.append(node_id)
+        if not seen:
+            raise ValueError("blacklist_node_required")
+        self.node_ids = seen
         return self
 
 
 class SourceBlacklistOut(BaseModel):
     id: str
-    scope: Literal["global", "site"]
-    site_id: str | None
-    kind: Literal["ip", "network", "domain"]
+    node_id: str
+    direction: Literal["source", "destination"]
+    kind: Literal["ip", "cidr", "domain"]
     pattern: str
     comment: str
     enabled: bool
@@ -164,43 +174,36 @@ class SourceBlacklistOut(BaseModel):
 
 
 class SourceBlacklistPreviewRequest(BaseModel):
-    site_id: str = Field(max_length=128)
-    source_ip: str = Field(min_length=1, max_length=128)
+    node_id: str = Field(min_length=1, max_length=128)
+    source_ip: str = Field(default="", max_length=128)
+    dest_host: str = Field(default="", max_length=255)
 
 
 class SourceBlacklistPreviewResponse(BaseModel):
     allowed: bool | None = Field(
         description=(
-            "Whether the preview can affirmatively allow the source. Null means the "
-            "result is indeterminate until the monitor resolves domain rules."
+            "Whether the preview can affirmatively allow the request. Null means the "
+            "result is indeterminate until the monitor resolves source-domain rules."
         )
     )
     matched_pattern: str | None = None
     reason: str
+    blacklist: list[dict[str, Any]] = Field(default_factory=list)
     source_blacklist: list[dict[str, Any]] = Field(default_factory=list)
-    outcome: Literal["allowed", "blocked", "indeterminate"] = Field(
-        default="allowed",
-        description=(
-            "A domain rule is indeterminate here because the monitor resolves it with "
-            "its own local DNS before enforcement."
-        ),
-    )
-    unresolved_domain_patterns: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Domain blacklist patterns that cannot be evaluated from a source IP alone."
-        ),
-    )
+    outcome: Literal["allowed", "blocked", "indeterminate"] = Field(default="allowed")
+    unresolved_domain_patterns: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def mark_domain_only_preview_indeterminate(self) -> "SourceBlacklistPreviewResponse":
-        """Avoid claiming an IP is allowed when monitor DNS may deny it."""
-
+        rules = self.blacklist or self.source_blacklist
+        self.blacklist = rules
+        self.source_blacklist = rules
         self.unresolved_domain_patterns = sorted(
             {
                 str(rule.get("pattern") or "")
-                for rule in self.source_blacklist
-                if str(rule.get("kind") or "").lower() == "domain"
+                for rule in rules
+                if str(rule.get("direction") or "source") == "source"
+                and str(rule.get("kind") or "").lower() == "domain"
                 and rule.get("enabled", True) is not False
                 and str(rule.get("pattern") or "")
             }
@@ -381,11 +384,18 @@ class SourceBlacklistDistributionOut(BaseModel):
 
 
 class SourceBlacklistMutationOut(BaseModel):
-    """Rule mutation plus the normal releases created for affected sites."""
+    """Rule mutation plus the normal releases created for affected nodes."""
 
     rule: SourceBlacklistOut
+    rules: list[SourceBlacklistOut] = Field(default_factory=list)
     operation: Literal["created", "deleted"]
     distribution: list[SourceBlacklistDistributionOut] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def default_rules_from_primary(self) -> "SourceBlacklistMutationOut":
+        if not self.rules:
+            self.rules = [self.rule]
+        return self
 
 
 
@@ -529,14 +539,33 @@ class ConnectionTopItem(BaseModel):
     bytes_down: int = Field(default=0, ge=0)
 
 
+class ConnectionLiveItem(BaseModel):
+    id: str = Field(default="", max_length=128)
+    src_ip: str = Field(default="", max_length=64)
+    src_port: str = Field(default="", max_length=16)
+    dst_host: str = Field(default="", max_length=255)
+    dst_ip: str = Field(default="", max_length=64)
+    dst_port: str = Field(default="", max_length=16)
+    network: str = Field(default="", max_length=16)
+    inbound: str = Field(default="", max_length=64)
+    outbound_chain: list[str] = Field(default_factory=list, max_length=16)
+    bytes_up: int = Field(default=0, ge=0)
+    bytes_down: int = Field(default=0, ge=0)
+    start: str = Field(default="", max_length=64)
+    rule: str = Field(default="", max_length=128)
+
+
 class ConnectionSnapshotIn(BaseModel):
     sampled_at: datetime
     active_connections: int = Field(default=0, ge=0)
     bytes_up: int = Field(default=0, ge=0)
     bytes_down: int = Field(default=0, ge=0)
+    rx_bps: int = Field(default=0, ge=0)
+    tx_bps: int = Field(default=0, ge=0)
     top_sources: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
     top_destinations: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
     top_users: list[ConnectionTopItem] = Field(default_factory=list, max_length=20)
+    connections: list[ConnectionLiveItem] = Field(default_factory=list, max_length=100)
     api_available: bool = True
 
 
@@ -654,9 +683,12 @@ class ConnectionSnapshotOut(BaseModel):
     active_connections: int
     bytes_up: int
     bytes_down: int
+    rx_bps: int = 0
+    tx_bps: int = 0
     top_sources: list[ConnectionTopItem]
     top_destinations: list[ConnectionTopItem]
     top_users: list[ConnectionTopItem]
+    connections: list[ConnectionLiveItem] = Field(default_factory=list)
     api_available: bool
     received_at: datetime
 
@@ -748,6 +780,10 @@ class AgentHeartbeat(BaseModel):
     memory_bytes: int = 0
     spool_bytes: int = 0
     connections: int = 0
+    bytes_up: int = 0
+    bytes_down: int = 0
+    rx_bps: int = 0
+    tx_bps: int = 0
     bytes_last_minute: int = 0
     last_error: str = ""
     request_id: str = ""

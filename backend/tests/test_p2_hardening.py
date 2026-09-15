@@ -66,12 +66,17 @@ def test_source_blacklist_create_has_comment_limit():
     from pydantic import ValidationError
     
     # Valid
-    rule = SourceBlacklistCreate(kind="network", pattern="10.0.0.0/24", comment="Test rule")
+    rule = SourceBlacklistCreate(
+        node_ids=["node-a"], kind="network", pattern="10.0.0.0/24", comment="Test rule"
+    )
     assert rule.comment == "Test rule"
+    assert rule.kind == "cidr"
     
     # Comment too long (>512)
     with pytest.raises(ValidationError):
-        SourceBlacklistCreate(kind="network", pattern="10.0.0.0/24", comment="x" * 600)
+        SourceBlacklistCreate(
+            node_ids=["node-a"], kind="network", pattern="10.0.0.0/24", comment="x" * 600
+        )
 
 
 def test_subscription_publish_limits_site_list():
@@ -109,12 +114,12 @@ def test_source_blacklist_has_pattern_limit():
     from pydantic import ValidationError
     
     # Valid
-    rule = SourceBlacklistCreate(pattern="example.com", kind="domain")
+    rule = SourceBlacklistCreate(node_ids=["node-a"], pattern="example.com", kind="domain")
     assert rule.pattern == "example.com"
     
     # Pattern too long (>512)
     with pytest.raises(ValidationError):
-        SourceBlacklistCreate(pattern="x" * 600, kind="domain")
+        SourceBlacklistCreate(node_ids=["node-a"], pattern="x" * 600, kind="domain")
 
 
 # Test R4: sing-box binary integrity

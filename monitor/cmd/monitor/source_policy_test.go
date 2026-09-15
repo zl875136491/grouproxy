@@ -12,30 +12,27 @@ import (
 	"github.com/zl875136491/grouproxy/monitor/internal/routingdata"
 )
 
-func TestSourceBlacklistRulesSelectsGlobalAndSiteEntries(t *testing.T) {
+func TestSourceBlacklistRulesSelectsNodeEntries(t *testing.T) {
 	value := map[string]any{
 		"site_id": "site-a",
-		"source_blacklist": []any{
-			map[string]any{"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
-			map[string]any{"scope": "site", "site_id": "site-a", "kind": "network", "pattern": "2001:db8::/32"},
+		"blacklist": []any{
+			map[string]any{"direction": "source", "kind": "ip", "pattern": "192.0.2.1"},
+			map[string]any{"direction": "destination", "kind": "cidr", "pattern": "2001:db8::/32"},
 		},
 	}
 	rules := sourceBlacklistRules(value, "site-a")
 	if len(rules) != 2 {
-		t.Fatalf("rules = %#v, want global and matching site entries", rules)
+		t.Fatalf("rules = %#v, want source and destination entries", rules)
 	}
-	if rules[0].Kind != "ip" || rules[1].Kind != "network" {
+	if rules[0].Kind != "ip" || rules[1].Kind != "cidr" {
 		t.Fatalf("rules = %#v", rules)
 	}
 }
 
 func TestSourceBlacklistRulesIgnoresNestedMigrationShape(t *testing.T) {
 	value := map[string]any{
-		"source_blacklist": map[string]any{
+		"blacklist": map[string]any{
 			"global": []any{map[string]any{"kind": "domain", "pattern": "global.example"}},
-			"sites": map[string]any{
-				"site-a": []any{map[string]any{"kind": "ip", "pattern": "198.51.100.4"}},
-			},
 		},
 	}
 	rules := sourceBlacklistRules(value, "site-a")
@@ -46,12 +43,11 @@ func TestSourceBlacklistRulesIgnoresNestedMigrationShape(t *testing.T) {
 
 func TestSourceBlacklistRulesIgnoresRetiredAliasAndNonCanonicalEntries(t *testing.T) {
 	value := map[string]any{
-		"source_blacklist": []any{
-			map[string]any{"scope": "site", "site_id": "site-a", "kind": "cidr", "pattern": "192.0.2.0/24"},
+		"blacklist": []any{
 			map[string]any{"kind": "ip", "pattern": "192.0.2.1"},
 		},
 		"deny_sources": []any{
-			map[string]any{"scope": "global", "kind": "ip", "pattern": "198.51.100.1"},
+			map[string]any{"direction": "source", "kind": "ip", "pattern": "198.51.100.1"},
 		},
 	}
 	rules := sourceBlacklistRules(value, "site-a")
@@ -89,14 +85,15 @@ func TestResolveSourceDomainsAndRenderAsSourceIPs(t *testing.T) {
 	defer func() { lookupSourceDomainIPs = originalLookup }()
 
 	raw := []sourceBlacklistRule{
-		{Scope: "global", Kind: "ip", Pattern: "192.0.2.1"},
-		{Scope: "site", SiteID: "site-a", Kind: "domain", Pattern: "blocked.example"},
+		{Direction: "source", Kind: "ip", Pattern: "192.0.2.1"},
+		{Direction: "source", Kind: "domain", Pattern: "blocked.example"},
+		{Direction: "destination", Kind: "domain", Pattern: "ads.example"},
 	}
 	resolved, err := resolveSourceBlacklistRules(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("resolve source domains: %v", err)
 	}
-	if len(resolved) != 3 {
+	if len(resolved) != 4 {
 		t.Fatalf("resolved rules = %#v", resolved)
 	}
 
@@ -108,19 +105,26 @@ func TestResolveSourceDomainsAndRenderAsSourceIPs(t *testing.T) {
 	route := config["route"].(map[string]any)
 	rules := route["rules"].([]any)
 	foundIPs := map[string]bool{}
-	for _, raw := range rules {
-		rule := raw.(map[string]any)
+	foundDestDomain := false
+	for _, rawRule := range rules {
+		rule := rawRule.(map[string]any)
 		if _, exists := rule["source_domain"]; exists {
 			t.Fatalf("unsupported source_domain field rendered: %#v", rule)
 		}
 		if values, ok := rule["source_ip_cidr"].([]string); ok && len(values) == 1 {
 			foundIPs[values[0]] = true
 		}
+		if values, ok := rule["domain_suffix"].([]string); ok && len(values) == 1 && values[0] == "ads.example" {
+			foundDestDomain = true
+		}
 	}
 	for _, expected := range []string{"192.0.2.1", "198.51.100.10", "2001:db8::10"} {
 		if !foundIPs[expected] {
 			t.Fatalf("resolved source IP %q missing from route: %#v", expected, rules)
 		}
+	}
+	if !foundDestDomain {
+		t.Fatalf("destination domain rule missing from route: %#v", rules)
 	}
 }
 
@@ -132,7 +136,7 @@ func TestResolveSourceDomainFailureRejectsCandidate(t *testing.T) {
 	defer func() { lookupSourceDomainIPs = originalLookup }()
 
 	_, err := resolveSourceBlacklistRules(context.Background(), []sourceBlacklistRule{
-		{Kind: "domain", Pattern: "missing.example"},
+		{Direction: "source", Kind: "domain", Pattern: "missing.example"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "source_domain_resolution_failed") {
 		t.Fatalf("resolution error = %v", err)
@@ -144,11 +148,11 @@ func TestLastGoodSourceRulesUseMaterializedSnapshotDuringDNSFailure(t *testing.T
 	bundleValue := map[string]any{
 		"bundle_hash": "last-good-hash",
 		"site_id":     "site-a",
-		"source_blacklist": []any{map[string]any{
-			"scope": "site", "site_id": "site-a", "kind": "domain", "pattern": "blocked.example",
+		"blacklist": []any{map[string]any{
+			"direction": "source", "kind": "domain", "pattern": "blocked.example",
 		}},
 	}
-	materialized := []sourceBlacklistRule{{Scope: "site", SiteID: "site-a", Kind: "ip", Pattern: "198.51.100.25"}}
+	materialized := []sourceBlacklistRule{{Direction: "source", Kind: "ip", Pattern: "198.51.100.25"}}
 	if err := agent.persistLastGoodSourceBlacklistRules(bundleValue, materialized); err != nil {
 		t.Fatalf("persist source snapshot: %v", err)
 	}
@@ -176,8 +180,11 @@ func TestLastGoodSourceRulesIgnoreSnapshotForLegacyBundle(t *testing.T) {
 			"global": []any{map[string]any{"kind": "ip", "pattern": "192.0.2.1"}},
 		},
 	}
-	materialized := []sourceBlacklistRule{{Scope: "global", Kind: "ip", Pattern: "192.0.2.1"}}
-	if err := agent.persistLastGoodSourceBlacklistRules(legacy, materialized); err != nil {
+	materialized := []sourceBlacklistRule{{Direction: "source", Kind: "ip", Pattern: "192.0.2.1"}}
+	if err := agent.persistLastGoodSourceBlacklistRules(map[string]any{
+		"bundle_hash": "legacy-hash",
+		"blacklist":   []any{},
+	}, materialized); err != nil {
 		t.Fatalf("persist legacy source snapshot: %v", err)
 	}
 
@@ -193,12 +200,12 @@ func TestLastGoodSourceRulesIgnoreSnapshotForLegacyBundle(t *testing.T) {
 func TestLastGoodSourceRulesIgnoreSnapshotWhenRetiredAliasRemains(t *testing.T) {
 	agent := &agent{cfg: config.Config{StateDir: t.TempDir()}}
 	legacy := map[string]any{
-		"bundle_hash":      "legacy-alias-hash",
-		"site_id":          "site-a",
-		"source_blacklist": []any{},
-		"deny_sources":     []any{},
+		"bundle_hash": "legacy-alias-hash",
+		"site_id":     "site-a",
+		"blacklist":   []any{},
+		"deny_sources": []any{},
 	}
-	materialized := []sourceBlacklistRule{{Scope: "global", Kind: "ip", Pattern: "192.0.2.1"}}
+	materialized := []sourceBlacklistRule{{Direction: "source", Kind: "ip", Pattern: "192.0.2.1"}}
 	if err := agent.persistLastGoodSourceBlacklistRules(legacy, materialized); err != nil {
 		t.Fatalf("persist legacy alias source snapshot: %v", err)
 	}
@@ -225,7 +232,7 @@ func TestEnsureSourceBlacklistRulesRemovesRetiredInvertedRule(t *testing.T) {
 			map[string]any{"type": "block", "tag": "block"},
 		},
 	}
-	if !ensureSourceBlacklistRules(config, []sourceBlacklistRule{{Scope: "global", Kind: "ip", Pattern: "192.0.2.1"}}) {
+	if !ensureSourceBlacklistRules(config, []sourceBlacklistRule{{Direction: "source", Kind: "ip", Pattern: "192.0.2.1"}}) {
 		t.Fatal("expected persisted route migration")
 	}
 	rules := config["route"].(map[string]any)["rules"].([]any)
@@ -258,24 +265,24 @@ func TestSanitizeLegacyBundleRemovesRetiredPolicyFields(t *testing.T) {
 	if !sanitizeLegacyBundle(value) {
 		t.Fatal("expected legacy policy fields to be removed")
 	}
-	for _, key := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
+	for _, key := range []string{"allow_cidrs", "deny_destinations", "deny_sources", "source_blacklist"} {
 		if _, exists := value[key]; exists {
 			t.Fatalf("retired policy field %q survived sanitization", key)
 		}
 	}
-	if raw, exists := value["source_blacklist"].([]any); !exists || len(raw) != 0 {
-		t.Fatalf("legacy source blacklist was not reset to the empty canonical baseline: %#v", value["source_blacklist"])
+	if raw, exists := value["blacklist"].([]any); !exists || len(raw) != 0 {
+		t.Fatalf("legacy source blacklist was not reset to the empty canonical baseline: %#v", value["blacklist"])
 	}
 	if !hasRetiredSourcePolicy(map[string]any{"deny_sources": []any{}}) {
 		t.Fatal("retired alias was not detected for snapshot invalidation")
 	}
 
 	canonical := map[string]any{
-		"source_blacklist": []any{map[string]any{
-			"scope": "global", "kind": "ip", "pattern": "192.0.2.10",
+		"blacklist": []any{map[string]any{
+			"direction": "source", "kind": "ip", "pattern": "192.0.2.10",
 		}},
 	}
 	if hasRetiredSourcePolicy(canonical) || sanitizeLegacyBundle(canonical) {
-		t.Fatalf("canonical flat source blacklist was unexpectedly sanitized: %#v", canonical)
+		t.Fatalf("canonical blacklist was unexpectedly sanitized: %#v", canonical)
 	}
 }

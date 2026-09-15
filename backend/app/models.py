@@ -22,7 +22,7 @@ class AdminUser(Document):
     itcode: str = ""
     password_hash: str
     is_active: bool = True
-    role: Literal["admin", "employee"] = "employee"
+    role: Literal["root", "admin", "employee"] = "employee"
     auth_source: str = "local"
     password_changed_at: datetime | None = None
     last_login_at: datetime | None = None
@@ -122,6 +122,11 @@ class Node(Document):
     service_status: str = "unknown"
     subscription_status: str = "not_configured"
     probe_status: str = "unknown"
+    active_connections: int = 0
+    bytes_up: int = 0
+    bytes_down: int = 0
+    rx_bps: int = 0
+    tx_bps: int = 0
     last_error: str = ""
     last_error_at: datetime | None = None
     last_successful_reload_at: datetime | None = None
@@ -129,17 +134,16 @@ class Node(Document):
 
 
 class SourceBlacklist(Document):
-    """Explicit source-side deny rule.
+    """Node-scoped deny rule for a source or destination.
 
-    Source access is allow-all by default.  Rules may apply to every site or
-    to one site only and are carried into the node bundle for enforcement by
-    the monitor.  Legacy policy collections are intentionally not registered
-    with the control plane, so old records cannot silently deny new traffic.
+    Access is allow-all by default. A rule is stored and released per node, so
+    one site's nodes never inherit another node's blacklist. ``kind`` uses
+    ``cidr`` for networks; the retired ``network`` alias is normalized on write.
     """
 
-    scope: Literal["global", "site"] = "global"
-    site_id: str | None = None
-    kind: Literal["ip", "network", "domain"] = "domain"
+    node_id: str
+    direction: Literal["source", "destination"] = "source"
+    kind: Literal["ip", "cidr", "domain"] = "domain"
     pattern: str
     comment: str = ""
     enabled: bool = True
@@ -150,17 +154,17 @@ class SourceBlacklist(Document):
         indexes = [
             IndexModel(
                 [
-                    ("scope", ASCENDING),
-                    ("site_id", ASCENDING),
+                    ("node_id", ASCENDING),
+                    ("direction", ASCENDING),
                     ("kind", ASCENDING),
                     ("pattern", ASCENDING),
                 ],
-                name="unique_source_blacklist_rule",
+                name="unique_node_blacklist_rule",
                 unique=True,
             ),
             IndexModel(
-                [("site_id", ASCENDING), ("enabled", ASCENDING)],
-                name="source_blacklist_site_enabled",
+                [("node_id", ASCENDING), ("enabled", ASCENDING)],
+                name="blacklist_node_enabled",
             ),
         ]
 
@@ -448,9 +452,12 @@ class ConnectionSnapshot(Document):
     active_connections: int = 0
     bytes_up: int = 0
     bytes_down: int = 0
+    rx_bps: int = 0
+    tx_bps: int = 0
     top_sources: list[dict[str, Any]] = Field(default_factory=list)
     top_destinations: list[dict[str, Any]] = Field(default_factory=list)
     top_users: list[dict[str, Any]] = Field(default_factory=list)
+    connections: list[dict[str, Any]] = Field(default_factory=list)
     api_available: bool = True
     received_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime = Field(default_factory=utcnow)

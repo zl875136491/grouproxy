@@ -10,7 +10,7 @@ from ..models import (
     SiteSubscription,
     SubscriptionVersion,
 )
-from .cidr import effective_source_blacklist
+from .cidr import effective_blacklist
 from .crypto import sign_bundle
 from .subscriptions import subscription_outbound_tags
 
@@ -22,6 +22,7 @@ RETIRED_POLICY_FIELDS = frozenset(
         "acl_note",
         "acl_sources",
         "effective_cidrs",
+        "source_blacklist",
     }
 )
 
@@ -180,7 +181,7 @@ async def build_signed_bundle(
     settings: Settings,
     proxy_selection: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    source_blacklist = await effective_source_blacklist(str(site.id))
+    blacklist = await effective_blacklist(node.agent_id)
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
     selected_tags = (
@@ -190,14 +191,14 @@ async def build_signed_bundle(
         "schema_version": 1,
         "release_id": release_id,
         "desired_version": desired_version,
-        "min_monitor_version": "0.5.0",
+        "min_monitor_version": "0.6.0",
         "site_id": str(site.id),
         "node_id": node.agent_id,
         "shutdown": site.shutdown,
         "listen": {"http_port": PROXY_LISTEN_PORT},
-        # Source access is allow-all by default.  Only explicit blacklist
-        # entries are carried to the monitor and rendered as deny rules.
-        "source_blacklist": source_blacklist,
+        # Access is allow-all by default. Only this node's blacklist is
+        # carried to the monitor and rendered as deny rules.
+        "blacklist": blacklist,
         "subscription": subscription,
         "issued_at": iso(now),
         "expires_at": iso(now + timedelta(days=settings.bundle_ttl_days)),

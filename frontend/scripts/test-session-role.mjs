@@ -56,6 +56,11 @@ assert.equal(hasAuthenticatedSession(), true);
 assert.equal(hasManagementSession(), true);
 assert.equal(managementSessionRole(), "admin");
 
+saveManagementSession("root-token", "root", "2099-01-01T00:00:00Z");
+assert.equal(hasAuthenticatedSession(), true);
+assert.equal(hasManagementSession(), true);
+assert.equal(managementSessionRole(), "root");
+
 saveManagementSession("expired-token", "admin", "2000-01-01T00:00:00Z");
 assert.equal(hasManagementSession(), false);
 assert.equal(managementSessionRole(), null);

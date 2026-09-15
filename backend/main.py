@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pymongo.errors import DuplicateKeyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.config import PROXY_LISTEN_PORT, Settings, get_settings
+from app.config import PROXY_LISTEN_PORT, ROOT_ITCODE, Settings, get_settings, is_management_role
 from app.db import Database
 from app.models import (
     AccessLog,
@@ -100,6 +100,7 @@ from app.schemas import (
     ProxyEndpointSnapshot,
     ProxyGroupSnapshot,
     ProxySelectionRequest,
+    RoleUpdate,
     RegistrationRequest,
     ReleaseCreate,
     ReleaseDetailOut,
@@ -155,10 +156,9 @@ from app.services.bundles import (
     strip_retired_policy_fields,
 )
 from app.services.cidr import (
-    effective_source_blacklist,
-    match_source_blacklist,
-    normalize_source_blacklist_pattern,
+    effective_blacklist,
     normalize_source_ip,
+    preview_source_blacklist as preview_blacklist_helper,
 )
 from app.services.probes import record_probe_result
 from app.services.subscription_worker import SubscriptionWorker, enqueue_refresh_task
@@ -411,8 +411,12 @@ def _site_out(site: Site) -> SiteOut:
     )
 
 def _employee_out(user: AdminUser) -> EmployeeOut:
+    role = getattr(user, "role", "employee") or "employee"
+    if role not in {"root", "admin", "employee"}:
+        role = "employee"
     return EmployeeOut(
         itcode=user.itcode or user.username,
+        role=role,
         auth_source=user.auth_source,
         is_active=user.is_active,
         created_at=user.created_at,
@@ -439,6 +443,11 @@ def _node_out(node: Node) -> NodeOut:
         service_status=node.service_status,
         subscription_status=node.subscription_status,
         probe_status=node.probe_status,
+        active_connections=node.active_connections,
+        bytes_up=node.bytes_up,
+        bytes_down=node.bytes_down,
+        rx_bps=node.rx_bps,
+        tx_bps=node.tx_bps,
         last_error=node.last_error,
     )
 
@@ -501,11 +510,15 @@ def _task_out(task: Task) -> TaskOut:
 
 
 def _source_blacklist_out(item: SourceBlacklist) -> SourceBlacklistOut:
+    kind = getattr(item, "kind", "domain") or "domain"
+    if kind == "network":
+        kind = "cidr"
+    direction = getattr(item, "direction", "source") or "source"
     return SourceBlacklistOut(
         id=_model_id(item),
-        scope=item.scope,
-        site_id=item.site_id,
-        kind=item.kind,
+        node_id=getattr(item, "node_id", "") or "",
+        direction=direction,
+        kind=kind,
         pattern=item.pattern,
         comment=item.comment,
         enabled=item.enabled,
@@ -693,9 +706,12 @@ def _connection_out(item: ConnectionSnapshot) -> ConnectionSnapshotOut:
         active_connections=item.active_connections,
         bytes_up=item.bytes_up,
         bytes_down=item.bytes_down,
+        rx_bps=getattr(item, "rx_bps", 0),
+        tx_bps=getattr(item, "tx_bps", 0),
         top_sources=item.top_sources,
         top_destinations=item.top_destinations,
         top_users=item.top_users,
+        connections=getattr(item, "connections", []) or [],
         api_available=item.api_available,
         received_at=item.received_at,
     )
@@ -901,6 +917,26 @@ def _safe_probe_target(value: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path or "/", "", ""))
 
 
+async def _purge_telemetry_batches(*, node_id: str, kind: str) -> None:
+    """Drop prior-process sequence markers so a monitor restart can ingest again."""
+
+    await TelemetryBatch.get_motor_collection().delete_many(
+        {"node_id": node_id, "kind": kind}
+    )
+
+
+def _new_telemetry_batch(
+    *, node_id: str, kind: str, batch_id: str, sequence: int, item_count: int
+) -> TelemetryBatch:
+    return TelemetryBatch(
+        node_id=node_id,
+        kind=kind,
+        batch_id=batch_id,
+        sequence=sequence,
+        item_count=item_count,
+    )
+
+
 async def _accept_telemetry_batch(
     *, node: Node, kind: str, batch_id: str, sequence: int, item_count: int
 ) -> bool:
@@ -910,6 +946,11 @@ async def _accept_telemetry_batch(
     The cursor update below is conditional in MongoDB, so only the request with
     the highest sequence can advance it; the unique batch/sequence indexes then
     make replayed payloads idempotent.
+
+    Monitor sequence counters are per process. After a node is re-imaged or the
+    state file is reset, the same (node_id, kind, sequence) values can reappear
+    with a new batch_id. Those collisions must purge the old markers instead of
+    silently dropping live connection and traffic snapshots.
     """
 
     existing = await TelemetryBatch.find_one(
@@ -923,6 +964,7 @@ async def _accept_telemetry_batch(
     cursor_collection = TelemetryCursor.get_motor_collection()
     current = utcnow()
     cursor_filter = {"node_id": node.agent_id, "kind": kind}
+    sequence_restarted = False
     advanced = await cursor_collection.update_one(
         {**cursor_filter, "last_sequence": {"$lt": sequence}},
         {
@@ -934,40 +976,74 @@ async def _accept_telemetry_batch(
         },
     )
     if advanced.matched_count == 0:
+        restarted = await cursor_collection.update_one(
+            {**cursor_filter, "last_sequence": {"$gt": sequence}},
+            {
+                "$set": {
+                    "last_sequence": sequence,
+                    "last_batch_id": batch_id,
+                    "updated_at": current,
+                }
+            },
+        )
+        if restarted.matched_count > 0:
+            sequence_restarted = True
+        else:
+            try:
+                await TelemetryCursor(
+                    node_id=node.agent_id,
+                    kind=kind,
+                    last_sequence=sequence,
+                    last_batch_id=batch_id,
+                    updated_at=current,
+                ).insert()
+            except DuplicateKeyError:
+                # Another request created the cursor between the conditional update
+                # and insert. Retry the same atomic comparison once.
+                advanced = await cursor_collection.update_one(
+                    {**cursor_filter, "last_sequence": {"$lt": sequence}},
+                    {
+                        "$set": {
+                            "last_sequence": sequence,
+                            "last_batch_id": batch_id,
+                            "updated_at": current,
+                        }
+                    },
+                )
+                if advanced.matched_count == 0:
+                    return False
+
+    if sequence_restarted:
+        await _purge_telemetry_batches(node_id=node.agent_id, kind=kind)
+
+    batch = _new_telemetry_batch(
+        node_id=node.agent_id,
+        kind=kind,
+        batch_id=batch_id,
+        sequence=sequence,
+        item_count=item_count,
+    )
+    try:
+        await batch.insert()
+    except DuplicateKeyError:
+        collision = await TelemetryBatch.find_one(
+            TelemetryBatch.node_id == node.agent_id,
+            TelemetryBatch.kind == kind,
+            TelemetryBatch.sequence == sequence,
+        )
+        if collision is None or collision.batch_id == batch_id:
+            return False
+        await _purge_telemetry_batches(node_id=node.agent_id, kind=kind)
         try:
-            await TelemetryCursor(
+            await _new_telemetry_batch(
                 node_id=node.agent_id,
                 kind=kind,
-                last_sequence=sequence,
-                last_batch_id=batch_id,
-                updated_at=current,
+                batch_id=batch_id,
+                sequence=sequence,
+                item_count=item_count,
             ).insert()
         except DuplicateKeyError:
-            # Another request created the cursor between the conditional update
-            # and insert. Retry the same atomic comparison once.
-            advanced = await cursor_collection.update_one(
-                {**cursor_filter, "last_sequence": {"$lt": sequence}},
-                {
-                    "$set": {
-                        "last_sequence": sequence,
-                        "last_batch_id": batch_id,
-                        "updated_at": current,
-                    }
-                },
-            )
-            if advanced.matched_count == 0:
-                return False
-
-    try:
-        await TelemetryBatch(
-            node_id=node.agent_id,
-            kind=kind,
-            batch_id=batch_id,
-            sequence=sequence,
-            item_count=item_count,
-        ).insert()
-    except DuplicateKeyError:
-        return False
+            return False
     return True
 
 
@@ -1085,69 +1161,80 @@ class _SourceBlacklistDistribution:
     targets: list[SourceBlacklistDistributionOut]
 
 
-async def _source_blacklist_target_sites(
-    *, scope: str, site_id: str | None
-) -> list[Site]:
-    """Resolve the sites affected by a global or site-scoped rule."""
-
-    if scope == "global":
-        return await Site.find_all().sort(+Site.slug).to_list()
-    site = await Site.get(site_id or "")
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    return [site]
+async def _blacklist_nodes(node_ids: list[str]) -> list[Node]:
+    nodes: list[Node] = []
+    seen: set[str] = set()
+    for raw in node_ids:
+        node_id = raw.strip()
+        if not node_id or node_id in seen:
+            continue
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        seen.add(node.agent_id)
+        nodes.append(node)
+    if not nodes:
+        raise HTTPException(422, "blacklist_node_required")
+    return nodes
 
 
 async def _source_blacklist_no_effect_distribution(
-    *, scope: str, site_id: str | None
+    *, node_ids: list[str]
 ) -> list[SourceBlacklistDistributionOut]:
-    """Describe an inert rule mutation without creating a release."""
-
-    targets: list[SourceBlacklistDistributionOut] = []
-    for site in await _source_blacklist_target_sites(scope=scope, site_id=site_id):
-        target_site_id = _model_id(site)
-        nodes = await Node.find({"site_id": target_site_id}).to_list()
-        targets.append(
-            SourceBlacklistDistributionOut(
-                site_id=target_site_id,
-                node_ids=[node.agent_id for node in nodes],
-                state="no_effect",
-                release=None,
-            )
+    nodes = await _blacklist_nodes(node_ids)
+    grouped: dict[str, list[str]] = {}
+    for node in nodes:
+        grouped.setdefault(node.site_id, []).append(node.agent_id)
+    return [
+        SourceBlacklistDistributionOut(
+            site_id=site_id,
+            node_ids=agent_ids,
+            state="no_effect",
+            release=None,
         )
-    return targets
+        for site_id, agent_ids in grouped.items()
+    ]
 
 
 async def _source_blacklist_release_plans(
-    *, scope: str, site_id: str | None
+    *, node_ids: list[str]
 ) -> list[_SourceBlacklistReleasePlan]:
-    """Snapshot targets and reject policy changes that would supersede a release.
-
-    Agents always request the newest desired bundle. Generating another desired
-    release while one is still applying would let an agent skip the earlier
-    bundle, leaving its ConfigRelease permanently waiting for an ACK. Check
-    every affected site before the rule itself is changed so a global update is
-    all-or-nothing with respect to active releases.
-    """
-
-    sites = await _source_blacklist_target_sites(scope=scope, site_id=site_id)
-
+    nodes = await _blacklist_nodes(node_ids)
+    grouped: dict[str, list[Node]] = {}
+    for node in nodes:
+        grouped.setdefault(node.site_id, []).append(node)
     plans: list[_SourceBlacklistReleasePlan] = []
-    for site in sites:
-        target_site_id = _model_id(site)
-        nodes = await Node.find({"site_id": target_site_id}).to_list()
-        active = await _active_config_release_for_nodes(nodes)
+    for site_id, site_nodes in grouped.items():
+        site = await Site.get(site_id)
+        if site is None:
+            raise HTTPException(404, "site_not_found")
+        active = await _active_config_release_for_nodes(site_nodes)
         if active is not None:
             raise HTTPException(
                 409,
                 {
                     "code": "source_blacklist_release_in_progress",
-                    "site_id": target_site_id,
+                    "site_id": site_id,
                     "release_id": active.release_id,
                 },
             )
-        plans.append(_SourceBlacklistReleasePlan(site=site, nodes=nodes))
+        plans.append(_SourceBlacklistReleasePlan(site=site, nodes=site_nodes))
     return plans
+
+
+async def _blacklist_validation_for_nodes(nodes: list[Node]) -> dict[str, Any]:
+    """Informational draft validation; each node's signed bundle is independent."""
+
+    rules: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for node in nodes:
+        for rule in await effective_blacklist(node.agent_id):
+            key = (rule["direction"], rule["kind"], rule["pattern"])
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(rule)
+    return {"valid": True, "errors": [], "blacklist": rules}
 
 
 async def seed_defaults(settings: Settings) -> None:
@@ -1157,30 +1244,60 @@ async def seed_defaults(settings: Settings) -> None:
                 await Site(
                     slug=slug, name=name, dns_note="Configure local DNS to this site node"
                 ).insert()
-    admin_itcode = normalize_itcode(settings.admin_username)
-    admin = await AdminUser.find_one(AdminUser.username == settings.admin_username)
-    if admin is None:
-        await AdminUser(
-            username=settings.admin_username,
-            itcode=admin_itcode,
-            password_hash=hash_password(settings.admin_password),
+    await _ensure_operator_account(
+        itcode=ROOT_ITCODE,
+        role="root",
+        password=settings.admin_password,
+        sync_password=settings.environment in {"test", "development"},
+    )
+    configured = normalize_itcode(settings.admin_username)
+    if configured != ROOT_ITCODE:
+        await _ensure_operator_account(
+            itcode=configured,
             role="admin",
+            password=settings.admin_password,
+            sync_password=settings.environment in {"test", "development"},
+        )
+
+
+async def _ensure_operator_account(
+    *, itcode: str, role: str, password: str, sync_password: bool = False
+) -> None:
+    user = await find_user_by_itcode(itcode)
+    if user is None:
+        user = await AdminUser.find_one(AdminUser.username == itcode)
+    if user is None:
+        await AdminUser(
+            username=itcode,
+            itcode=itcode,
+            password_hash=hash_password(password),
+            role=role,
             auth_source="local",
             password_changed_at=utcnow(),
         ).insert()
-    else:
-        changed = False
-        if not admin.itcode:
-            admin.itcode = admin_itcode
+        return
+    changed = False
+    if not user.itcode:
+        user.itcode = itcode
+        changed = True
+    if sync_password and user.auth_source == "local":
+        user.password_hash = hash_password(password)
+        changed = True
+    if itcode == ROOT_ITCODE:
+        if user.role != "root":
+            user.role = "root"
             changed = True
-        # Existing installations predate roles. Only the configured bootstrap
-        # account is migrated to admin; self-registered accounts remain least
-        # privileged even if they held an older browser session.
-        if admin.role != "admin":
-            admin.role = "admin"
+        if not user.is_active:
+            user.is_active = True
             changed = True
-        if changed:
-            await admin.save()
+    elif user.role == "employee":
+        # Bootstrap the configured operator without promoting later
+        # self-registered accounts that happen to share a historical username.
+        if user.username == itcode and user.auth_source == "local" and not user.last_login_at:
+            user.role = role
+            changed = True
+    if changed:
+        await user.save()
 
 
 @asynccontextmanager
@@ -1255,7 +1372,7 @@ async def lifespan(app: FastAPI):
         await database.close()
 
 
-app = FastAPI(title="Grouproxy Control Plane", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="Grouproxy Control Plane", version="0.6.0", lifespan=lifespan)
 
 # CORS: strict origin allowlist, no wildcard ports. Production same-origin
 # deploys (dashboard and backend both served from the same domain) should set
@@ -1339,7 +1456,7 @@ async def healthz() -> dict[str, str]:
     # Keep the deployed API version visible without requiring management
     # authentication.  This makes stale dashboard/backend processes obvious
     # when a newly added route is reported as 404.
-    return {"status": "ok", "service": "grouproxy-backend", "version": "0.5.0"}
+    return {"status": "ok", "service": "grouproxy-backend", "version": "0.6.0"}
 
 
 @app.get("/readyz")
@@ -1366,7 +1483,8 @@ async def require_authenticated(request: Request) -> AuthenticatedPrincipal:
     token = authorization.removeprefix("Bearer ").strip()
     if token and hmac.compare_digest(token, settings.management_token):
         return AuthenticatedPrincipal(
-            itcode=normalize_itcode(settings.admin_username), role="admin"
+            itcode=normalize_itcode(settings.admin_username),
+            role="root" if normalize_itcode(settings.admin_username) == ROOT_ITCODE else "admin",
         )
     if not token:
         raise HTTPException(
@@ -1383,7 +1501,7 @@ async def require_authenticated(request: Request) -> AuthenticatedPrincipal:
 
 async def require_management(request: Request) -> str:
     principal = await require_authenticated(request)
-    if principal.role != "admin":
+    if not is_management_role(principal.role):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="management_admin_required"
         )
@@ -1667,15 +1785,47 @@ async def logout(
 
 
 @app.get("/api/v1/employees", response_model=list[EmployeeOut])
+@app.get("/api/v1/users", response_model=list[EmployeeOut])
 async def list_employees(_: str = Depends(require_management)) -> list[EmployeeOut]:
-    """List employee identities without exposing password or session material."""
+    """List accounts without exposing password or session material."""
 
-    employees = (
-        await AdminUser.find({"role": "employee"})
-        .sort("+itcode")
-        .to_list()
-    )
+    employees = await AdminUser.find_all().sort("+itcode").to_list()
     return [_employee_out(employee) for employee in employees]
+
+
+@app.patch("/api/v1/users/{itcode}/role", response_model=EmployeeOut)
+async def update_user_role(
+    itcode: str,
+    payload: RoleUpdate,
+    request: Request,
+    actor: str = Depends(require_management),
+) -> EmployeeOut:
+    target_itcode = normalize_itcode(itcode)
+    if target_itcode == ROOT_ITCODE:
+        raise HTTPException(409, "root_role_immutable")
+    user = await find_user_by_itcode(target_itcode)
+    if user is None:
+        raise HTTPException(404, "account_not_found")
+    if user.role == "root":
+        raise HTTPException(409, "root_role_immutable")
+    before = {"itcode": user.itcode, "role": user.role}
+    if user.role != payload.role:
+        user.role = payload.role
+        await user.save()
+        if payload.role == "employee":
+            await revoke_user_sessions(user)
+        await append_audit(
+            action="user.role.update",
+            target_type="admin_user",
+            target_id=user.itcode,
+            actor=actor,
+            actor_role="admin",
+            request_id=_request_id(request),
+            source_ip=_request_source_ip(request),
+            before=before,
+            after={"itcode": user.itcode, "role": user.role},
+        )
+    return _employee_out(user)
 
 
 @app.get("/api/v1/sites", response_model=list[SiteOut])
@@ -1818,12 +1968,17 @@ async def update_node(
     return _node_out(node)
 
 
+@app.get("/api/v1/blacklist", response_model=list[SourceBlacklistOut])
 @app.get("/api/v1/source-blacklist", response_model=list[SourceBlacklistOut])
 async def list_source_blacklist(_: str = Depends(require_management)) -> list[SourceBlacklistOut]:
     entries = await SourceBlacklist.find_all().sort(+SourceBlacklist.created_at).to_list()
     return [_source_blacklist_out(item) for item in entries]
 
 
+@app.post(
+    "/api/v1/blacklist/preview",
+    response_model=SourceBlacklistPreviewResponse,
+)
 @app.post(
     "/api/v1/source-blacklist/preview",
     response_model=SourceBlacklistPreviewResponse,
@@ -1832,35 +1987,44 @@ async def preview_source_blacklist(
     payload: SourceBlacklistPreviewRequest,
     _: str = Depends(require_management),
 ) -> SourceBlacklistPreviewResponse:
-    """Preview source access using the explicit blacklist for one site.
+    """Preview source or destination access against one node's blacklist."""
 
-    A request contains only an address, so domain rules are listed in the
-    response but are materialized by the monitor when it resolves the bundle.
-    """
-
-    try:
-        source_ip = normalize_source_ip(payload.source_ip)
-    except ValueError as exc:
-        raise HTTPException(422, "invalid_source_ip") from exc
-    site = await Site.get(payload.site_id)
-    if site is None:
-        raise HTTPException(404, "site_not_found")
-    source_rules = await effective_source_blacklist(payload.site_id)
-    match = match_source_blacklist(source_ip, source_rules)
-    if site.shutdown:
-        reason = "shutdown"
-    elif match is not None:
-        reason = "source_blacklisted"
-    else:
-        reason = "allowed"
+    source_ip = payload.source_ip.strip()
+    dest_host = payload.dest_host.strip()
+    if not source_ip and not dest_host:
+        raise HTTPException(422, "preview_target_required")
+    if source_ip:
+        try:
+            source_ip = normalize_source_ip(source_ip)
+        except ValueError as exc:
+            raise HTTPException(422, "invalid_source_ip") from exc
+    node = await _find_node_reference(payload.node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    site = await Site.get(node.site_id)
+    rules = await effective_blacklist(node.agent_id)
+    preview = preview_blacklist_helper(
+        source_ip,
+        rules,
+        site_shutdown=bool(site and site.shutdown),
+        dest_host=dest_host or None,
+    )
     return SourceBlacklistPreviewResponse(
-        allowed=match is None and not site.shutdown,
-        matched_pattern=match,
-        reason=reason,
-        source_blacklist=source_rules,
+        allowed=preview["allowed"],
+        matched_pattern=preview["matched_pattern"],
+        reason=str(preview["reason"]),
+        blacklist=rules,
+        source_blacklist=rules,
+        outcome=preview["outcome"],  # type: ignore[arg-type]
+        unresolved_domain_patterns=list(preview["unresolved_domain_patterns"]),
     )
 
 
+@app.post(
+    "/api/v1/blacklist",
+    response_model=SourceBlacklistMutationOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 @app.post(
     "/api/v1/source-blacklist",
     response_model=SourceBlacklistMutationOut,
@@ -1871,49 +2035,39 @@ async def add_source_blacklist(
     request: Request,
     _: str = Depends(require_management),
 ) -> SourceBlacklistMutationOut:
-    site_id = payload.site_id.strip() if payload.site_id else None
-    if payload.scope == "site":
-        if not site_id:
-            raise HTTPException(422, "source_blacklist_site_required")
-        if await Site.get(site_id) is None:
-            raise HTTPException(404, "site_not_found")
-    elif site_id:
-        raise HTTPException(422, "source_blacklist_global_site_forbidden")
-    try:
-        pattern = normalize_source_blacklist_pattern(payload.kind, payload.pattern)
-    except ValueError as exc:
-        raise HTTPException(422, "invalid_source_blacklist_pattern") from exc
-    existing = await SourceBlacklist.find_one(
-        SourceBlacklist.scope == payload.scope,
-        SourceBlacklist.site_id == site_id,
-        SourceBlacklist.kind == payload.kind,
-        SourceBlacklist.pattern == pattern,
-    )
-    if existing is not None:
-        raise HTTPException(409, "source_blacklist_entry_exists")
+    pattern = payload.pattern
+    node_ids = list(payload.node_ids)
+    for node_id in node_ids:
+        existing = await SourceBlacklist.find_one(
+            SourceBlacklist.node_id == node_id,
+            SourceBlacklist.direction == payload.direction,
+            SourceBlacklist.kind == payload.kind,
+            SourceBlacklist.pattern == pattern,
+        )
+        if existing is not None:
+            raise HTTPException(409, "source_blacklist_entry_exists")
 
-    # An enabled rule changes the next bundle. Resolve all sites and verify
-    # that none has an in-flight release before persisting it, otherwise a
-    # monitor could skip the old desired bundle and strand its release.
     plans = (
-        await _source_blacklist_release_plans(scope=payload.scope, site_id=site_id)
-        if payload.enabled
-        else []
+        await _source_blacklist_release_plans(node_ids=node_ids) if payload.enabled else []
     )
-    item = SourceBlacklist(
-        scope=payload.scope,
-        site_id=site_id,
-        kind=payload.kind,
-        pattern=pattern,
-        comment=payload.comment.strip(),
-        enabled=payload.enabled,
-        created_by=_actor(),
-    )
-    await item.insert()
+    created: list[SourceBlacklist] = []
+    for node_id in node_ids:
+        item = SourceBlacklist(
+            node_id=node_id,
+            direction=payload.direction,
+            kind=payload.kind,
+            pattern=pattern,
+            comment=payload.comment.strip(),
+            enabled=payload.enabled,
+            created_by=_actor(),
+        )
+        await item.insert()
+        created.append(item)
     request_id = _request_id(request)
-    if item.enabled:
+    representative = created[0]
+    if payload.enabled:
         distribution = await _distribute_source_blacklist_change(
-            rule=item,
+            rule=representative,
             operation="created",
             plans=plans,
             actor=_actor(),
@@ -1921,35 +2075,39 @@ async def add_source_blacklist(
         )
         targets = distribution.targets
     else:
-        targets = await _source_blacklist_no_effect_distribution(
-            scope=item.scope,
-            site_id=item.site_id,
-        )
+        targets = await _source_blacklist_no_effect_distribution(node_ids=node_ids)
     await append_audit(
         action="source_blacklist.create",
         target_type="source_blacklist",
-        target_id=_model_id(item),
+        target_id=_model_id(representative),
         actor=_actor(),
         request_id=request_id,
         source_ip=_request_source_ip(request),
         after={
-            "scope": item.scope,
-            "site_id": item.site_id,
-            "kind": item.kind,
-            "pattern": item.pattern,
-            "enabled": item.enabled,
+            "node_ids": node_ids,
+            "direction": payload.direction,
+            "kind": payload.kind,
+            "pattern": pattern,
+            "enabled": payload.enabled,
+            "rule_ids": [_model_id(item) for item in created],
             "release_ids": [
                 target.release.release_id for target in targets if target.release is not None
             ],
         },
     )
+    outs = [_source_blacklist_out(item) for item in created]
     return SourceBlacklistMutationOut(
-        rule=_source_blacklist_out(item),
+        rule=outs[0],
+        rules=outs,
         operation="created",
         distribution=targets,
     )
 
 
+@app.delete(
+    "/api/v1/blacklist/{entry_id}",
+    response_model=SourceBlacklistMutationOut,
+)
 @app.delete(
     "/api/v1/source-blacklist/{entry_id}",
     response_model=SourceBlacklistMutationOut,
@@ -1963,12 +2121,8 @@ async def delete_source_blacklist(
     if item is None:
         raise HTTPException(404, "source_blacklist_entry_not_found")
 
-    # Preflight before deleting an effective rule. A rejected preflight leaves
-    # the persisted rule exactly as it was and avoids partial global rollout.
     plans = (
-        await _source_blacklist_release_plans(scope=item.scope, site_id=item.site_id)
-        if item.enabled
-        else []
+        await _source_blacklist_release_plans(node_ids=[item.node_id]) if item.enabled else []
     )
     rule = _source_blacklist_out(item)
     await item.delete()
@@ -1983,10 +2137,7 @@ async def delete_source_blacklist(
         )
         targets = distribution.targets
     else:
-        targets = await _source_blacklist_no_effect_distribution(
-            scope=item.scope,
-            site_id=item.site_id,
-        )
+        targets = await _source_blacklist_no_effect_distribution(node_ids=[item.node_id])
     await append_audit(
         action="source_blacklist.delete",
         target_type="source_blacklist",
@@ -1995,8 +2146,8 @@ async def delete_source_blacklist(
         request_id=request_id,
         source_ip=_request_source_ip(request),
         before={
-            "scope": item.scope,
-            "site_id": item.site_id,
+            "node_id": item.node_id,
+            "direction": item.direction,
             "kind": item.kind,
             "pattern": item.pattern,
         },
@@ -2008,6 +2159,7 @@ async def delete_source_blacklist(
     )
     return SourceBlacklistMutationOut(
         rule=rule,
+        rules=[rule],
         operation="deleted",
         distribution=targets,
     )
@@ -2245,13 +2397,11 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
     selected = payload.node_ids or [_model_id(node) for node in nodes]
     if any(node_id not in {_model_id(node) for node in nodes} for node_id in selected):
         raise HTTPException(422, "node_not_in_site")
-    source_rules = await effective_source_blacklist(payload.site_id)
+    selected_nodes = [node for node in nodes if _model_id(node) in set(selected)]
+    validation = await _blacklist_validation_for_nodes(selected_nodes)
     clean_diff = strip_retired_policy_fields(payload.diff)
-    validation = {
-        "valid": True,
-        "errors": [],
-        "source_blacklist": source_rules,
-    }
+    validation["valid"] = True
+    validation["errors"] = []
     risk = "high" if clean_diff.get("shutdown") else ("medium" if clean_diff else "low")
     draft = ConfigDraft(
         site_id=payload.site_id,
@@ -2422,8 +2572,8 @@ async def _distribute_source_blacklist_change(
     rule_change = {
         "operation": operation,
         "rule_id": rule_id,
-        "scope": rule.scope,
-        "site_id": rule.site_id,
+        "node_id": getattr(rule, "node_id", ""),
+        "direction": getattr(rule, "direction", "source"),
         "kind": rule.kind,
         "pattern": rule.pattern,
         "enabled": rule.enabled,
@@ -2444,17 +2594,13 @@ async def _distribute_source_blacklist_change(
                 )
             )
             continue
-        source_rules = await effective_source_blacklist(site_id)
+        validation = await _blacklist_validation_for_nodes(plan.nodes)
         draft = ConfigDraft(
             site_id=site_id,
             node_ids=[_model_id(node) for node in plan.nodes],
             source_revision=site.config_revision,
-            diff={"source_blacklist": rule_change},
-            validation={
-                "valid": True,
-                "errors": [],
-                "source_blacklist": source_rules,
-            },
+            diff={"blacklist": rule_change},
+            validation=validation,
             risk_level="medium",
             created_by=actor,
             expires_at=utcnow() + timedelta(hours=24),
@@ -2625,7 +2771,12 @@ async def _publish_subscription_version(
         nodes = nodes_by_site[site_id]
         if not nodes:
             continue
-        source_rules = await effective_source_blacklist(site_id)
+        validation = await _blacklist_validation_for_nodes(nodes)
+        validation["subscription"] = {
+            "parse_ok": version.parse_ok,
+            "content_hash": version.content_hash,
+            "format": version.format,
+        }
         draft = ConfigDraft(
             site_id=site_id,
             node_ids=[_model_id(node) for node in nodes],
@@ -2640,16 +2791,7 @@ async def _publish_subscription_version(
                 },
                 "note": note,
             },
-            validation={
-                "valid": True,
-                "errors": [],
-                "source_blacklist": source_rules,
-                "subscription": {
-                    "parse_ok": version.parse_ok,
-                    "content_hash": version.content_hash,
-                    "format": version.format,
-                },
-            },
+            validation=validation,
             risk_level="medium",
             status="draft",
             created_by=actor,
@@ -3016,6 +3158,23 @@ async def list_connections(
     return [_connection_out(item) for item in entries]
 
 
+@app.get("/api/v1/nodes/{node_id}/connections", response_model=ConnectionSnapshotOut)
+async def get_node_live_connections(
+    node_id: str, _: str = Depends(require_management)
+) -> ConnectionSnapshotOut:
+    node = await _find_node_reference(node_id)
+    if node is None:
+        raise HTTPException(404, "node_not_found")
+    snapshot = (
+        await ConnectionSnapshot.find(ConnectionSnapshot.node_id == node.agent_id)
+        .sort(-ConnectionSnapshot.sampled_at)
+        .first_or_none()
+    )
+    if snapshot is None:
+        raise HTTPException(404, "connection_snapshot_not_found")
+    return _connection_out(snapshot)
+
+
 @app.get("/api/v1/proxy-configs", response_model=list[ProxyConfigSnapshotOut])
 @app.get("/api/v1/proxies", response_model=list[ProxyConfigSnapshotOut])
 async def list_proxy_configs(
@@ -3126,7 +3285,7 @@ async def select_node_proxy(
     site = await Site.get(node.site_id)
     if site is None:
         raise HTTPException(409, "site_not_found")
-    source_rules = await effective_source_blacklist(node.site_id)
+    source_rules = await effective_blacklist(node.agent_id)
     draft = ConfigDraft(
         site_id=node.site_id,
         node_ids=[_model_id(node)],
@@ -3143,7 +3302,7 @@ async def select_node_proxy(
         validation={
             "valid": True,
             "errors": [],
-            "source_blacklist": source_rules,
+            "blacklist": source_rules,
             "proxy_selection": {
                 "group": group_name,
                 "outbound": outbound_name,
@@ -3363,7 +3522,7 @@ async def agent_heartbeat(
     if payload.node_id != node.agent_id:
         raise HTTPException(409, "node_id_mismatch")
     previous = await HeartbeatLatest.find_one(HeartbeatLatest.node_id == node.agent_id)
-    if previous and payload.sequence <= int(previous.payload.get("sequence", -1)):
+    if previous and payload.sequence == int(previous.payload.get("sequence", -1)):
         return AgentHeartbeatResponse(accepted=False, duplicate=True)
     received = utcnow()
     heartbeat_payload = payload.model_dump(mode="json")
@@ -3395,6 +3554,11 @@ async def agent_heartbeat(
     node.config_status = payload.config_status
     node.service_status = payload.service_status
     node.subscription_status = payload.subscription_status
+    node.active_connections = payload.connections
+    node.bytes_up = payload.bytes_up
+    node.bytes_down = payload.bytes_down
+    node.rx_bps = payload.rx_bps
+    node.tx_bps = payload.tx_bps
     node.last_error = _safe_error(payload.last_error)
     node.last_error_at = received if node.last_error else node.last_error_at
     await node.save()
@@ -3495,9 +3659,12 @@ async def agent_connections(
             active_connections=snapshot.active_connections,
             bytes_up=snapshot.bytes_up,
             bytes_down=snapshot.bytes_down,
+            rx_bps=snapshot.rx_bps,
+            tx_bps=snapshot.tx_bps,
             top_sources=[item.model_dump() for item in snapshot.top_sources],
             top_destinations=[item.model_dump() for item in snapshot.top_destinations],
             top_users=[item.model_dump() for item in snapshot.top_users],
+            connections=[item.model_dump() for item in snapshot.connections],
             api_available=snapshot.api_available,
             expires_at=snapshot.sampled_at + timedelta(days=7),
         )
@@ -3505,6 +3672,13 @@ async def agent_connections(
     ]
     if documents:
         await ConnectionSnapshot.insert_many(documents)
+        latest = max(documents, key=lambda item: item.sampled_at)
+        node.active_connections = latest.active_connections
+        node.bytes_up = latest.bytes_up
+        node.bytes_down = latest.bytes_down
+        node.rx_bps = latest.rx_bps
+        node.tx_bps = latest.tx_bps
+        await node.save()
     return TelemetryBatchResponse(accepted=True)
 
 
@@ -3633,7 +3807,7 @@ async def agent_ack(  # noqa: B008 - FastAPI dependency declaration
     previous = await AgentAckDocument.find_one(
         AgentAckDocument.node_id == node.agent_id, sort=[("sequence", -1)]
     )
-    if previous and payload.sequence <= previous.sequence:
+    if previous and payload.sequence == previous.sequence:
         return {"accepted": False, "duplicate": True}
     release = await ConfigRelease.find_one(ConfigRelease.release_id == payload.release_id)
     if release is None or node.agent_id not in set(release.node_ids):
@@ -3994,16 +4168,20 @@ async def restore_backup_task(
 @app.get("/api/v1/overview")
 async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
     nodes = await Node.find_all().to_list()
-    latest_connections = await (
-        ConnectionSnapshot.find_all().sort(-ConnectionSnapshot.sampled_at).limit(500).to_list()
-    )
-    seen_nodes: set[str] = set()
-    connection_count = 0
-    for snapshot in latest_connections:
-        if snapshot.node_id in seen_nodes:
-            continue
-        seen_nodes.add(snapshot.node_id)
-        connection_count += snapshot.active_connections
+    node_traffic = [
+        {
+            "node_id": node.agent_id,
+            "name": node.name,
+            "site_id": node.site_id,
+            "liveness_status": node.liveness_status,
+            "active_connections": node.active_connections,
+            "bytes_up": node.bytes_up,
+            "bytes_down": node.bytes_down,
+            "rx_bps": node.rx_bps,
+            "tx_bps": node.tx_bps,
+        }
+        for node in nodes
+    ]
     open_circuits = await ProbeCircuit.find(ProbeCircuit.state == "open").count()
     open_alerts = await Alert.find(Alert.status == "open").count()
     return {
@@ -4014,7 +4192,12 @@ async def overview(_: str = Depends(require_management)) -> dict[str, Any]:
         "drifted_nodes": sum(
             node.config_status in {"drift", "failed", "rollback_failed"} for node in nodes
         ),
-        "connections": connection_count,
+        "connections": sum(node.active_connections for node in nodes),
+        "bytes_up": sum(node.bytes_up for node in nodes),
+        "bytes_down": sum(node.bytes_down for node in nodes),
+        "rx_bps": sum(node.rx_bps for node in nodes),
+        "tx_bps": sum(node.tx_bps for node in nodes),
+        "node_traffic": node_traffic,
         "open_circuits": open_circuits,
         "open_alerts": open_alerts,
         "http_only": True,

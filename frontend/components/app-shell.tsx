@@ -53,7 +53,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "POLICY",
     items: [
-      { href: "/blacklist", label: "Source blacklist", icon: Ban },
+      { href: "/blacklist", label: "Blacklist", icon: Ban },
     ],
   },
   {
@@ -76,7 +76,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "GOVERN",
     items: [
-      { href: "/employees", label: "Employees", icon: UsersRound },
+      { href: "/employees", label: "Roles", icon: UsersRound },
       { href: "/audit", label: "Audit", icon: ScrollText },
       { href: "/backups", label: "Backups", icon: Archive },
     ],

@@ -162,74 +162,64 @@ func rejectRetiredPolicyFields(value Bundle) error {
 	return nil
 }
 
-// ValidateSourceBlacklist verifies the only source-policy representation the
-// monitor accepts from the control plane: a canonical flat JSON array. It is
-// also used when normalizing local last-good state before recovery.
+// ValidateSourceBlacklist verifies the only access-policy representation the
+// monitor accepts: a canonical flat `blacklist` array. Empty is valid and
+// fail-open. Last-good recovery may convert a retired `source_blacklist`
+// array before calling this helper.
 func ValidateSourceBlacklist(value Bundle) error {
 	if err := rejectRetiredPolicyFields(value); err != nil {
 		return err
 	}
-	raw, exists := value["source_blacklist"]
+	raw, exists := value["blacklist"]
 	if !exists || raw == nil {
-		return errors.New("missing_source_blacklist")
+		return errors.New("missing_blacklist")
 	}
-	return validateSourceBlacklistEntries(raw, stringValue(value["site_id"]))
+	return validateBlacklistEntries(raw)
 }
 
-func validateSourceBlacklistEntries(raw any, bundleSiteID string) error {
+func validateBlacklistEntries(raw any) error {
 	var entries []any
 	switch typed := raw.(type) {
 	case []any:
 		entries = typed
 	default:
-		return errors.New("invalid_source_blacklist_entries")
+		return errors.New("invalid_blacklist_entries")
 	}
 	if len(entries) > 10_000 {
-		return errors.New("source_blacklist_too_large")
+		return errors.New("blacklist_too_large")
 	}
 	for _, rawEntry := range entries {
 		entry, ok := rawEntry.(map[string]any)
 		if !ok {
-			return errors.New("invalid_source_blacklist_entry")
+			return errors.New("invalid_blacklist_entry")
+		}
+		direction, directionOK := entry["direction"].(string)
+		if !directionOK || (direction != "source" && direction != "destination") {
+			return errors.New("invalid_blacklist_direction")
 		}
 		kind, kindOK := entry["kind"].(string)
 		pattern, patternOK := entry["pattern"].(string)
 		if !kindOK || !patternOK || pattern == "" || pattern != strings.TrimSpace(pattern) || len(pattern) > 512 {
-			return errors.New("invalid_source_blacklist_pattern")
+			return errors.New("invalid_blacklist_pattern")
+		}
+		if kind == "network" {
+			kind = "cidr"
 		}
 		switch kind {
 		case "ip":
 			if !isCanonicalSourceIP(pattern) {
-				return errors.New("invalid_source_blacklist_ip")
+				return errors.New("invalid_blacklist_ip")
 			}
-		case "network":
+		case "cidr":
 			if !isCanonicalSourceNetwork(pattern) {
-				return errors.New("invalid_source_blacklist_network")
+				return errors.New("invalid_blacklist_cidr")
 			}
 		case "domain":
 			if !isCanonicalSourceDomain(pattern) {
-				return errors.New("invalid_source_blacklist_domain")
+				return errors.New("invalid_blacklist_domain")
 			}
 		default:
-			return errors.New("invalid_source_blacklist_kind")
-		}
-		scope, scopeOK := entry["scope"].(string)
-		if !scopeOK || (scope != "global" && scope != "site") {
-			return errors.New("invalid_source_blacklist_scope")
-		}
-		entrySiteID := ""
-		if rawSiteID, exists := entry["site_id"]; exists && rawSiteID != nil {
-			var siteIDOK bool
-			entrySiteID, siteIDOK = rawSiteID.(string)
-			if !siteIDOK || entrySiteID != strings.TrimSpace(entrySiteID) {
-				return errors.New("invalid_source_blacklist_site")
-			}
-		}
-		if scope == "global" && entrySiteID != "" {
-			return errors.New("invalid_source_blacklist_site")
-		}
-		if scope == "site" && (entrySiteID == "" || entrySiteID != bundleSiteID) {
-			return errors.New("invalid_source_blacklist_site")
+			return errors.New("invalid_blacklist_kind")
 		}
 	}
 	return nil

@@ -35,7 +35,7 @@ function siteState(site: Site, nodes: Node[]) {
 }
 
 export default function OverviewPage() {
-  const { t, formatDate, formatNumber } = usePreferences();
+  const { t, formatDate, formatNumber, formatBytes } = usePreferences();
   const session = useManagementSession();
   const overview = useQuery({ queryKey: ["overview"], queryFn: getOverview, enabled: session === true, refetchInterval: 10_000 });
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, refetchInterval: 10_000 });
@@ -92,14 +92,16 @@ export default function OverviewPage() {
         eyebrow="OPERATIONS"
         title="Overview"
         description="Regional proxy state and deployment activity."
-        actions={<Link className="button button-primary button-md" href="/blacklist"><Ban size={16} /> {t("Manage source blacklist")}</Link>}
+        actions={<Link className="button button-primary button-md" href="/blacklist"><Ban size={16} /> {t("Manage blacklist")}</Link>}
       />
 
       <section className="metric-grid" aria-label={t("Control-plane summary")}>
         <Panel className="metric-panel"><span>{t("Nodes online")}</span><strong>{formatNumber(overviewData.online_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Heartbeat state")}</em></Panel>
         <Panel className="metric-panel"><span>{t("Configuration in sync")}</span><strong>{formatNumber(overviewData.in_sync_nodes)}<small> / {formatNumber(overviewData.nodes)}</small></strong><em>{t("Applied bundle matches")}</em></Panel>
         <Panel className="metric-panel"><span>{t("Drift or failure")}</span><strong>{formatNumber(overviewData.drifted_nodes)}</strong><em>{t("Requires operator review")}</em></Panel>
-        <Panel className="metric-panel"><span>{t("Active connections")}</span><strong>{formatNumber(overviewData.connections)}</strong><em>{t("Control plane telemetry")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Active connections")}</span><strong>{formatNumber(overviewData.connections)}</strong><em>{t("sing-box live sessions")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Upload rate")}</span><strong>{formatBytes(overviewData.tx_bps || 0)}/s</strong><em>{t("Across enrolled nodes")}</em></Panel>
+        <Panel className="metric-panel"><span>{t("Download rate")}</span><strong>{formatBytes(overviewData.rx_bps || 0)}/s</strong><em>{t("Across enrolled nodes")}</em></Panel>
       </section>
 
       <section className="metric-grid metric-grid-trio" aria-label={t("Deployment and alert summary")}>
@@ -112,7 +114,7 @@ export default function OverviewPage() {
         <Panel className="topology-panel">
           <div className="panel-heading"><div><span className="panel-kicker">{t("REGIONAL TOPOLOGY")}</span><h2>{t("Control plane to edge sites")}</h2></div><Link href="/nodes">{t("Node inventory")} <ArrowRight size={15} /></Link></div>
           <ControlPlaneTopology sites={topologySites} onlineNodes={overviewData.online_nodes} totalNodes={overviewData.nodes} formatNumber={formatNumber} t={t} selectedSiteId={selectedSiteId} onSiteSelect={setSelectedSiteId} />
-          {selectedSite ? <TopologySiteDetail site={selectedSite} nodes={selectedSiteNodes} state={topologySites.find((item) => item.site.id === selectedSite.id)?.state || "unknown"} formatNumber={formatNumber} t={t} /> : <div className="topology-site-empty">{t("Select a site in the topology to inspect its nodes.")}</div>}
+          {selectedSite ? <TopologySiteDetail site={selectedSite} nodes={selectedSiteNodes} state={topologySites.find((item) => item.site.id === selectedSite.id)?.state || "unknown"} formatNumber={formatNumber} formatBytes={formatBytes} t={t} /> : <div className="topology-site-empty">{t("Select a site in the topology to inspect its nodes.")}</div>}
         </Panel>
 
         <Panel className="activity-panel">
@@ -134,13 +136,51 @@ function TopologySiteDetail({
   nodes,
   state,
   formatNumber,
+  formatBytes,
   t,
 }: {
   site: Site;
   nodes: Node[];
   state: string;
   formatNumber: (value: number) => string;
+  formatBytes: (value: number) => string;
   t: (key: string, values?: Record<string, string | number>) => string;
 }) {
-  return <article className="topology-site-detail"><header><div><span className="panel-kicker">{t("SELECTED SITE")}</span><h3>{t(site.name)}</h3><span className="mono">{site.slug}</span></div><div className="topology-site-detail-actions"><StatusBadge status={state} /><Link href={`/blacklist?scope=site&site=${encodeURIComponent(site.id)}`}>{t("Manage source blacklist")} <ArrowRight size={14} /></Link></div></header><div className="topology-site-facts"><div><span>{t("Nodes")}</span><strong>{formatNumber(nodes.length)}</strong></div><div><span>{t("Online")}</span><strong>{formatNumber(nodes.filter((node) => node.liveness_status === "online").length)}</strong></div><div><span>{t("In sync")}</span><strong>{formatNumber(nodes.filter((node) => node.config_status === "in_sync").length)}</strong></div></div>{nodes.length ? <div className="topology-node-list">{nodes.map((node) => <div className="topology-node-row" key={node.id}><div><strong>{node.name}</strong><small className="mono">{node.agent_id}</small></div><div><StatusBadge status={node.liveness_status} /><StatusBadge status={node.config_status} /></div></div>)}</div> : <p className="topology-site-empty">{t("No node enrolled")}</p>}</article>;
+  return (
+    <article className="topology-site-detail">
+      <header>
+        <div>
+          <span className="panel-kicker">{t("SELECTED SITE")}</span>
+          <h3>{t(site.name)}</h3>
+          <span className="mono">{site.slug}</span>
+        </div>
+        <div className="topology-site-detail-actions">
+          <StatusBadge status={state} />
+          <Link href="/blacklist">{t("Manage blacklist")} <ArrowRight size={14} /></Link>
+        </div>
+      </header>
+      <div className="topology-site-facts">
+        <div><span>{t("Nodes")}</span><strong>{formatNumber(nodes.length)}</strong></div>
+        <div><span>{t("Online")}</span><strong>{formatNumber(nodes.filter((node) => node.liveness_status === "online").length)}</strong></div>
+        <div><span>{t("In sync")}</span><strong>{formatNumber(nodes.filter((node) => node.config_status === "in_sync").length)}</strong></div>
+      </div>
+      {nodes.length ? (
+        <div className="topology-node-list">
+          {nodes.map((node) => (
+            <div className="topology-node-row" key={node.id}>
+              <div>
+                <strong>{node.name}</strong>
+                <small className="mono">{node.agent_id}</small>
+                <small>{t("{count} connections", { count: node.active_connections || 0 })} · {t("↑ {value}", { value: `${formatBytes(node.tx_bps || 0)}/s` })} · {t("↓ {value}", { value: `${formatBytes(node.rx_bps || 0)}/s` })}</small>
+              </div>
+              <div>
+                <StatusBadge status={node.liveness_status} />
+                <StatusBadge status={node.config_status} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : <p className="topology-site-empty">{t("No node enrolled")}</p>}
+    </article>
+  );
 }

@@ -51,8 +51,8 @@ class _Field:
 
 
 class _FakeRule:
-    scope = _Field("scope")
-    site_id = _Field("site_id")
+    node_id = _Field("node_id")
+    direction = _Field("direction")
     kind = _Field("kind")
     pattern = _Field("pattern")
     existing: object | None = None
@@ -60,8 +60,8 @@ class _FakeRule:
 
     def __init__(self, **values: object):
         self.id = "rule-1"
-        self.scope = str(values["scope"])
-        self.site_id = values["site_id"]
+        self.node_id = str(values.get("node_id") or "node-a")
+        self.direction = str(values.get("direction") or "source")
         self.kind = str(values["kind"])
         self.pattern = str(values["pattern"])
         self.comment = str(values["comment"])
@@ -116,7 +116,7 @@ async def test_enabled_source_blacklist_create_preflights_before_insert(
 
     with pytest.raises(HTTPException) as exc_info:
         await main_module.add_source_blacklist(
-            SourceBlacklistCreate(scope="global", kind="ip", pattern="192.0.2.10"),
+            SourceBlacklistCreate(node_ids=["node-a"], kind="ip", pattern="192.0.2.10"),
             _request(),
             "admin",
         )
@@ -156,7 +156,7 @@ async def test_enabled_source_blacklist_create_returns_release_targets(
     monkeypatch.setattr(main_module, "_distribute_source_blacklist_change", distribute)
 
     result = await main_module.add_source_blacklist(
-        SourceBlacklistCreate(scope="global", kind="ip", pattern="192.0.2.11"),
+        SourceBlacklistCreate(node_ids=["node-a"], kind="ip", pattern="192.0.2.11"),
         _request(),
         "admin",
     )
@@ -191,7 +191,7 @@ async def test_disabled_source_blacklist_create_is_no_effect(
 
     result = await main_module.add_source_blacklist(
         SourceBlacklistCreate(
-            scope="global", kind="ip", pattern="192.0.2.12", enabled=False
+            node_ids=["node-a"], kind="ip", pattern="192.0.2.12", enabled=False
         ),
         _request(),
         "admin",
@@ -208,8 +208,8 @@ async def test_enabled_source_blacklist_delete_preflights_before_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rule = _FakeRule(
-        scope="site",
-        site_id="site-north",
+        node_id="node-a",
+        direction="source",
         kind="ip",
         pattern="192.0.2.13",
         comment="",
@@ -265,8 +265,8 @@ async def test_source_blacklist_distribution_releases_each_populated_site_and_sk
     ]
     calls: list[dict[str, object]] = []
 
-    async def effective(site_id: str) -> list[dict[str, str]]:
-        return [{"kind": "ip", "pattern": "192.0.2.14", "site_id": site_id}]
+    async def effective(_: str) -> list[dict[str, str]]:
+        return [{"direction": "source", "kind": "ip", "pattern": "192.0.2.14"}]
 
     async def create_release(**kwargs: object):
         calls.append(kwargs)
@@ -277,13 +277,13 @@ async def test_source_blacklist_distribution_releases_each_populated_site_and_sk
         )
 
     monkeypatch.setattr(main_module, "ConfigDraft", Draft)
-    monkeypatch.setattr(main_module, "effective_source_blacklist", effective)
+    monkeypatch.setattr(main_module, "effective_blacklist", effective)
     monkeypatch.setattr(main_module, "_create_release_from_draft", create_release)
 
     rule = SimpleNamespace(
         id="rule-14",
-        scope="global",
-        site_id=None,
+        node_id="north-a",
+        direction="source",
         kind="ip",
         pattern="192.0.2.14",
         enabled=True,
@@ -311,44 +311,22 @@ async def test_source_blacklist_distribution_releases_each_populated_site_and_sk
 
 
 @pytest.mark.asyncio
-async def test_global_source_blacklist_plans_every_site_before_distribution(
+async def test_blacklist_plans_only_selected_nodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class SortField:
-        def __pos__(self) -> "SortField":
-            return self
-
-    sites = [
-        SimpleNamespace(id="site-east", slug="east"),
-        SimpleNamespace(id="site-north", slug="north"),
-    ]
-
-    class Query:
-        def __init__(self, values: list[object]):
-            self.values = values
-
-        def sort(self, _: object) -> "Query":
-            return self
-
-        async def to_list(self) -> list[object]:
-            return self.values
-
-    class SiteModel:
-        slug = SortField()
-
-        @classmethod
-        def find_all(cls) -> Query:
-            return Query(sites)
-
+    north = SimpleNamespace(id="site-north", slug="north")
+    east = SimpleNamespace(id="site-east", slug="east")
     nodes = {
-        "site-east": [SimpleNamespace(id="east-a", agent_id="east-a")],
-        "site-north": [SimpleNamespace(id="north-a", agent_id="north-a")],
+        "north-a": SimpleNamespace(id="north-a", agent_id="north-a", site_id="site-north"),
+        "east-a": SimpleNamespace(id="east-a", agent_id="east-a", site_id="site-east"),
+        "north-b": SimpleNamespace(id="north-b", agent_id="north-b", site_id="site-north"),
     }
 
-    class NodeModel:
-        @classmethod
-        def find(cls, query: dict[str, str]) -> Query:
-            return Query(nodes[query["site_id"]])
+    async def find_node(node_id: str):
+        return nodes[node_id]
+
+    async def get_site(site_id: str):
+        return north if site_id == "site-north" else east
 
     checked: list[list[str]] = []
 
@@ -356,14 +334,16 @@ async def test_global_source_blacklist_plans_every_site_before_distribution(
         checked.append([item.agent_id for item in items])
         return None
 
-    monkeypatch.setattr(main_module, "Site", SiteModel)
-    monkeypatch.setattr(main_module, "Node", NodeModel)
+    monkeypatch.setattr(main_module, "_find_node_reference", find_node)
+    monkeypatch.setattr(main_module, "Site", SimpleNamespace(get=get_site))
     monkeypatch.setattr(main_module, "_active_config_release_for_nodes", no_active)
 
-    plans = await main_module._source_blacklist_release_plans(scope="global", site_id=None)
+    plans = await main_module._source_blacklist_release_plans(
+        node_ids=["north-a", "east-a"]
+    )
 
     assert [(plan.site.id, [node.agent_id for node in plan.nodes]) for plan in plans] == [
-        ("site-east", ["east-a"]),
         ("site-north", ["north-a"]),
+        ("site-east", ["east-a"]),
     ]
-    assert checked == [["east-a"], ["north-a"]]
+    assert checked == [["north-a"], ["east-a"]]

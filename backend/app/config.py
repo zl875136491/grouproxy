@@ -5,6 +5,12 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROXY_LISTEN_PORT = 1080
+ROOT_ITCODE = "zhangle"
+MANAGEMENT_ROLES = frozenset({"root", "admin"})
+
+
+def is_management_role(role: str) -> bool:
+    return role in MANAGEMENT_ROLES
 
 
 class Settings(BaseSettings):
@@ -18,7 +24,7 @@ class Settings(BaseSettings):
     port: int = 8000
     backend_public_url: str = "http://127.0.0.1:8000"
     bundle_hmac_secret: str = Field(min_length=32)
-    admin_username: str = "admin"
+    admin_username: str = ROOT_ITCODE
     admin_password: str = Field(min_length=12)
     management_token: str = Field(min_length=32)
     allow_insecure_agent_http: bool = False

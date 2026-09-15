@@ -10,7 +10,7 @@ func TestRenderSourceRulesBlocksListedSourcesAndAllowsTheRest(t *testing.T) {
 		{Kind: "network", Pattern: "10.0.0.0/8"},
 		{Kind: "network", Pattern: "2001:db8::/32"},
 	}, false)
-	if !strings.Contains(script, "destroy table inet grouproxy") {
+	if !strings.Contains(script, "table inet grouproxy {") {
 		t.Fatal("RenderSourceRules must be checkable on a fresh host")
 	}
 	for _, expected := range []string{
@@ -44,7 +44,7 @@ func TestRenderSourceRulesAllowsUnlistedSources(t *testing.T) {
 func TestRenderSourceRulesDropsOnlyIPNetworks(t *testing.T) {
 	script := RenderSourceRules(1080, []SourceRule{
 		{Kind: "ip", Pattern: "192.0.2.10"},
-		{Kind: "network", Pattern: "2001:db8::/32"},
+		{Kind: "cidr", Pattern: "2001:db8::/32"},
 		{Kind: "domain", Pattern: "blocked.example"},
 	}, false)
 	for _, expected := range []string{

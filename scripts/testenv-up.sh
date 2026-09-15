@@ -86,7 +86,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     # Keep archive creation explicit in the shared test database. Phase 4
     # creates a manual encrypted archive and runs a non-destructive rehearsal.
     printf 'GROUPROXY_BACKUP_AUTO_ENABLED=false\n'
-    printf 'GROUPROXY_ADMIN_USERNAME=admin\n'
+    printf 'GROUPROXY_ADMIN_USERNAME=zhangle\n'
     printf 'GROUPROXY_ADMIN_PASSWORD=%s\n' "$admin_password"
     printf 'GROUPROXY_MANAGEMENT_TOKEN=%s\n' "$management_token"
     printf 'GROUPROXY_AUTH_SESSION_TTL_MINUTES=43200\n'

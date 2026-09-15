@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	monitorVersion                = "0.5.0"
+	monitorVersion                = "0.6.0"
 	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
@@ -69,6 +69,12 @@ type agent struct {
 	// Configuration failures are persisted in state.LastError and reported on the
 	// configuration dimension without making a healthy monitor look offline.
 	syncError string
+	lastTrafficAt         time.Time
+	lastBytesUp           int64
+	lastBytesDown         int64
+	lastActiveConnections int
+	lastRxBps             int64
+	lastTxBps             int64
 }
 
 type clashSelector struct {
@@ -559,14 +565,18 @@ func (a *agent) collectConnections() {
 	}
 	request.Header.Set("Accept", "application/json")
 	client := &http.Client{Timeout: 800 * time.Millisecond}
+	now := time.Now().UTC()
 	snapshot := map[string]any{
-		"sampled_at":         time.Now().UTC(),
+		"sampled_at":         now,
 		"active_connections": 0,
 		"bytes_up":           int64(0),
 		"bytes_down":         int64(0),
+		"rx_bps":             int64(0),
+		"tx_bps":             int64(0),
 		"top_sources":        []any{},
 		"top_destinations":   []any{},
 		"top_users":          []any{},
+		"connections":        []any{},
 		"api_available":      false,
 	}
 	response, err := client.Do(request)
@@ -576,9 +586,7 @@ func (a *agent) collectConnections() {
 		if readErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 			var raw map[string]any
 			if json.Unmarshal(data, &raw) == nil {
-				connections, _ := raw["connections"].([]any)
-				snapshot["active_connections"] = len(connections)
-				snapshot["api_available"] = true
+				fillConnectionSnapshot(snapshot, raw, now, a)
 			}
 		}
 	}
@@ -589,6 +597,157 @@ func (a *agent) collectConnections() {
 			a.log.Printf("connection telemetry dropped: %v", spoolErr)
 		}
 	}
+}
+
+type connectionCounter struct {
+	label     string
+	count     int
+	bytesUp   int64
+	bytesDown int64
+}
+
+func fillConnectionSnapshot(snapshot map[string]any, raw map[string]any, now time.Time, a *agent) {
+	connections, _ := raw["connections"].([]any)
+	bytesUp := asInt64(raw["uploadTotal"])
+	bytesDown := asInt64(raw["downloadTotal"])
+	sourceCounts := map[string]*connectionCounter{}
+	destCounts := map[string]*connectionCounter{}
+	live := make([]map[string]any, 0, len(connections))
+	for _, rawConn := range connections {
+		conn, ok := rawConn.(map[string]any)
+		if !ok {
+			continue
+		}
+		metadata, _ := conn["metadata"].(map[string]any)
+		srcIP := stringValue(metadata["sourceIP"])
+		dstHost := stringValue(metadata["host"])
+		dstIP := stringValue(metadata["destinationIP"])
+		if dstHost == "" {
+			dstHost = dstIP
+		}
+		up := asInt64(conn["upload"])
+		down := asInt64(conn["download"])
+		if bytesUp == 0 && bytesDown == 0 {
+			bytesUp += up
+			bytesDown += down
+		}
+		if srcIP != "" {
+			counter := sourceCounts[srcIP]
+			if counter == nil {
+				counter = &connectionCounter{label: srcIP}
+				sourceCounts[srcIP] = counter
+			}
+			counter.count++
+			counter.bytesUp += up
+			counter.bytesDown += down
+		}
+		if dstHost != "" {
+			counter := destCounts[dstHost]
+			if counter == nil {
+				counter = &connectionCounter{label: dstHost}
+				destCounts[dstHost] = counter
+			}
+			counter.count++
+			counter.bytesUp += up
+			counter.bytesDown += down
+		}
+		chains, _ := conn["chains"].([]any)
+		outbound := make([]string, 0, len(chains))
+		for _, chain := range chains {
+			tag := strings.TrimSpace(fmt.Sprint(chain))
+			if tag != "" {
+				outbound = append(outbound, tag)
+			}
+		}
+		live = append(live, map[string]any{
+			"id":             stringValue(conn["id"]),
+			"src_ip":         srcIP,
+			"src_port":       stringValue(metadata["sourcePort"]),
+			"dst_host":       dstHost,
+			"dst_ip":         dstIP,
+			"dst_port":       stringValue(metadata["destinationPort"]),
+			"network":        stringValue(metadata["network"]),
+			"inbound":        stringValue(metadata["type"]),
+			"outbound_chain": outbound,
+			"bytes_up":       up,
+			"bytes_down":     down,
+			"start":          stringValue(conn["start"]),
+			"rule":           stringValue(conn["rule"]),
+		})
+	}
+	sort.Slice(live, func(i, j int) bool {
+		left := asInt64(live[i]["bytes_up"]) + asInt64(live[i]["bytes_down"])
+		right := asInt64(live[j]["bytes_up"]) + asInt64(live[j]["bytes_down"])
+		return left > right
+	})
+	if len(live) > 100 {
+		live = live[:100]
+	}
+	rxBps, txBps := a.recordTrafficSample(now, len(connections), bytesDown, bytesUp)
+	snapshot["active_connections"] = len(connections)
+	snapshot["bytes_up"] = bytesUp
+	snapshot["bytes_down"] = bytesDown
+	snapshot["rx_bps"] = rxBps
+	snapshot["tx_bps"] = txBps
+	snapshot["top_sources"] = topConnectionCounters(sourceCounts, 20)
+	snapshot["top_destinations"] = topConnectionCounters(destCounts, 20)
+	snapshot["connections"] = live
+	snapshot["api_available"] = true
+}
+
+func (a *agent) recordTrafficSample(now time.Time, active int, bytesDown, bytesUp int64) (rxBps, txBps int64) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	if !a.lastTrafficAt.IsZero() {
+		elapsed := now.Sub(a.lastTrafficAt).Seconds()
+		if elapsed > 0 {
+			deltaDown := bytesDown - a.lastBytesDown
+			deltaUp := bytesUp - a.lastBytesUp
+			if deltaDown < 0 {
+				deltaDown = 0
+			}
+			if deltaUp < 0 {
+				deltaUp = 0
+			}
+			rxBps = int64(float64(deltaDown) / elapsed)
+			txBps = int64(float64(deltaUp) / elapsed)
+		}
+	}
+	a.lastTrafficAt = now
+	a.lastBytesUp = bytesUp
+	a.lastBytesDown = bytesDown
+	a.lastActiveConnections = active
+	a.lastRxBps = rxBps
+	a.lastTxBps = txBps
+	return rxBps, txBps
+}
+
+func topConnectionCounters(values map[string]*connectionCounter, limit int) []any {
+	items := make([]*connectionCounter, 0, len(values))
+	for _, item := range values {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		left := items[i].bytesUp + items[i].bytesDown
+		right := items[j].bytesUp + items[j].bytesDown
+		if left == right {
+			return items[i].count > items[j].count
+		}
+		return left > right
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	result := make([]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"label":       item.label,
+			"connections": item.count,
+			"bytes_up":    item.bytesUp,
+			"bytes_down":  item.bytesDown,
+		})
+	}
+	return result
 }
 
 // collectProxyConfig publishes the operator-facing projection of the local
@@ -1262,8 +1421,11 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if !ok {
 		return a.ackFailure(value, "invalid_desired_version", "desired_version is not an integer", false, false, false, false)
 	}
-	if version < current.AppliedVersion || (version == current.AppliedVersion && stringValue(value["bundle_hash"]) != current.AppliedHash) {
+	if version < current.AppliedVersion {
 		return a.ackFailure(value, "bundle_replay", "bundle version/hash is older than applied state", false, false, false, false)
+	}
+	if version == current.AppliedVersion && stringValue(value["bundle_hash"]) == current.AppliedHash {
+		return nil
 	}
 	hashValue, err := bundle.Validate(bundle.Bundle(value), a.cfg.HMACSecret, current.AppliedVersion)
 	if err != nil {
@@ -1329,6 +1491,9 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	}
 	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
 	for _, rule := range sourceRules {
+		if ruleDirection(rule) != "source" {
+			continue
+		}
 		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
 	}
 	nftScript := firewall.RenderSourceRules(firewallPort, nftRules, boolValue(value["shutdown"]))
@@ -1520,6 +1685,9 @@ func (a *agent) restoreLastGoodFirewallForBundle(lastGood map[string]any) error 
 	}
 	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
 	for _, rule := range sourceRules {
+		if ruleDirection(rule) != "source" {
+			continue
+		}
 		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
 	}
 	script := firewall.RenderSourceRules(a.firewallPort(port), nftRules, boolValue(lastGood["shutdown"]))
@@ -1790,6 +1958,11 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 	value := a.state
 	sequence := a.sequence
 	syncError := a.syncError
+	connections := a.lastActiveConnections
+	bytesUp := a.lastBytesUp
+	bytesDown := a.lastBytesDown
+	rxBps := a.lastRxBps
+	txBps := a.lastTxBps
 	a.stateMu.Unlock()
 	processOK, portOK, apiOK := a.runtime.Health(context.Background())
 	status, lastError := heartbeatStatus(value, syncError, processOK, portOK)
@@ -1811,6 +1984,11 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 		"spool_bytes":         directorySize(filepath.Join(a.cfg.StateDir, "spool")),
 		"last_error":          lastError,
 		"sequence":            sequence,
+		"connections":         connections,
+		"bytes_up":            bytesUp,
+		"bytes_down":          bytesDown,
+		"rx_bps":              rxBps,
+		"tx_bps":              txBps,
 	}
 	response, err := a.client.Heartbeat(payload)
 	if err != nil {
@@ -2038,19 +2216,13 @@ func sanitizeLegacyBundle(value map[string]any) bool {
 		delete(value, "proxy_auth")
 		changed = true
 	}
-	// The canonical source policy is a flat source_blacklist array. Removing
-	// retired fields and migration-only nested data here keeps a restart from
-	// restoring old allowlist, destination-block, or alias behavior.
 	for _, key := range []string{"allow_cidrs", "deny_destinations", "deny_sources"} {
 		if _, exists := value[key]; exists {
 			delete(value, key)
 			changed = true
 		}
 	}
-	if !isCanonicalSourceBlacklist(value) {
-		// Persist the empty canonical baseline rather than leaving a missing or
-		// nested migration shape for later restore code to interpret.
-		value["source_blacklist"] = []any{}
+	if converted := canonicalizeBundleBlacklist(value); converted {
 		changed = true
 	}
 	if listen, ok := value["listen"].(map[string]any); ok {
@@ -2062,6 +2234,60 @@ func sanitizeLegacyBundle(value map[string]any) bool {
 	return changed
 }
 
+func canonicalizeBundleBlacklist(value map[string]any) bool {
+	if isCanonicalSourceBlacklist(value) {
+		if _, exists := value["source_blacklist"]; exists {
+			delete(value, "source_blacklist")
+			return true
+		}
+		return false
+	}
+	converted := make([]any, 0)
+	if raw, ok := value["blacklist"].([]any); ok {
+		converted = convertLegacyBlacklistEntries(raw)
+	} else if raw, ok := value["source_blacklist"].([]any); ok {
+		converted = convertLegacyBlacklistEntries(raw)
+	}
+	value["blacklist"] = converted
+	delete(value, "source_blacklist")
+	return true
+}
+
+func convertLegacyBlacklistEntries(raw []any) []any {
+	result := make([]any, 0, len(raw))
+	seen := map[string]struct{}{}
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind := stringValue(entry["kind"])
+		if kind == "network" {
+			kind = "cidr"
+		}
+		direction := stringValue(entry["direction"])
+		if direction == "" {
+			direction = "source"
+		}
+		pattern := stringValue(entry["pattern"])
+		normalized := map[string]any{
+			"direction": direction,
+			"kind":      kind,
+			"pattern":   pattern,
+		}
+		if bundle.ValidateSourceBlacklist(bundle.Bundle{"blacklist": []any{normalized}}) != nil {
+			continue
+		}
+		key := direction + "\x00" + kind + "\x00" + pattern
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
 func hasRetiredSourcePolicy(value map[string]any) bool {
 	if value == nil {
 		return false
@@ -2071,21 +2297,20 @@ func hasRetiredSourcePolicy(value map[string]any) bool {
 			return true
 		}
 	}
-	return !isCanonicalSourceBlacklist(value)
+	return false
 }
 
 func isCanonicalSourceBlacklist(value map[string]any) bool {
 	return bundle.ValidateSourceBlacklist(bundle.Bundle(value)) == nil
 }
 
-// sourceBlacklistRule is the monitor's normalized source-side deny contract.
-// Bundles carry a flat array of global and current-site entries; the monitor
-// keeps the site check as a defensive guard against a mismatched bundle.
+// sourceBlacklistRule is the monitor's normalized deny contract.
 type sourceBlacklistRule struct {
-	Scope   string `json:"scope"`
-	SiteID  string `json:"site_id,omitempty"`
-	Kind    string `json:"kind"`
-	Pattern string `json:"pattern"`
+	Direction string `json:"direction"`
+	Kind      string `json:"kind"`
+	Pattern   string `json:"pattern"`
+	Scope     string `json:"scope,omitempty"`
+	SiteID    string `json:"site_id,omitempty"`
 }
 
 type sourceBlacklistSnapshot struct {
@@ -2101,56 +2326,46 @@ func clearLastGoodSourceBlacklistSnapshot(stateDir string) error {
 	return err
 }
 
-func sourceBlacklistRules(value map[string]any, siteID string) []sourceBlacklistRule {
+func sourceBlacklistRules(value map[string]any, _ string) []sourceBlacklistRule {
 	if value == nil {
 		return nil
 	}
 	if !isCanonicalSourceBlacklist(value) {
 		return nil
 	}
-	entries := value["source_blacklist"].([]any)
+	entries, _ := value["blacklist"].([]any)
 	result := make([]sourceBlacklistRule, 0)
 	for _, raw := range entries {
 		entry, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		scope, scopeOK := entry["scope"].(string)
+		direction, directionOK := entry["direction"].(string)
 		kind, kindOK := entry["kind"].(string)
 		pattern, patternOK := entry["pattern"].(string)
-		if !scopeOK || !kindOK || !patternOK {
+		if !directionOK || !kindOK || !patternOK {
 			continue
 		}
-		entrySite := ""
-		if rawSite, exists := entry["site_id"]; exists && rawSite != nil {
-			var entrySiteOK bool
-			entrySite, entrySiteOK = rawSite.(string)
-			if !entrySiteOK || entrySite != strings.TrimSpace(entrySite) {
-				continue
-			}
+		if kind == "network" {
+			kind = "cidr"
 		}
-		switch scope {
-		case "global":
-			if entrySite != "" {
-				continue
-			}
-		case "site":
-			if entrySite == "" || entrySite != siteID {
-				continue
-			}
-		default:
-			continue
-		}
-		result = append(result, sourceBlacklistRule{Scope: scope, SiteID: entrySite, Kind: kind, Pattern: pattern})
+		result = append(result, sourceBlacklistRule{Direction: direction, Kind: kind, Pattern: pattern})
 	}
 	return dedupeSourceBlacklistRules(result)
+}
+
+func ruleDirection(rule sourceBlacklistRule) string {
+	if rule.Direction == "destination" {
+		return "destination"
+	}
+	return "source"
 }
 
 func dedupeSourceBlacklistRules(values []sourceBlacklistRule) []sourceBlacklistRule {
 	result := make([]sourceBlacklistRule, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		key := value.Scope + "\x00" + value.SiteID + "\x00" + value.Kind + "\x00" + value.Pattern
+		key := ruleDirection(value) + "\x00" + value.Kind + "\x00" + value.Pattern
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -2171,7 +2386,7 @@ func resolveSourceBlacklistRules(ctx context.Context, rules []sourceBlacklistRul
 	result := make([]sourceBlacklistRule, 0, len(rules))
 	domainCount := 0
 	for _, rule := range rules {
-		if rule.Kind != "domain" {
+		if rule.Kind != "domain" || ruleDirection(rule) != "source" {
 			result = append(result, rule)
 			continue
 		}
@@ -2207,7 +2422,7 @@ func resolveSourceBlacklistRules(ctx context.Context, rules []sourceBlacklistRul
 				return nil, fmt.Errorf("source_domain_resolution_too_many_addresses: %s", rule.Pattern)
 			}
 			result = append(result, sourceBlacklistRule{
-				Scope: rule.Scope, SiteID: rule.SiteID, Kind: "ip", Pattern: pattern,
+				Direction: ruleDirection(rule), Kind: "ip", Pattern: pattern,
 			})
 		}
 		if resolvedCount == 0 {
@@ -2223,22 +2438,28 @@ func (a *agent) lastGoodSourceBlacklistRules(value map[string]any) ([]sourceBlac
 		// materialized snapshot created for a retired source-policy contract.
 		return nil, nil
 	}
+	canonicalBefore := isCanonicalSourceBlacklist(value)
+	if !canonicalBefore {
+		canonicalizeBundleBlacklist(value)
+	}
 	expectedHash := stringValue(value["bundle_hash"])
 	path := filepath.Join(a.cfg.StateDir, "last-good-source-rules.json")
-	data, err := os.ReadFile(path)
-	if err == nil {
-		var snapshot sourceBlacklistSnapshot
-		if err := json.Unmarshal(data, &snapshot); err != nil {
+	if canonicalBefore {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var snapshot sourceBlacklistSnapshot
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				return nil, fmt.Errorf("read last-good source rules: %w", err)
+			}
+			if expectedHash != "" && snapshot.BundleHash == expectedHash {
+				if err := validateMaterializedSourceRules(snapshot.Rules); err != nil {
+					return nil, err
+				}
+				return snapshot.Rules, nil
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("read last-good source rules: %w", err)
 		}
-		if expectedHash != "" && snapshot.BundleHash == expectedHash {
-			if err := validateMaterializedSourceRules(snapshot.Rules); err != nil {
-				return nil, err
-			}
-			return snapshot.Rules, nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read last-good source rules: %w", err)
 	}
 	// This is a migration fallback only. A successfully applied modern bundle
 	// always has a materialized snapshot, so a temporary DNS failure cannot
@@ -2251,13 +2472,31 @@ func (a *agent) lastGoodSourceBlacklistRules(value map[string]any) ([]sourceBlac
 
 func validateMaterializedSourceRules(rules []sourceBlacklistRule) error {
 	for _, rule := range rules {
-		switch rule.Kind {
-		case "ip":
-			if net.ParseIP(rule.Pattern) == nil {
+		direction := ruleDirection(rule)
+		kind := rule.Kind
+		if kind == "network" {
+			kind = "cidr"
+		}
+		switch {
+		case direction == "source" && (kind == "ip" || kind == "cidr"):
+			if kind == "ip" && net.ParseIP(rule.Pattern) == nil {
 				return errors.New("invalid_last_good_source_rules")
 			}
-		case "network":
-			if _, _, err := net.ParseCIDR(rule.Pattern); err != nil {
+			if kind == "cidr" {
+				if _, _, err := net.ParseCIDR(rule.Pattern); err != nil {
+					return errors.New("invalid_last_good_source_rules")
+				}
+			}
+		case direction == "destination" && (kind == "ip" || kind == "cidr" || kind == "domain"):
+			if kind == "ip" && net.ParseIP(rule.Pattern) == nil {
+				return errors.New("invalid_last_good_source_rules")
+			}
+			if kind == "cidr" {
+				if _, _, err := net.ParseCIDR(rule.Pattern); err != nil {
+					return errors.New("invalid_last_good_source_rules")
+				}
+			}
+			if kind == "domain" && strings.TrimSpace(rule.Pattern) == "" {
 				return errors.New("invalid_last_good_source_rules")
 			}
 		default:
@@ -2302,13 +2541,28 @@ func normalizeSourceCIDR(pattern string) string {
 func sourceBlacklistRouteRules(sourceRules []sourceBlacklistRule) []any {
 	rules := make([]any, 0, len(sourceRules))
 	for _, entry := range sourceRules {
-		if entry.Kind != "ip" && entry.Kind != "network" {
-			continue
+		kind := entry.Kind
+		if kind == "network" {
+			kind = "cidr"
 		}
-		rules = append(rules, map[string]any{
-			"source_ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
-			"action":         "reject",
-		})
+		direction := ruleDirection(entry)
+		switch {
+		case direction == "source" && (kind == "ip" || kind == "cidr"):
+			rules = append(rules, map[string]any{
+				"source_ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
+				"action":         "reject",
+			})
+		case direction == "destination" && (kind == "ip" || kind == "cidr"):
+			rules = append(rules, map[string]any{
+				"ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
+				"action":  "reject",
+			})
+		case direction == "destination" && kind == "domain":
+			rules = append(rules, map[string]any{
+				"domain_suffix": []string{entry.Pattern},
+				"action":        "reject",
+			})
+		}
 	}
 	return rules
 }

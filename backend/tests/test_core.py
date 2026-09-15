@@ -156,15 +156,15 @@ def test_source_network_normalization_and_match() -> None:
     assert normalize_source_ip("10.32.12.111") == "10.32.12.111"
     assert match_source_blacklist(
         "10.32.12.111",
-        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[0]}],
+        [{"direction": "source", "kind": "network", "pattern": networks[0]}],
     ) == "10.32.12.0/24"
     assert match_source_blacklist(
         "2001:db8::42",
-        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[1]}],
+        [{"direction": "source", "kind": "cidr", "pattern": networks[1]}],
     ) == "2001:db8::/64"
     assert match_source_blacklist(
         "192.0.2.1",
-        [{"scope": "global", "site_id": None, "kind": "network", "pattern": networks[0]}],
+        [{"direction": "source", "kind": "network", "pattern": networks[0]}],
     ) is None
 
 
@@ -173,9 +173,9 @@ def test_source_blacklist_normalization_and_match() -> None:
     assert normalize_source_blacklist_pattern("network", "10.0.0.8/24") == "10.0.0.0/24"
     assert normalize_source_blacklist_pattern("domain", "Blocked.Example.") == "blocked.example"
     rules = [
-        {"scope": "global", "site_id": None, "kind": "ip", "pattern": "192.0.2.10"},
-        {"scope": "site", "site_id": "site-a", "kind": "network", "pattern": "10.0.0.0/24"},
-        {"scope": "global", "site_id": None, "kind": "domain", "pattern": "blocked.example"},
+        {"direction": "source", "kind": "ip", "pattern": "192.0.2.10"},
+        {"direction": "source", "kind": "cidr", "pattern": "10.0.0.0/24"},
+        {"direction": "source", "kind": "domain", "pattern": "blocked.example"},
     ]
     assert match_source_blacklist("192.0.2.10", rules) == "192.0.2.10"
     assert match_source_blacklist("10.0.0.12", rules) == "10.0.0.0/24"
@@ -223,11 +223,11 @@ def test_source_domain_normalization_rejects_non_hostnames(value: str) -> None:
 
 
 def test_source_blacklist_create_normalizes_and_rejects_domain_patterns() -> None:
-    rule = SourceBlacklistCreate(kind="domain", pattern="Blocked.Example.")
+    rule = SourceBlacklistCreate(node_ids=["node-a"], kind="domain", pattern="Blocked.Example.")
     assert rule.pattern == "blocked.example"
 
     with pytest.raises(ValueError, match="invalid_source_blacklist_pattern"):
-        SourceBlacklistCreate(kind="domain", pattern="https://blocked.example")
+        SourceBlacklistCreate(node_ids=["node-a"], kind="domain", pattern="https://blocked.example")
 
 
 def test_source_blacklist_preview_is_indeterminate_for_domain_rules() -> None:
@@ -236,9 +236,8 @@ def test_source_blacklist_preview_is_indeterminate_for_domain_rules() -> None:
         matched_pattern=None,
         reason="allowed",
         source_blacklist=[
-            {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
-            {"scope": "site", "kind": "domain", "pattern": "blocked.example"},
-            {"scope": "global", "kind": "domain", "pattern": "blocked.example"},
+            {"direction": "source", "kind": "ip", "pattern": "192.0.2.1"},
+            {"direction": "source", "kind": "domain", "pattern": "blocked.example"},
         ],
     )
 
@@ -254,8 +253,8 @@ def test_source_blacklist_preview_stays_blocked_when_ip_rule_matches() -> None:
         matched_pattern="192.0.2.1",
         reason="source_blacklisted",
         source_blacklist=[
-            {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
-            {"scope": "site", "kind": "domain", "pattern": "blocked.example"},
+            {"direction": "source", "kind": "ip", "pattern": "192.0.2.1"},
+            {"direction": "source", "kind": "domain", "pattern": "blocked.example"},
         ],
     )
 
@@ -268,7 +267,7 @@ def test_source_blacklist_preview_stays_blocked_when_ip_rule_matches() -> None:
 def test_source_blacklist_preview_helper_reports_domain_resolution_required() -> None:
     result = preview_source_blacklist(
         "198.51.100.5",
-        [{"scope": "global", "kind": "domain", "pattern": "blocked.example"}],
+        [{"direction": "source", "kind": "domain", "pattern": "blocked.example"}],
     )
 
     assert result == {
@@ -282,8 +281,8 @@ def test_source_blacklist_preview_helper_reports_domain_resolution_required() ->
 
 def test_source_blacklist_preview_helper_keeps_definitive_results() -> None:
     rules = [
-        {"scope": "global", "kind": "ip", "pattern": "192.0.2.1"},
-        {"scope": "global", "kind": "domain", "pattern": "blocked.example"},
+        {"direction": "source", "kind": "ip", "pattern": "192.0.2.1"},
+        {"direction": "source", "kind": "domain", "pattern": "blocked.example"},
     ]
     assert preview_source_blacklist("192.0.2.1", rules)["allowed"] is False
     assert preview_source_blacklist("192.0.2.1", rules)["reason"] == "source_blacklisted"
@@ -296,128 +295,48 @@ def test_source_blacklist_preview_helper_keeps_definitive_results() -> None:
     }
 
 
-@pytest.mark.asyncio
-async def test_source_blacklist_startup_migration_normalizes_or_removes_bad_documents() -> None:
-    created_at = datetime(2026, 9, 14, tzinfo=timezone.utc)
+class _MigrationCursor:
+    def __init__(self, documents: list[dict[str, object]]) -> None:
+        self.documents = list(documents)
 
-    class Cursor:
-        def __init__(self, documents: list[dict[str, object]]) -> None:
-            self.documents = list(documents)
-
-        def __aiter__(self):
-            async def values():
-                for document in self.documents:
-                    yield document
-
-            return values()
-
-    class Collection:
-        def __init__(self, documents: list[dict[str, object]]) -> None:
-            self.documents = documents
-
-        def find(self, _: dict[str, object]) -> Cursor:
-            return Cursor(self.documents)
-
-        async def delete_one(self, query: dict[str, object]) -> None:
-            self.documents[:] = [
-                document for document in self.documents if document["_id"] != query["_id"]
-            ]
-
-        async def update_one(self, query: dict[str, object], update: dict[str, object]) -> None:
+    def __aiter__(self):
+        async def values():
             for document in self.documents:
-                if document["_id"] == query["_id"]:
-                    document.update(update["$set"])  # type: ignore[arg-type]
-                    return
-            raise AssertionError(f"missing document {query!r}")
+                yield document
 
-    source_rules = Collection(
-        [
-            {
-                "_id": "global",
-                "scope": "global",
-                "site_id": None,
-                "kind": "ip",
-                "pattern": "192.0.2.10",
-                "comment": "global",
-                "enabled": True,
-                "created_by": "admin",
-                "created_at": created_at,
-            },
-            {
-                "_id": "site",
-                "scope": "site",
-                "site_id": "site-a",
-                "kind": "network",
-                "pattern": "198.51.100.42/24",
-                "comment": "network",
-                "enabled": True,
-                "created_by": "admin",
-                "created_at": created_at,
-            },
-            {
-                "_id": "wrong-global-target",
-                "scope": "global",
-                "site_id": "site-a",
-                "kind": "ip",
-                "pattern": "192.0.2.10",
-                "comment": "global",
-                "enabled": True,
-                "created_by": "admin",
-                "created_at": created_at,
-            },
-            {
-                "_id": "duplicate",
-                "scope": "global",
-                "site_id": None,
-                "kind": "ip",
-                "pattern": "192.0.2.10",
-                "comment": "duplicate",
-                "enabled": True,
-                "created_by": "admin",
-                "created_at": created_at,
-            },
-            {
-                "_id": "invalid-kind",
-                "scope": "global",
-                "site_id": None,
-                "kind": "cidr",
-                "pattern": "192.0.2.0/24",
-                "enabled": True,
-            },
-            {
-                "_id": "orphan-site",
-                "scope": "site",
-                "site_id": "missing-site",
-                "kind": "ip",
-                "pattern": "192.0.2.11",
-                "enabled": True,
-            },
-            {
-                "_id": "invalid-enabled",
-                "scope": "global",
-                "site_id": None,
-                "kind": "ip",
-                "pattern": "192.0.2.12",
-                "enabled": "true",
-            },
+        return values()
+
+
+class _MigrationCollection:
+    def __init__(self, documents: list[dict[str, object]]) -> None:
+        self.documents = documents
+
+    def find(self, _: dict[str, object]) -> _MigrationCursor:
+        return _MigrationCursor(self.documents)
+
+    async def drop_index(self, _: str) -> None:
+        return None
+
+    async def delete_one(self, query: dict[str, object]) -> None:
+        self.documents[:] = [
+            document for document in self.documents if document["_id"] != query["_id"]
         ]
-    )
-    collections = {
-        "Site": Collection([{"_id": "site-a"}]),
-        "SourceBlacklist": source_rules,
-    }
 
-    class Database:
-        def __getitem__(self, name: str) -> Collection:
-            return collections[name]
+    async def update_one(self, query: dict[str, object], update: dict[str, object]) -> None:
+        for document in self.documents:
+            if document["_id"] == query["_id"]:
+                for field in update.get("$unset", {}):
+                    document.pop(field, None)
+                document.update(update.get("$set", {}))  # type: ignore[arg-type]
+                return
+        raise AssertionError(f"missing document {query!r}")
 
-        async def list_collection_names(self) -> list[str]:
-            return list(collections)
+    async def insert_many(self, documents: list[dict[str, object]]) -> None:
+        self.documents.extend(documents)
 
-    updated, removed = await _migrate_source_blacklist_state(Database())
 
-    assert (updated, removed) == (1, 5)
-    assert source_rules.documents == [
+def _legacy_blacklist_documents(created_at: datetime) -> list[dict[str, object]]:
+    return [
         {
             "_id": "global",
             "scope": "global",
@@ -434,49 +353,175 @@ async def test_source_blacklist_startup_migration_normalizes_or_removes_bad_docu
             "scope": "site",
             "site_id": "site-a",
             "kind": "network",
-            "pattern": "198.51.100.0/24",
+            "pattern": "198.51.100.42/24",
             "comment": "network",
             "enabled": True,
             "created_by": "admin",
             "created_at": created_at,
         },
+        {
+            "_id": "wrong-global-target",
+            "scope": "global",
+            "site_id": "site-a",
+            "kind": "ip",
+            "pattern": "192.0.2.10",
+            "comment": "global",
+            "enabled": True,
+            "created_by": "admin",
+            "created_at": created_at,
+        },
+        {
+            "_id": "duplicate",
+            "scope": "global",
+            "site_id": None,
+            "kind": "ip",
+            "pattern": "192.0.2.10",
+            "comment": "duplicate",
+            "enabled": True,
+            "created_by": "admin",
+            "created_at": created_at,
+        },
+        {
+            "_id": "invalid-kind",
+            "scope": "global",
+            "site_id": None,
+            "kind": "bogus",
+            "pattern": "192.0.2.0/24",
+            "enabled": True,
+        },
+        {
+            "_id": "orphan-site",
+            "scope": "site",
+            "site_id": "missing-site",
+            "kind": "ip",
+            "pattern": "192.0.2.11",
+            "enabled": True,
+        },
+        {
+            "_id": "invalid-enabled",
+            "scope": "global",
+            "site_id": None,
+            "kind": "ip",
+            "pattern": "192.0.2.12",
+            "enabled": "true",
+        },
     ]
 
 
 @pytest.mark.asyncio
-async def test_effective_source_blacklist_ignores_malformed_rules_at_runtime(
+async def test_source_blacklist_startup_migration_drops_legacy_rules_without_nodes() -> None:
+    created_at = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    source_rules = _MigrationCollection(_legacy_blacklist_documents(created_at))
+    collections = {
+        "Site": _MigrationCollection([{"_id": "site-a"}]),
+        "SourceBlacklist": source_rules,
+    }
+
+    class Database:
+        def __getitem__(self, name: str) -> _MigrationCollection:
+            return collections[name]
+
+        async def list_collection_names(self) -> list[str]:
+            return list(collections)
+
+    updated, removed = await _migrate_source_blacklist_state(Database())
+
+    assert (updated, removed) == (0, 7)
+    assert source_rules.documents == []
+
+
+@pytest.mark.asyncio
+async def test_source_blacklist_startup_migration_expands_legacy_rules_onto_nodes() -> None:
+    created_at = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    source_rules = _MigrationCollection(_legacy_blacklist_documents(created_at))
+    collections = {
+        "Site": _MigrationCollection([{"_id": "site-a"}, {"_id": "site-b"}]),
+        "Node": _MigrationCollection(
+            [
+                {"_id": "node-a", "agent_id": "node-a", "site_id": "site-a"},
+                {"_id": "node-b", "agent_id": "node-b", "site_id": "site-b"},
+            ]
+        ),
+        "SourceBlacklist": source_rules,
+    }
+
+    class Database:
+        def __getitem__(self, name: str) -> _MigrationCollection:
+            return collections[name]
+
+        async def list_collection_names(self) -> list[str]:
+            return list(collections)
+
+    updated, removed = await _migrate_source_blacklist_state(Database())
+
+    assert (updated, removed) == (3, 5)
+    remaining = sorted(
+        (
+            (
+                document.get("node_id"),
+                document.get("direction"),
+                document.get("kind"),
+                document.get("pattern"),
+            )
+            for document in source_rules.documents
+        )
+    )
+    assert remaining == [
+        ("node-a", "source", "cidr", "198.51.100.0/24"),
+        ("node-a", "source", "ip", "192.0.2.10"),
+        ("node-b", "source", "ip", "192.0.2.10"),
+    ]
+    for document in source_rules.documents:
+        assert "scope" not in document
+        assert "site_id" not in document
+
+
+@pytest.mark.asyncio
+async def test_effective_blacklist_ignores_malformed_rules_at_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entries = [
-        SimpleNamespace(id="global", scope="global", site_id=None, kind="ip", pattern="192.0.2.10"),
         SimpleNamespace(
-            id="site",
-            scope="site",
-            site_id="site-a",
+            id="ip",
+            node_id="node-a",
+            direction="source",
+            kind="ip",
+            pattern="192.0.2.10",
+        ),
+        SimpleNamespace(
+            id="cidr",
+            node_id="node-a",
+            direction="source",
             kind="network",
             pattern="198.51.100.0/24",
         ),
         SimpleNamespace(
-            id="wrong-global",
-            scope="global",
-            site_id="site-a",
+            id="dest",
+            node_id="node-a",
+            direction="destination",
+            kind="domain",
+            pattern="ads.example",
+        ),
+        SimpleNamespace(
+            id="other-node",
+            node_id="node-b",
+            direction="source",
             kind="ip",
             pattern="192.0.2.11",
         ),
         SimpleNamespace(
             id="bad-kind",
-            scope="global",
-            site_id=None,
-            kind="cidr",
+            node_id="node-a",
+            direction="source",
+            kind="bogus",
             pattern="192.0.2.0/24",
         ),
-        SimpleNamespace(id="bad-pattern", scope="site", site_id="site-a", kind="domain", pattern="https://bad.example"),
         SimpleNamespace(
-            id="other-site",
-            scope="site",
-            site_id="site-b",
-            kind="ip",
-            pattern="192.0.2.12",
+            id="bad-pattern",
+            node_id="node-a",
+            direction="source",
+            kind="domain",
+            pattern="https://bad.example",
         ),
     ]
 
@@ -488,13 +533,30 @@ async def test_effective_source_blacklist_ignores_malformed_rules_at_runtime(
         @classmethod
         def find(cls, query: dict[str, object]) -> Query:
             assert query["enabled"] is True
+            assert query["node_id"] == "node-a"
             return Query()
 
     monkeypatch.setattr(cidr, "SourceBlacklist", SourceBlacklistModel)
 
-    assert await cidr.effective_source_blacklist("site-a") == [
-        {"scope": "global", "site_id": None, "kind": "ip", "pattern": "192.0.2.10"},
-        {"scope": "site", "site_id": "site-a", "kind": "network", "pattern": "198.51.100.0/24"},
+    assert await cidr.effective_blacklist("node-a") == [
+        {
+            "id": "dest",
+            "direction": "destination",
+            "kind": "domain",
+            "pattern": "ads.example",
+        },
+        {
+            "id": "cidr",
+            "direction": "source",
+            "kind": "cidr",
+            "pattern": "198.51.100.0/24",
+        },
+        {
+            "id": "ip",
+            "direction": "source",
+            "kind": "ip",
+            "pattern": "192.0.2.10",
+        },
     ]
 
 
@@ -1007,3 +1069,191 @@ async def test_legacy_telemetry_deduplication_keeps_the_newest_marker() -> None:
 
     assert removed == 2
     assert collection.deleted_filters == [{"_id": {"$in": ["older", "oldest"]}}]
+
+
+class _TelemetryField:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __eq__(self, other: object) -> tuple[str, object]:  # type: ignore[override]
+        return self.name, other
+
+
+class _FakeUpdateResult:
+    def __init__(self, matched_count: int) -> None:
+        self.matched_count = matched_count
+
+
+class _FakeTelemetryCursorCollection:
+    def __init__(self, last_sequence: int) -> None:
+        self.last_sequence = last_sequence
+        self.filters: list[dict[str, object]] = []
+
+    async def update_one(self, query: dict[str, object], _: dict[str, object]) -> _FakeUpdateResult:
+        self.filters.append(query)
+        expected = query.get("last_sequence")
+        if not isinstance(expected, dict):
+            return _FakeUpdateResult(0)
+        if "$lt" in expected and self.last_sequence < int(expected["$lt"]):
+            self.last_sequence = int(expected["$lt"])
+            return _FakeUpdateResult(1)
+        if "$gt" in expected and self.last_sequence > int(expected["$gt"]):
+            self.last_sequence = int(expected["$gt"])
+            return _FakeUpdateResult(1)
+        return _FakeUpdateResult(0)
+
+
+class _FakeTelemetryBatchDoc:
+    def __init__(self, **values: object) -> None:
+        self.values = values
+        self.batch_id = str(values.get("batch_id") or "")
+        self.sequence = int(values.get("sequence") or 0)
+
+    async def insert(self) -> None:
+        raise AssertionError("insert should be patched in tests")
+
+    async def delete(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_sequence_restart_purges_old_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    from main import _accept_telemetry_batch
+    import main as main_module
+
+    cursor = _FakeTelemetryCursorCollection(last_sequence=50_000)
+    deleted: list[dict[str, object]] = []
+    inserts: list[dict[str, object]] = []
+    existing_by_batch: dict[str, _FakeTelemetryBatchDoc] = {
+        "old-1": _FakeTelemetryBatchDoc(batch_id="old-1", sequence=12),
+    }
+    existing_by_sequence: dict[int, _FakeTelemetryBatchDoc] = {
+        12: existing_by_batch["old-1"],
+    }
+
+    class _FakeBatchModel:
+        node_id = _TelemetryField("node_id")
+        kind = _TelemetryField("kind")
+        batch_id = _TelemetryField("batch_id")
+        sequence = _TelemetryField("sequence")
+
+        def __init__(self, **values: object) -> None:
+            self.doc = _FakeTelemetryBatchDoc(**values)
+
+        async def insert(self) -> None:
+            sequence = self.doc.sequence
+            batch_id = self.doc.batch_id
+            if sequence in existing_by_sequence and existing_by_sequence[sequence].batch_id != batch_id:
+                raise DuplicateKeyError("sequence")
+            inserts.append(self.doc.values)
+            existing_by_sequence[sequence] = self.doc
+            existing_by_batch[batch_id] = self.doc
+
+        @classmethod
+        async def find_one(cls, *predicates: object) -> _FakeTelemetryBatchDoc | None:
+            values = {
+                name: value
+                for predicate in predicates
+                if isinstance(predicate, tuple) and len(predicate) == 2
+                for name, value in [predicate]
+            }
+            if "batch_id" in values:
+                return existing_by_batch.get(str(values["batch_id"]))
+            if "sequence" in values:
+                return existing_by_sequence.get(int(values["sequence"]))
+            return None
+
+        @classmethod
+        def get_motor_collection(cls) -> SimpleNamespace:
+            async def delete_many(query: dict[str, object]) -> None:
+                deleted.append(query)
+                existing_by_batch.clear()
+                existing_by_sequence.clear()
+
+            return SimpleNamespace(delete_many=delete_many)
+
+    monkeypatch.setattr(main_module.TelemetryCursor, "get_motor_collection", staticmethod(lambda: cursor))
+    monkeypatch.setattr(main_module, "TelemetryBatch", _FakeBatchModel)
+
+    node = SimpleNamespace(agent_id="codedev")
+    accepted = await _accept_telemetry_batch(
+        node=node,
+        kind="connection_snapshot",
+        batch_id="new-12",
+        sequence=12,
+        item_count=1,
+    )
+
+    assert accepted is True
+    assert deleted == [{"node_id": "codedev", "kind": "connection_snapshot"}]
+    assert inserts[-1]["batch_id"] == "new-12"
+    assert cursor.last_sequence == 12
+
+
+@pytest.mark.asyncio
+async def test_telemetry_sequence_collision_purges_after_cursor_already_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    from main import _accept_telemetry_batch
+    import main as main_module
+
+    cursor = _FakeTelemetryCursorCollection(last_sequence=11)
+    deleted: list[dict[str, object]] = []
+    existing_by_sequence = {12: _FakeTelemetryBatchDoc(batch_id="old-12", sequence=12)}
+
+    class _FakeBatchModel:
+        node_id = _TelemetryField("node_id")
+        kind = _TelemetryField("kind")
+        batch_id = _TelemetryField("batch_id")
+        sequence = _TelemetryField("sequence")
+        attempts = 0
+
+        def __init__(self, **values: object) -> None:
+            self.doc = _FakeTelemetryBatchDoc(**values)
+
+        async def insert(self) -> None:
+            type(self).attempts += 1
+            if type(self).attempts == 1:
+                raise DuplicateKeyError("sequence")
+            existing_by_sequence[self.doc.sequence] = self.doc
+
+        @classmethod
+        async def find_one(cls, *predicates: object) -> _FakeTelemetryBatchDoc | None:
+            values = {
+                name: value
+                for predicate in predicates
+                if isinstance(predicate, tuple) and len(predicate) == 2
+                for name, value in [predicate]
+            }
+            if "batch_id" in values:
+                return None
+            if "sequence" in values:
+                return existing_by_sequence.get(int(values["sequence"]))
+            return None
+
+        @classmethod
+        def get_motor_collection(cls) -> SimpleNamespace:
+            async def delete_many(query: dict[str, object]) -> None:
+                deleted.append(query)
+                existing_by_sequence.clear()
+
+            return SimpleNamespace(delete_many=delete_many)
+
+    monkeypatch.setattr(main_module.TelemetryCursor, "get_motor_collection", staticmethod(lambda: cursor))
+    monkeypatch.setattr(main_module, "TelemetryBatch", _FakeBatchModel)
+
+    accepted = await _accept_telemetry_batch(
+        node=SimpleNamespace(agent_id="codedev"),
+        kind="connection_snapshot",
+        batch_id="live-12",
+        sequence=12,
+        item_count=1,
+    )
+
+    assert accepted is True
+    assert deleted == [{"node_id": "codedev", "kind": "connection_snapshot"}]
+    assert cursor.last_sequence == 12

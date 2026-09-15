@@ -21,9 +21,9 @@ type SourceRule struct {
 // allowlist or a catch-all reject.
 func RenderSourceRules(port int, rules []SourceRule, shutdown bool) string {
 	var lines []string
-	// `destroy` is accepted when the table does not exist, so the exact same
-	// script can be dry-run on a fresh node and applied on an existing node.
-	lines = append(lines, "destroy table inet grouproxy")
+	// Render only the replacement table. Apply() deletes any previous
+	// grouproxy table first so this stays portable on nftables 1.0 (no
+	// `destroy`) and 1.1+.
 	lines = append(lines, "table inet grouproxy {")
 	lines = append(lines, "  chain grouproxy_input {")
 	lines = append(lines, "    type filter hook input priority -100; policy accept;")
@@ -64,7 +64,7 @@ func normalizeSourceRule(rule SourceRule) (family, pattern string, ok bool) {
 			return "ip", address.To4().String(), true
 		}
 		return "ip6", address.String(), true
-	case "network":
+	case "network", "cidr":
 		address, network, err := net.ParseCIDR(pattern)
 		if err != nil || address == nil || network == nil {
 			return "", "", false
@@ -90,6 +90,8 @@ func Check(script string) error {
 }
 
 func Apply(script string) error {
+	// Ignore a missing table so the same path works on a first-time node.
+	_ = exec.Command("nft", "delete", "table", "inet", "grouproxy").Run()
 	cmd := exec.Command("nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(script)
 	if output, err := cmd.CombinedOutput(); err != nil {

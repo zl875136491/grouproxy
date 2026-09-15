@@ -28,7 +28,7 @@ run_remote() {
   fi
 }
 
-printf 'Installing node artifacts on %s (control plane remains on codedev)\n' "$REMOTE"
+printf 'Installing node artifacts on %s (control plane and dashboard stay on Beijing)\n' "$REMOTE"
 run_remote "sudo groupadd --system grouproxy 2>/dev/null || true"
 run_remote "id -u grouproxy >/dev/null 2>&1 || sudo useradd --system --gid grouproxy --home-dir /opt/grouproxy --shell /usr/sbin/nologin grouproxy"
 run_remote "sudo install -d -m 0755 /opt/grouproxy/bin"
@@ -36,11 +36,13 @@ run_remote "sudo install -d -o grouproxy -g grouproxy -m 0750 /opt/grouproxy/etc
 if [[ "$DRY_RUN" != "1" ]]; then
   scp "${SSH_ARGS[@]}" "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" "$REMOTE:/tmp/grouproxy-monitor"
   scp "${SSH_ARGS[@]}" "$ROOT_DIR/singbox/sing-box" "$REMOTE:/tmp/sing-box"
-  scp "${SSH_ARGS[@]}" "$ROOT_DIR/deploy/grouproxy-monitor.service" "$ROOT_DIR/deploy/sing-box.service" "$REMOTE:/tmp/"
+  scp "${SSH_ARGS[@]}" "$ROOT_DIR/deploy/grouproxy-monitor.service" "$REMOTE:/tmp/grouproxy-monitor.service"
   run_remote "sudo install -m 0755 /tmp/grouproxy-monitor /opt/grouproxy/bin/grouproxy-monitor"
   run_remote "sudo install -m 0755 /tmp/sing-box /opt/grouproxy/bin/sing-box"
   run_remote "sudo install -m 0644 /tmp/grouproxy-monitor.service /etc/systemd/system/grouproxy-monitor.service"
-  run_remote "sudo install -m 0644 /tmp/sing-box.service /etc/systemd/system/sing-box.service"
+  # The monitor owns the child sing-box process. Never install
+  # deploy/sing-box.service: a host may already run another product's
+  # unit at /etc/systemd/system/sing-box.service.
   run_remote "sudo systemctl daemon-reload"
   # Validate the complete monitor configuration, including the token file,
   # before enabling the service. The validation path performs no network call

@@ -17,21 +17,24 @@ layer is part of this deployment.
   `curl http://<dashboard-domain>/healthz` exposes the running API version.
 - HTTP Basic proxy authentication is intentionally absent. Proxy domains are
   resolved by local DNS, so source access is allow-all by default. Operators
-  can apply explicit source blacklists globally or per site for an IP, network,
-  or source domain.
+  can apply explicit per-node blacklists for an IP, CIDR, or domain on either
+  the source or destination side. Production topology (dashboard on Beijing,
+  monitors in Beijing / Tianjin / Kunshan / Shenzhen / Hangzhou) is documented
+  in [`deploy/README.md`](deploy/README.md).
 
 The monitor validates signed bundles with `listen.http_port: 1080` and renders
 the public sing-box HTTP inbound on that port. The same-host two-node test
 harness has one explicit public test exception for its second node on `:18081`;
 deployed nodes remain on `:1080`.
 
-Source deny rules use the management endpoint `GET|POST /api/v1/source-blacklist`
-and `DELETE /api/v1/source-blacklist/{entry_id}`. Each record has `scope`
-(`global` or `site`), `site_id` for site scope, `kind` (`ip`, `network`, or
-`domain`), `pattern`, and `comment`. Desired Bundles contain only the global
-rules and rules for that bundle's site under `source_blacklist`. Creating or
-removing a rule immediately creates a normal release for each affected site's
-nodes; no allowlist or destination-policy field is part of the bundle contract.
+Source deny rules use `GET|POST /api/v1/blacklist` (the legacy
+`/api/v1/source-blacklist` path remains as an alias). Each record is scoped to
+one or more `node_ids`, with `direction` (`source` or `destination`) and `kind`
+(`ip`, `cidr`, or `domain`). Desired Bundles carry only that node's rules under
+`blacklist`. Creating or removing a rule immediately creates a normal release
+for the selected nodes. No allowlist is part of the bundle contract. The root
+administrator is `zhangle`; other accounts may be granted the same
+administrator privileges.
 
 The `/` dashboard page is the public workstation runbook (also available at
 `/access`). It selects a pair of
@@ -45,8 +48,8 @@ parameterless current-user toggles: each run detects whether the proxy is
 enabled and switches to the opposite state. No downloaded asset installs proxy
 credentials or a CA.
 
-The production dashboard is a Next.js standalone service. Its deployable
-systemd unit and replacement steps for retired Grouproxy NGINX files are in
+The production dashboard is a Next.js standalone service on the Beijing node.
+Install steps for the five-site topology are in
 [`deploy/README.md`](deploy/README.md).
 
 ## Quickstart

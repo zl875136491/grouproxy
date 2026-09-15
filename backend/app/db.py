@@ -9,7 +9,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from .config import PROXY_LISTEN_PORT, Settings
 from .models import DOCUMENT_MODELS
-from .services.cidr import normalize_source_blacklist_pattern
+from .services.cidr import (
+    canonicalize_direction,
+    canonicalize_kind,
+    normalize_source_blacklist_pattern,
+)
 from .services.crypto import sign_bundle
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,7 @@ logger = logging.getLogger(__name__)
 TELEMETRY_BATCH_COLLECTION = "TelemetryBatch"
 TELEMETRY_CURSOR_COLLECTION = "TelemetryCursor"
 SITE_COLLECTION = "Site"
+NODE_COLLECTION = "Node"
 SUBSCRIPTION_SOURCE_COLLECTION = "SubscriptionSource"
 LEGACY_PROXY_CREDENTIAL_COLLECTION = "ProxyCredential"
 DESIRED_RELEASE_COLLECTION = "DesiredRelease"
@@ -40,6 +45,7 @@ RETIRED_POLICY_FIELDS = frozenset(
         "acl_note",
         "acl_sources",
         "effective_cidrs",
+        "source_blacklist",
     }
 )
 
@@ -58,42 +64,18 @@ def _strip_retired_policy_fields(value: Any) -> Any:
     return value
 
 
-def _normalized_source_blacklist_document(
-    document: dict[str, Any], *, known_site_ids: set[str]
-) -> dict[str, Any] | None:
-    """Return a canonical source rule, or drop an unsafe legacy document.
+def _canonical_blacklist_fields(document: dict[str, Any]) -> dict[str, Any] | None:
+    """Return normalized node-scoped fields, or None when the row is unsafe."""
 
-    Beanie validates ``SourceBlacklist`` documents when it reads them. A row
-    written by an older build or directly into MongoDB can otherwise make an
-    entire policy query fail before the request handler has a chance to reject
-    the bad value. Source access is intentionally allow-all by default, so an
-    unrecognised deny record must not become an implicit blocker.
-    """
-
-    scope = document.get("scope")
-    kind = document.get("kind")
-    if scope not in {"global", "site"} or kind not in {"ip", "network", "domain"}:
-        return None
     try:
+        kind = canonicalize_kind(document.get("kind"))
+        direction = canonicalize_direction(document.get("direction") or "source")
         pattern = normalize_source_blacklist_pattern(kind, document.get("pattern"))
     except (TypeError, ValueError):
         return None
-
-    raw_site_id = document.get("site_id")
-    if scope == "global":
-        # The two scopes have mutually exclusive targets. Do not guess whether
-        # an inconsistent row was intended to be global or site-scoped: source
-        # policy must not widen into an all-site deny during migration.
-        if raw_site_id is not None:
-            return None
-        site_id: str | None = None
-    else:
-        if not isinstance(raw_site_id, str):
-            return None
-        site_id = raw_site_id.strip()
-        if not site_id or site_id not in known_site_ids:
-            return None
-
+    node_id = document.get("node_id")
+    if not isinstance(node_id, str) or not node_id.strip():
+        return None
     raw_enabled = document.get("enabled", True)
     if not isinstance(raw_enabled, bool):
         return None
@@ -107,8 +89,8 @@ def _normalized_source_blacklist_document(
     if not isinstance(created_at, datetime):
         created_at = datetime.now(timezone.utc)
     return {
-        "scope": scope,
-        "site_id": site_id,
+        "node_id": node_id.strip(),
+        "direction": direction,
         "kind": kind,
         "pattern": pattern,
         "comment": comment,
@@ -118,14 +100,55 @@ def _normalized_source_blacklist_document(
     }
 
 
-async def _migrate_source_blacklist_state(database: Any) -> tuple[int, int]:
-    """Normalize valid source rules and remove malformed/orphaned duplicates.
+def _legacy_target_node_ids(
+    document: dict[str, Any],
+    *,
+    nodes_by_site: dict[str, list[str]],
+    all_node_ids: list[str],
+    known_site_ids: set[str],
+) -> list[str]:
+    """Expand retired global/site rules onto concrete nodes. Fail open otherwise."""
 
-    This runs before Beanie opens the collection, which makes the modern flat
-    blacklist contract resilient to corrupted historical documents. The first
-    valid rule for a canonical key is retained; later duplicates are removed
-    before Beanie attempts to create its unique index.
-    """
+    if document.get("node_id"):
+        return []
+    scope = document.get("scope")
+    if scope == "global":
+        if document.get("site_id") is not None:
+            return []
+        return list(all_node_ids)
+    if scope == "site":
+        raw_site_id = document.get("site_id")
+        if not isinstance(raw_site_id, str) or raw_site_id not in known_site_ids:
+            return []
+        return list(nodes_by_site.get(raw_site_id, []))
+    return []
+
+
+def _canonical_bundle_blacklist(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            direction = canonicalize_direction(item.get("direction") or "source")
+            kind = canonicalize_kind(item.get("kind"))
+            pattern = normalize_source_blacklist_pattern(kind, item.get("pattern"))
+        except (TypeError, ValueError):
+            continue
+        key = (direction, kind, pattern)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"direction": direction, "kind": kind, "pattern": pattern})
+    result.sort(key=lambda value: (value["direction"], value["kind"], value["pattern"]))
+    return result
+
+
+async def _migrate_source_blacklist_state(database: Any) -> tuple[int, int]:
+    """Rewrite legacy global/site rules into per-node rows and drop unsafe ones."""
 
     collections = set(await database.list_collection_names())
     if SOURCE_BLACKLIST_COLLECTION not in collections:
@@ -136,41 +159,115 @@ async def _migrate_source_blacklist_state(database: Any) -> tuple[int, int]:
         async for site in database[SITE_COLLECTION].find({})
         if site.get("_id") is not None
     }
+    nodes_by_site: dict[str, list[str]] = {site_id: [] for site_id in known_site_ids}
+    all_node_ids: list[str] = []
+    if NODE_COLLECTION in collections:
+        async for node in database[NODE_COLLECTION].find({}):
+            agent_id = node.get("agent_id")
+            site_id = node.get("site_id")
+            if not isinstance(agent_id, str) or not agent_id.strip():
+                continue
+            node_id = agent_id.strip()
+            all_node_ids.append(node_id)
+            if isinstance(site_id, str) and site_id in nodes_by_site:
+                nodes_by_site[site_id].append(node_id)
     rules = database[SOURCE_BLACKLIST_COLLECTION]
+    try:
+        await rules.drop_index("unique_source_blacklist_rule")
+    except Exception:
+        pass
+    try:
+        await rules.drop_index("source_blacklist_site_enabled")
+    except Exception:
+        pass
+
     normalized_count = 0
     removed_count = 0
-    seen: set[tuple[str, str | None, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
+    pending_inserts: list[dict[str, Any]] = []
     async for document in rules.find({}):
-        normalized = _normalized_source_blacklist_document(
-            document, known_site_ids=known_site_ids
-        )
         document_id = document.get("_id")
-        if normalized is None:
-            await rules.delete_one({"_id": document_id})
-            removed_count += 1
+        if document.get("node_id"):
+            normalized = _canonical_blacklist_fields(document)
+            if normalized is None:
+                await rules.delete_one({"_id": document_id})
+                removed_count += 1
+                continue
+            key = (
+                normalized["node_id"],
+                normalized["direction"],
+                normalized["kind"],
+                normalized["pattern"],
+            )
+            if key in seen:
+                await rules.delete_one({"_id": document_id})
+                removed_count += 1
+                continue
+            seen.add(key)
+            changes = {
+                field: value
+                for field, value in normalized.items()
+                if document.get(field) != value
+            }
+            unset = {
+                field: ""
+                for field in ("scope", "site_id")
+                if field in document
+            }
+            update: dict[str, Any] = {}
+            if changes:
+                update["$set"] = changes
+            if unset:
+                update["$unset"] = unset
+            if update:
+                await rules.update_one({"_id": document_id}, update)
+                normalized_count += 1
             continue
-        key = (
-            str(normalized["scope"]),
-            normalized["site_id"],
-            str(normalized["kind"]),
-            str(normalized["pattern"]),
+
+        targets = _legacy_target_node_ids(
+            document,
+            nodes_by_site=nodes_by_site,
+            all_node_ids=all_node_ids,
+            known_site_ids=known_site_ids,
         )
-        if key in seen:
+        prototype = dict(document)
+        prototype.pop("scope", None)
+        prototype.pop("site_id", None)
+        kept = False
+        for node_id in targets:
+            prototype["node_id"] = node_id
+            prototype["direction"] = prototype.get("direction") or "source"
+            normalized = _canonical_blacklist_fields(prototype)
+            if normalized is None:
+                continue
+            key = (
+                normalized["node_id"],
+                normalized["direction"],
+                normalized["kind"],
+                normalized["pattern"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            if not kept:
+                unset = {"scope": "", "site_id": ""}
+                await rules.update_one(
+                    {"_id": document_id},
+                    {"$set": normalized, "$unset": unset},
+                )
+                normalized_count += 1
+                kept = True
+            else:
+                pending_inserts.append(dict(normalized))
+        if not kept:
             await rules.delete_one({"_id": document_id})
             removed_count += 1
-            continue
-        seen.add(key)
-        changes = {
-            field: value
-            for field, value in normalized.items()
-            if document.get(field) != value
-        }
-        if changes:
-            await rules.update_one({"_id": document_id}, {"$set": changes})
-            normalized_count += 1
+    if pending_inserts:
+        await rules.insert_many(pending_inserts)
+        normalized_count += len(pending_inserts)
     if normalized_count or removed_count:
         logger.warning(
-            "Normalized source blacklist state before startup; updated=%d removed=%d",
+            "Normalized node blacklist state before startup; updated=%d removed=%d",
             normalized_count,
             removed_count,
         )
@@ -213,11 +310,12 @@ async def _migrate_retired_policy_state(database: Any, settings: Settings) -> No
         listen = normalized.get("listen")
         if not isinstance(listen, dict) or listen.get("http_port") != PROXY_LISTEN_PORT:
             normalized["listen"] = {"http_port": PROXY_LISTEN_PORT}
-        # The modern bundle contract has a single flat source blacklist. An
-        # old bundle becomes an explicit empty blacklist, which is allow-all.
-        if not isinstance(normalized.get("source_blacklist"), list):
-            normalized["source_blacklist"] = []
-        normalized["min_monitor_version"] = "0.5.0"
+        raw_blacklist = normalized.get("blacklist")
+        if not isinstance(raw_blacklist, list):
+            raw_blacklist = bundle.get("source_blacklist")
+        normalized["blacklist"] = _canonical_bundle_blacklist(raw_blacklist)
+        normalized.pop("source_blacklist", None)
+        normalized["min_monitor_version"] = "0.6.0"
         if normalized == bundle:
             continue
         signed = sign_bundle(normalized, settings.bundle_hmac_secret)
