@@ -156,6 +156,9 @@ ensure_docker() {
           die "unable to merge registry mirrors into $daemon_file"
         fi
         chmod 0644 "$temp_file"
+        local backup_file
+        backup_file="${daemon_file}.before-grouproxy-$(date -u +%Y%m%dT%H%M%SZ)"
+        cp -p -- "$daemon_file" "$backup_file"
         mv -f "$temp_file" "$daemon_file"
         config_changed=1
       }
