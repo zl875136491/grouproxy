@@ -88,6 +88,8 @@ fi
 
 ensure_docker() {
   local config_changed=0
+  local daemon_file=/etc/docker/daemon.json
+  local mirrors_json='["https://docker.m.daocloud.io","https://dockerproxy.com","https://docker.mirrors.sjtug.sjtu.edu.cn","https://docker.nju.edu.cn"]'
 
   if ! command -v docker >/dev/null 2>&1; then
     (( DRY_RUN == 1 )) && {
@@ -112,28 +114,52 @@ ensure_docker() {
       die "unable to install Docker Compose v2"
   fi
 
-  # Only create daemon.json when Docker had no configuration. An existing
-  # proxy or registry policy is deliberately preserved.
-  if [[ ! -e /etc/docker/daemon.json ]]; then
+  # Preserve existing daemon settings and add the supplied mirrors only when
+  # the current configuration does not already provide one.
+  if [[ ! -e "$daemon_file" ]]; then
     (( DRY_RUN == 1 )) && {
       log "Docker has no daemon.json; a real install would add the configured registry mirrors"
     } || {
       install -d -m 0755 /etc/docker
       local temp_file
       temp_file="$(mktemp /etc/docker/daemon.json.XXXXXX)"
-      printf '%s\n' \
-        '{' \
-        '  "registry-mirrors": [' \
-        '    "https://docker.m.daocloud.io",' \
-        '    "https://dockerproxy.com",' \
-        '    "https://docker.mirrors.sjtug.sjtu.edu.cn",' \
-        '    "https://docker.nju.edu.cn"' \
-        '  ]' \
-        '}' > "$temp_file"
+      printf '{\n  "registry-mirrors": %s\n}\n' "$mirrors_json" > "$temp_file"
       chmod 0644 "$temp_file"
       mv -f "$temp_file" /etc/docker/daemon.json
       config_changed=1
     }
+  else
+    if ! command -v jq >/dev/null 2>&1; then
+      (( DRY_RUN == 1 )) && {
+        log "jq is missing; a real run would install jq to merge Docker registry mirrors"
+      } || {
+        command -v apt-get >/dev/null 2>&1 || die "jq is required to preserve the existing daemon.json"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get install -y jq >/dev/null 2>&1 || die "unable to install jq"
+      }
+    fi
+    if ! jq -e 'type == "object"' "$daemon_file" >/dev/null 2>&1; then
+      die "Docker daemon.json is not a valid JSON object: $daemon_file"
+    fi
+    if ! jq -e '(.["registry-mirrors"]? // []) | type == "array" and length > 0' "$daemon_file" >/dev/null 2>&1; then
+      (( DRY_RUN == 1 )) && {
+        log "Docker daemon.json has no registry mirrors; a real run would merge the configured mirrors and preserve existing settings"
+      } || {
+        jq -e '(.["registry-mirrors"]? // []) | type == "array"' "$daemon_file" >/dev/null || \
+          die "Docker daemon.json registry-mirrors must be an array"
+        local temp_file
+        temp_file="$(mktemp /etc/docker/daemon.json.XXXXXX)"
+        if ! jq --argjson mirrors "$mirrors_json" \
+          '.["registry-mirrors"] = (((.["registry-mirrors"] // []) + $mirrors) | unique)' \
+          "$daemon_file" > "$temp_file"; then
+          rm -f -- "$temp_file"
+          die "unable to merge registry mirrors into $daemon_file"
+        fi
+        chmod 0644 "$temp_file"
+        mv -f "$temp_file" "$daemon_file"
+        config_changed=1
+      }
+    fi
   fi
 
   (( DRY_RUN == 1 )) && return
