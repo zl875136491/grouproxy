@@ -275,10 +275,8 @@ code, pre, .mono { font-family: "Source Code Pro", "SFMono-Regular", Consolas, m
 .page-fill { height: 100%; min-height: 0; }
 .page-fill.list-page { grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
 .page-fill.connections-page {
-  height: auto;
-  min-height: 100%;
-  overflow: visible;
-  grid-template-rows: auto minmax(16rem, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 .page-fill.proxies-page { grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
 .list-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
@@ -360,6 +358,111 @@ code, pre, .mono { font-family: "Source Code Pro", "SFMono-Regular", Consolas, m
 .dashboard-grid-primary { grid-template-columns: minmax(0, 1.55fr) minmax(330px, 0.85fr); }
 .dashboard-grid-secondary { grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr); }
 .dashboard-active-work { grid-template-columns: minmax(0, 1fr); }
+.overview-page {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+.overview-summary-strip {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--gp-line);
+  border-radius: 8px;
+  background: var(--gp-canvas);
+  box-shadow: var(--gp-shadow);
+}
+.overview-metric {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 2px;
+  padding: 8px 12px;
+}
+.overview-metric + .overview-metric { border-left: 1px solid var(--gp-line); }
+.overview-metric > span,
+.overview-metric > small {
+  overflow: hidden;
+  color: var(--gp-steel);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+.overview-metric > span { font-weight: 650; }
+.overview-metric > strong {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 2px;
+  overflow: hidden;
+  color: var(--gp-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+}
+.overview-metric > strong small { color: var(--gp-muted); font-size: 11px; font-weight: 500; }
+.overview-metric > small { color: var(--gp-green-dark); }
+.overview-metric-danger > strong { color: var(--gp-danger); }
+.overview-value-divider { color: var(--gp-muted); font-size: 12px; font-weight: 500; }
+.overview-workspace {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(280px, 0.25fr) minmax(0, 0.75fr);
+  gap: 10px;
+  overflow: hidden;
+}
+.overview-topology-panel { min-height: 0; }
+.overview-topology-panel > .panel-heading { padding: 12px 14px 10px; }
+.overview-topology-panel .panel-heading h2 { margin-top: 2px; font-size: 14px; }
+.overview-topology-panel > .flow { min-height: 0; }
+.overview-topology-panel .topology-site-detail { max-height: 260px; overflow: auto; padding: 10px 12px 12px; gap: 8px; }
+.overview-topology-panel .topology-node-list { max-height: 100px; }
+.overview-traffic-section {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
+}
+.overview-traffic-heading {
+  display: flex;
+  min-width: 0;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--gp-line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--gp-canvas);
+}
+.overview-traffic-heading-copy { display: grid; min-width: 0; gap: 1px; }
+.overview-traffic-heading .toolbar-title { gap: 7px; }
+.overview-traffic-heading .toolbar-note { overflow: hidden; padding-left: 25px; text-overflow: ellipsis; white-space: nowrap; }
+.overview-traffic-heading .page-action-group { flex: 0 0 auto; }
+.overview-traffic-heading .page-action-group a { display: inline-flex; align-items: center; gap: 4px; color: var(--gp-green-dark); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.overview-chart-stack { display: grid; min-height: 0; grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 8px; overflow: hidden; }
+.traffic-chart-panel { display: grid; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.traffic-chart-header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 12px 3px; }
+.traffic-chart-header > div { display: grid; min-width: 0; grid-template-columns: auto auto; align-items: baseline; column-gap: 8px; }
+.traffic-chart-header > div > span { overflow: hidden; color: var(--gp-steel); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 650; }
+.traffic-chart-header strong { overflow: hidden; color: var(--traffic-chart-color); text-overflow: ellipsis; white-space: nowrap; font-size: 19px; line-height: 1; font-weight: 700; }
+.traffic-chart-header small { grid-column: 1 / -1; overflow: hidden; color: var(--gp-muted); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.traffic-chart-scale { flex: 0 0 auto; color: var(--gp-muted); font-size: 10px; }
+.traffic-chart-upload { --traffic-chart-color: var(--gp-green-dark); }
+.traffic-chart-download { --traffic-chart-color: #00a8e8; }
+.traffic-chart-connections { --traffic-chart-color: #7040bf; }
+:root[data-theme="dark"] .traffic-chart-connections { --traffic-chart-color: #b69cff; }
+.traffic-chart-plot { min-height: 0; padding: 0 8px 4px; }
+.traffic-chart-svg { display: block; width: 100%; height: 100%; color: var(--traffic-chart-color); }
+.traffic-chart-svg text { fill: var(--gp-muted); font-family: "Source Code Pro", "SFMono-Regular", Consolas, monospace; font-size: 10px; }
+.traffic-chart-empty, .traffic-chart-state { display: grid; min-height: 0; height: 100%; place-items: center; }
 .topology-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
 .topology-panel > .flow { flex: 0 0 auto; }
 .topology-site-detail { display: grid; gap: 12px; border-top: 1px solid var(--gp-line); padding: 14px 18px 16px; background: var(--gp-canvas); }
@@ -1012,6 +1115,7 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 .access-doc-platform-card { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--gp-line); border-radius: 8px; background: var(--gp-canvas); box-shadow: var(--gp-shadow); }
 .access-doc-platform-card > header { display: flex; min-width: 0; align-items: flex-start; gap: 10px; padding: 16px 16px 13px; }
 .access-doc-platform-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: var(--gp-teal-deep); background: var(--gp-green); }
+.access-brand-icon { display: block; flex: 0 0 auto; }
 .access-doc-platform-card header > div { min-width: 0; }
 .access-doc-platform-card h3 { margin: 2px 0 0; color: var(--gp-ink); font-size: 14px; line-height: 1.25; font-weight: 650; scroll-margin-top: 18px; }
 .access-doc-platform-card header p { margin: 4px 0 0; color: var(--gp-steel); font-size: 12px; line-height: 1.5; }
@@ -1079,6 +1183,12 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
 
 @media (max-width: 1180px) {
   .dashboard-grid-primary, .dashboard-grid-secondary, .policy-grid, .access-grid, .release-layout, .subscription-layout { grid-template-columns: 1fr; }
+  .overview-page { height: auto; min-height: 100%; overflow: visible; }
+  .overview-summary-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .overview-workspace { grid-template-columns: 1fr; overflow: visible; }
+  .overview-topology-panel { min-height: 620px; }
+  .overview-traffic-section { min-height: 900px; overflow: visible; }
+  .overview-chart-stack { grid-template-rows: repeat(3, minmax(250px, 1fr)); overflow: visible; }
   .access-document-grid { grid-template-columns: 1fr; }
   .release-workspace { grid-template-columns: 1fr; grid-template-rows: 380px 380px; min-height: 0; overflow: auto; }
   .page-fill.releases-page { grid-template-rows: auto minmax(0, 1fr); height: 100%; overflow: hidden; }
@@ -1136,6 +1246,15 @@ input:focus, select:focus { border-color: var(--gp-green-dark); box-shadow: none
   .login-account-actions { align-items: stretch; flex-direction: column; }
   .login-account-actions > span { display: none; }
   .metric-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .overview-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  .overview-metric { min-height: 62px; padding: 8px 10px; }
+  .overview-metric:nth-child(2n + 1) { border-left: 0; }
+  .overview-metric > strong { font-size: 17px; }
+  .overview-traffic-heading { align-items: flex-start; flex-direction: column; }
+  .overview-traffic-heading .page-action-group { width: 100%; justify-content: space-between; }
+  .overview-topology-panel { min-height: 600px; }
+  .overview-traffic-section { min-height: 820px; }
+  .overview-chart-stack { grid-template-rows: repeat(3, 260px); }
   .metric-panel { min-height: 112px; padding: 14px; }
   .metric-panel > strong { font-size: 25px; }
   .page-fill.proxies-page { height: auto; min-height: 100%; grid-template-rows: auto auto 500px; overflow: visible; }

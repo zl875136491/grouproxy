@@ -1,0 +1,17 @@
+.git
+.gitignore
+
+frontend/node_modules
+frontend/.next
+frontend/.next-*
+
+backend/__pycache__
+backend/.pytest_cache
+backend/.ruff_cache
+
+monitor/dist
+singbox
+testenv
+screenshots
+*.pyc
+*.log

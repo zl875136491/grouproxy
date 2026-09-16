@@ -144,6 +144,8 @@ export function ControlPlaneTopology({
   t,
   selectedSiteId,
   onSiteSelect,
+  orientation,
+  fillContainer = false,
 }: {
   sites: TopologySite[];
   onlineNodes: number;
@@ -152,9 +154,12 @@ export function ControlPlaneTopology({
   t: Translator;
   selectedSiteId?: string;
   onSiteSelect?: (siteId: string) => void;
+  orientation?: Direction;
+  fillContainer?: boolean;
 }) {
-  const compact = useCompactTopology();
-  const direction: Direction = compact ? "vertical" : "horizontal";
+  const responsiveCompact = useCompactTopology();
+  const compact = orientation ? orientation === "vertical" : responsiveCompact;
+  const direction: Direction = orientation || (responsiveCompact ? "vertical" : "horizontal");
   const { edges, flowNodes, height } = useMemo(() => {
     const siteStep = compact ? 92 : 94;
     const firstSiteY = compact ? 124 : 12;
@@ -221,7 +226,11 @@ export function ControlPlaneTopology({
   }, [compact, direction, formatNumber, onSiteSelect, onlineNodes, selectedSiteId, sites, t, totalNodes]);
 
   return (
-    <div className={styles.flow} style={{ height }} aria-label={t("Control plane to edge sites")}>
+    <div
+      className={styles.flow}
+      style={fillContainer ? { height: "auto", minHeight: 0, flex: "1 1 auto" } : { height }}
+      aria-label={t("Control plane to edge sites")}
+    >
       <ReactFlow<TopologyNode, Edge>
         key={`${direction}-${sites.length}`}
         nodes={flowNodes}

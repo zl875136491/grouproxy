@@ -120,6 +120,26 @@ function ScriptDownloadLink({ icon, title, subtitle, onDownload, t }: { icon: Re
   );
 }
 
+function LinuxBrandIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg className="access-brand-icon" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#263238" d="M12 2.4c-2.7 0-4.4 2.2-4.4 5.3v2.7c0 1.1-.5 2.1-1.3 2.9-1 .9-1.7 2.3-1.2 3.6.5 1.5 2.2 2 3.7 1.5l1.3-.5c.6.8 1.1 1.3 1.9 1.3s1.3-.5 1.9-1.3l1.3.5c1.5.5 3.2 0 3.7-1.5.5-1.3-.2-2.7-1.2-3.6-.8-.8-1.3-1.8-1.3-2.9V7.7c0-3.1-1.7-5.3-4.4-5.3Z" />
+      <ellipse cx="12" cy="12.8" rx="3.1" ry="4.4" fill="#f8fafc" />
+      <circle cx="10.2" cy="7.4" r=".7" fill="#f8fafc" />
+      <circle cx="13.8" cy="7.4" r=".7" fill="#f8fafc" />
+      <path fill="#f59e0b" d="m11.1 9.2.9-.8.9.8-.9.8zM6.1 17.1l2.3-.8.7 1.1-2.4.8zM17.9 17.1l-2.3-.8-.7 1.1 2.4.8z" />
+    </svg>
+  );
+}
+
+function WindowsBrandIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg className="access-brand-icon" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#0078d4" d="M3 4.5 11.3 3.3v8.1H3zm9.3-1.4L21 2v9.4h-8.7zM3 12.7h8.3v8L3 19.5zm9.3 0H21V22l-8.7-1.2z" />
+    </svg>
+  );
+}
+
 function downloadText(content: string, filename: string, mime = "text/plain;charset=utf-8") {
   const url = URL.createObjectURL(new Blob([content], { type: mime }));
   const anchor = document.createElement("a");
@@ -242,12 +262,12 @@ export default function AccessPage() {
           <section className="access-doc-section" aria-labelledby="access-reusable-scripts">
             <SectionHeading id="access-reusable-scripts" title={t("Reusable scripts")} description={t("Download the script once, then run the same file whenever you need to switch the proxy on or off.")} />
             <div className="access-doc-platform-grid">
-              <PlatformCard id="access-reusable-linux" icon={<Terminal size={19} />} title={t("Linux")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
-                <ScriptDownloadLink icon={<Terminal size={24} />} title={t("grouproxy-linux-setup.sh")} subtitle={t("Bash script")} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} t={t} />
+              <PlatformCard id="access-reusable-linux" icon={<LinuxBrandIcon size={19} />} title={t("Linux")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
+                <ScriptDownloadLink icon={<LinuxBrandIcon size={24} />} title={t("grouproxy-linux-setup.sh")} subtitle={t("Bash script")} onDownload={() => downloadText(linuxScript.data, "grouproxy-linux-setup.sh", "text/x-shellscript")} t={t} />
                 <p className="access-doc-card-note">{t("After downloading, make the file executable and run it. Each run checks the current proxy state and switches it to the opposite state; then reopen the terminal and affected applications.")}</p>
               </PlatformCard>
-              <PlatformCard id="access-reusable-windows" icon={<Monitor size={19} />} title={t("Windows")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
-                <ScriptDownloadLink icon={<Monitor size={24} />} title={t("grouproxy-windows-setup.ps1")} subtitle={t("PowerShell script")} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
+              <PlatformCard id="access-reusable-windows" icon={<WindowsBrandIcon size={19} />} title={t("Windows")} description={t("Toggle proxy settings for the current user without command-line parameters.")}>
+                <ScriptDownloadLink icon={<WindowsBrandIcon size={24} />} title={t("grouproxy-windows-setup.ps1")} subtitle={t("PowerShell script")} onDownload={() => downloadText(windowsScript.data, "grouproxy-windows-setup.ps1", "text/plain;charset=utf-8")} t={t} />
                 <p className="access-doc-card-note">{t("After downloading, run it directly from PowerShell. Each run checks the current proxy state and switches it to the opposite state; then restart affected applications.")}</p>
               </PlatformCard>
               <PlatformCard id="access-reusable-macos" icon={<Laptop size={19} />} title={t("macOS")} description={t("Download the shortcut, import it into the Shortcuts app, and run it.")}>

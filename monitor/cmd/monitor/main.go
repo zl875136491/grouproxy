@@ -621,6 +621,11 @@ func fillConnectionSnapshot(snapshot map[string]any, raw map[string]any, now tim
 		}
 		metadata, _ := conn["metadata"].(map[string]any)
 		srcIP := stringValue(metadata["sourceIP"])
+		if srcIP == "" {
+			// Keep telemetry useful for Clash-compatible APIs that normalize JSON
+			// metadata names to snake_case.
+			srcIP = stringValue(metadata["source_ip"])
+		}
 		dstHost := stringValue(metadata["host"])
 		dstIP := stringValue(metadata["destinationIP"])
 		if dstHost == "" {

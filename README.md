@@ -98,6 +98,25 @@ Stop the local processes without removing evidence:
 ./scripts/testenv-down.sh
 ```
 
+## Docker Compose
+
+The repository also includes `docker-compose.yaml` for the control plane. It
+starts only the FastAPI backend and the Next.js dashboard; MongoDB is an
+existing service and is deliberately not declared as a Compose service.
+
+```bash
+cp .env.docker.example .env
+# Set the MongoDB URI and replace every placeholder secret in .env.
+docker compose up --build
+```
+
+The dashboard is published on port `80` and the backend on `8000`. The default
+MongoDB URI uses `host.docker.internal`; on Linux, the existing MongoDB must
+be reachable from the Docker bridge, or `GROUPROXY_MONGODB_URL` must point to
+the address of an already reachable MongoDB service. Monitor nodes can use the
+published backend port. No MongoDB data directory is created by this Compose
+file.
+
 The default test profile delivers verification codes through the real One
 Login GQuan APP API. Its APP token is supplied only at process start and is
 not written to `testenv/backend.env`, logs, or Git. The deterministic auth

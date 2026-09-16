@@ -1,8 +1,9 @@
 import { access, chmod, cp, lstat, mkdir, readdir, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const distDir = resolve(process.env.NEXT_DIST_DIR || ".next");
 const standaloneDir = resolve(distDir, "standalone");
+const standaloneDistDir = join(standaloneDir, basename(distDir));
 
 async function copyDirectory(source, destination, { optional = false } = {}) {
   try {
@@ -37,6 +38,6 @@ async function makeTreeReadable(root) {
 }
 
 await access(resolve(standaloneDir, "server.js"));
-await copyDirectory(resolve(distDir, "static"), resolve(standaloneDir, ".next", "static"));
+await copyDirectory(resolve(distDir, "static"), resolve(standaloneDistDir, "static"));
 await copyDirectory(resolve("public"), resolve(standaloneDir, "public"), { optional: true });
 await makeTreeReadable(standaloneDir);
