@@ -75,7 +75,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
   admin_password="${GROUPROXY_TEST_ADMIN_PASSWORD:-$(openssl rand -hex 24)}"
   {
     printf 'GROUPROXY_ENVIRONMENT=test\n'
-    printf 'GROUPROXY_MONGODB_URL=%q\n' "$MONGODB_URL_OVERRIDE"
+    # Keep the URI compatible with both Bash source and Docker Compose dotenv
+    # parsing. Valid MongoDB URIs do not need shell escaping here.
+    printf 'GROUPROXY_MONGODB_URL=%s\n' "$MONGODB_URL_OVERRIDE"
     printf 'GROUPROXY_MONGODB_DATABASE=%q\n' "$MONGODB_DATABASE_OVERRIDE"
     printf 'GROUPROXY_HOST=127.0.0.1\n'
     printf 'GROUPROXY_PORT=%s\n' "$BACKEND_PORT"

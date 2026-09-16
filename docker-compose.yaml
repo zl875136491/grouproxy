@@ -5,31 +5,17 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # The test host's MongoDB is an existing loopback-only service. Host
+    # networking also preserves the monitor's existing 127.0.0.1:8000 URL.
+    network_mode: host
+    env_file:
+      - path: ${GROUPROXY_BACKEND_ENV_FILE:-testenv/backend.env}
+        required: true
     restart: unless-stopped
     environment:
-      GROUPROXY_ENVIRONMENT: ${GROUPROXY_ENVIRONMENT:-production}
-      GROUPROXY_MONGODB_URL: ${GROUPROXY_MONGODB_URL:-mongodb://host.docker.internal:27017/?authSource=admin}
-      GROUPROXY_MONGODB_DATABASE: ${GROUPROXY_MONGODB_DATABASE:-grouproxy}
-      GROUPROXY_HOST: 0.0.0.0
-      GROUPROXY_PORT: 8000
-      GROUPROXY_BACKEND_PUBLIC_URL: ${GROUPROXY_BACKEND_PUBLIC_URL:-http://backend:8000}
-      GROUPROXY_BUNDLE_HMAC_SECRET: ${GROUPROXY_BUNDLE_HMAC_SECRET:?Set GROUPROXY_BUNDLE_HMAC_SECRET to at least 32 characters}
-      GROUPROXY_ADMIN_USERNAME: ${GROUPROXY_ADMIN_USERNAME:-zhangle}
-      GROUPROXY_ADMIN_PASSWORD: ${GROUPROXY_ADMIN_PASSWORD:?Set GROUPROXY_ADMIN_PASSWORD to at least 12 characters}
-      GROUPROXY_MANAGEMENT_TOKEN: ${GROUPROXY_MANAGEMENT_TOKEN:?Set GROUPROXY_MANAGEMENT_TOKEN to at least 32 characters}
-      GROUPROXY_ALLOW_INSECURE_AGENT_HTTP: ${GROUPROXY_ALLOW_INSECURE_AGENT_HTTP:-true}
-      GROUPROXY_SEED_DEFAULT_SITES: ${GROUPROXY_SEED_DEFAULT_SITES:-true}
-      GROUPROXY_CORS_ALLOWED_ORIGINS: ${GROUPROXY_CORS_ALLOWED_ORIGINS:-}
-      GROUPROXY_AUTH_SESSION_TTL_MINUTES: ${GROUPROXY_AUTH_SESSION_TTL_MINUTES:-43200}
-      GROUPROXY_GQUAN_DELIVERY_MODE: ${GROUPROXY_GQUAN_DELIVERY_MODE:-app}
-      GROUPROXY_GQUAN_APP_TOKEN: ${GROUPROXY_GQUAN_APP_TOKEN:-}
+      # Keep backup data outside the writable container layer. All other
+      # application parameters come from the selected env_file unchanged.
       GROUPROXY_BACKUP_DIRECTORY: /var/lib/grouproxy/backups
-      GROUPROXY_BACKUP_AUTO_ENABLED: ${GROUPROXY_BACKUP_AUTO_ENABLED:-false}
-      GROUPROXY_BACKUP_ENCRYPTION_KEY: ${GROUPROXY_BACKUP_ENCRYPTION_KEY:-}
-    ports:
-      - "${GROUPROXY_BACKEND_PORT:-8000}:8000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - grouproxy-backups:/var/lib/grouproxy/backups
     healthcheck:
@@ -50,7 +36,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        GROUPROXY_BACKEND_API_URL: ${GROUPROXY_BACKEND_API_URL:-http://backend:8000}
+        GROUPROXY_BACKEND_API_URL: ${GROUPROXY_BACKEND_API_URL:-http://host.docker.internal:8000}
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -59,6 +45,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${GROUPROXY_FRONTEND_PORT:-80}:80"
     healthcheck:
