@@ -86,6 +86,28 @@ class EmployeeOut(BaseModel):
     last_login_at: datetime | None
 
 
+class ServiceQualityDefinitionOut(BaseModel):
+    green_max_ms: int = Field(ge=0, le=300_000)
+    yellow_max_ms: int = Field(ge=1, le=300_000)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "ServiceQualityDefinitionOut":
+        if self.yellow_max_ms <= self.green_max_ms:
+            raise ValueError("yellow_max_ms_must_exceed_green_max_ms")
+        return self
+
+
+class SystemSettingsOut(BaseModel):
+    settings_id: str
+    service_quality: ServiceQualityDefinitionOut
+    updated_at: datetime
+    updated_by: str
+
+
+class SystemSettingsUpdate(BaseModel):
+    service_quality: ServiceQualityDefinitionOut
+
+
 class RoleUpdate(BaseModel):
     role: Literal["admin", "employee"]
 

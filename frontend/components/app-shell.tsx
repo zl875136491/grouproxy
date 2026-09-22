@@ -19,6 +19,7 @@ import {
   Radio,
   ScrollText,
   ServerCog,
+  Settings2,
   UsersRound,
   Waypoints,
   X,
@@ -81,6 +82,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
       { href: "/employees", label: "Roles", icon: UsersRound },
       { href: "/audit", label: "Audit", icon: ScrollText },
       { href: "/backups", label: "Backups", icon: Archive },
+      { href: "/settings", label: "Settings", icon: Settings2 },
     ],
   },
 ];

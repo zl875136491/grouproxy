@@ -50,11 +50,13 @@ from app.models import (
     ProbeHistory,
     ProxyConfigSnapshot,
     ProxyQualitySample,
+    ServiceQualityDefinition,
     Site,
     SiteSubscription,
     SourceBlacklist,
     SubscriptionSource,
     SubscriptionVersion,
+    SystemSettings,
     Task,
     TelemetryBatch,
     TelemetryCursor,
@@ -130,6 +132,8 @@ from app.schemas import (
     SubscriptionUploadResponse,
     SubscriptionVersionContentOut,
     SubscriptionVersionOut,
+    SystemSettingsOut,
+    SystemSettingsUpdate,
     TaskOut,
     TelemetryBatchResponse,
     VerificationCodeRequest,
@@ -383,6 +387,7 @@ DEFAULT_SITES = [
 ]
 
 _management_actor: ContextVar[str] = ContextVar("management_actor", default="")
+_management_role: ContextVar[str] = ContextVar("management_role", default="")
 
 
 @dataclass(frozen=True)
@@ -436,6 +441,32 @@ def _employee_out(user: AdminUser) -> EmployeeOut:
         password_changed_at=user.password_changed_at,
         last_login_at=user.last_login_at,
     )
+
+
+def _system_settings_out(settings: SystemSettings) -> SystemSettingsOut:
+    return SystemSettingsOut(
+        settings_id=settings.settings_id,
+        service_quality=settings.service_quality.model_dump(),
+        updated_at=settings.updated_at,
+        updated_by=settings.updated_by,
+    )
+
+
+async def _global_system_settings() -> SystemSettings:
+    settings = await SystemSettings.find_one(SystemSettings.settings_id == "global")
+    if settings is not None:
+        return settings
+
+    settings = SystemSettings()
+    try:
+        await settings.insert()
+    except DuplicateKeyError:
+        # Another request may initialize the singleton concurrently.
+        existing = await SystemSettings.find_one(SystemSettings.settings_id == "global")
+        if existing is not None:
+            return existing
+        raise
+    return settings
 
 
 def _node_out(node: Node) -> NodeOut:
@@ -1786,6 +1817,7 @@ async def require_management(request: Request) -> str:
             status_code=status.HTTP_403_FORBIDDEN, detail="management_admin_required"
         )
     _management_actor.set(principal.itcode)
+    _management_role.set(principal.role)
     return principal.itcode
 
 
@@ -2106,6 +2138,48 @@ async def update_user_role(
             after={"itcode": user.itcode, "role": user.role},
         )
     return _employee_out(user)
+
+
+@app.get("/api/v1/system-settings", response_model=SystemSettingsOut)
+async def get_system_settings(_: str = Depends(require_management)) -> SystemSettingsOut:
+    return _system_settings_out(await _global_system_settings())
+
+
+@app.patch("/api/v1/system-settings", response_model=SystemSettingsOut)
+async def update_system_settings(
+    payload: SystemSettingsUpdate,
+    request: Request,
+    actor: str = Depends(require_management),
+) -> SystemSettingsOut:
+    settings = await _global_system_settings()
+    before = {
+        "service_quality": settings.service_quality.model_dump(mode="json"),
+        "updated_at": settings.updated_at.isoformat(),
+        "updated_by": settings.updated_by,
+    }
+    settings.service_quality = ServiceQualityDefinition(
+        **payload.service_quality.model_dump()
+    )
+    settings.updated_at = utcnow()
+    settings.updated_by = actor
+    await settings.save()
+    after = {
+        "service_quality": settings.service_quality.model_dump(mode="json"),
+        "updated_at": settings.updated_at.isoformat(),
+        "updated_by": settings.updated_by,
+    }
+    await append_audit(
+        action="system_settings.update",
+        target_type="system_settings",
+        target_id=settings.settings_id,
+        actor=actor,
+        actor_role=_management_role.get() or "admin",
+        request_id=_request_id(request),
+        source_ip=_request_source_ip(request),
+        before=before,
+        after=after,
+    )
+    return _system_settings_out(settings)
 
 
 @app.get("/api/v1/sites", response_model=list[SiteOut])

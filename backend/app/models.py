@@ -3,7 +3,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from beanie import Document, Indexed
-from pydantic import Field
+from pydantic import BaseModel, Field, model_validator
 from pymongo import ASCENDING, IndexModel
 
 from .config import DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS
@@ -39,6 +39,28 @@ class AdminUser(Document):
                 sparse=True,
             )
         ]
+
+
+class ServiceQualityDefinition(BaseModel):
+    """Configurable latency boundaries used by the service quality view."""
+
+    green_max_ms: int = Field(default=100, ge=0, le=300_000)
+    yellow_max_ms: int = Field(default=200, ge=1, le=300_000)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "ServiceQualityDefinition":
+        if self.yellow_max_ms <= self.green_max_ms:
+            raise ValueError("yellow_max_ms_must_exceed_green_max_ms")
+        return self
+
+
+class SystemSettings(Document):
+    """Global, extensible control-plane settings stored as one document."""
+
+    settings_id: Indexed(str, unique=True) = "global"
+    service_quality: ServiceQualityDefinition = Field(default_factory=ServiceQualityDefinition)
+    updated_at: datetime = Field(default_factory=utcnow)
+    updated_by: str = "system"
 
 
 class AuthVerificationChallenge(Document):
@@ -719,6 +741,7 @@ class BackupRecord(Document):
 
 DOCUMENT_MODELS: list[type[Document]] = [
     AdminUser,
+    SystemSettings,
     AuthVerificationChallenge,
     ManagementSession,
     Site,

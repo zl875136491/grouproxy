@@ -143,6 +143,18 @@ export type ServiceQualityResponse = {
   entries: ServiceQualityStat[];
 };
 
+export type ServiceQualityDefinition = {
+  green_max_ms: number;
+  yellow_max_ms: number;
+};
+
+export type SystemSettings = {
+  settings_id: string;
+  service_quality: ServiceQualityDefinition;
+  updated_at: string;
+  updated_by: string;
+};
+
 export type ProxySelectionRequest = {
   group: string;
   outbound: string;
@@ -855,6 +867,14 @@ export function getServiceQuality(filters: {
   if (filters.siteId) query.set("site_id", filters.siteId);
   if (filters.nodeId) query.set("node_id", filters.nodeId);
   return request<ServiceQualityResponse>(`/api/v1/service-quality?${query.toString()}`);
+}
+
+export function getSystemSettings() {
+  return request<SystemSettings>("/api/v1/system-settings");
+}
+
+export function updateSystemSettings(value: { service_quality: ServiceQualityDefinition }) {
+  return request<SystemSettings>("/api/v1/system-settings", jsonRequest("PATCH", value));
 }
 
 export function getNodeProxyConfig(nodeId: string) {

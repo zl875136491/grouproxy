@@ -7,6 +7,8 @@ import {
   getNodes,
   getServiceQuality,
   getSites,
+  getSystemSettings,
+  type ServiceQualityDefinition,
   type ServiceQualityStat,
   type ServiceQualityWindow,
 } from "../../lib/api";
@@ -21,8 +23,10 @@ type ViewMode = "chart" | "table";
 type SortKey = "node_name" | "outbound_tag" | "average_latency_ms" | "success_rate" | "sample_count" | "last_sampled_at";
 type LatencyBand = "good" | "acceptable" | "high" | "unknown";
 
-const LATENCY_GOOD_MAX_MS = 100;
-const LATENCY_ACCEPTABLE_MAX_MS = 200;
+const DEFAULT_SERVICE_QUALITY_DEFINITION: ServiceQualityDefinition = {
+  green_max_ms: 100,
+  yellow_max_ms: 200,
+};
 
 const qualityWindows: Array<{ value: ServiceQualityWindow; label: string }> = [
   { value: "1h", label: "Last hour" },
@@ -43,26 +47,26 @@ function compareValues(left: ServiceQualityStat, right: ServiceQualityStat, key:
   return Number(leftValue) - Number(rightValue);
 }
 
-function qualityStatus(entry: ServiceQualityStat): string {
+function qualityStatus(entry: ServiceQualityStat, definition: ServiceQualityDefinition): string {
   if (entry.sample_count === 0 || entry.last_success === null) return "pending";
   if (!entry.last_success) return "offline";
-  if (entry.average_latency_ms !== null && entry.average_latency_ms > LATENCY_ACCEPTABLE_MAX_MS) return "attention";
-  if (entry.average_latency_ms !== null && entry.average_latency_ms > LATENCY_GOOD_MAX_MS) return "degraded";
+  if (entry.average_latency_ms !== null && entry.average_latency_ms > definition.yellow_max_ms) return "attention";
+  if (entry.average_latency_ms !== null && entry.average_latency_ms > definition.green_max_ms) return "degraded";
   return "healthy";
 }
 
-function latencyBand(entry: ServiceQualityStat): LatencyBand {
+function latencyBand(entry: ServiceQualityStat, definition: ServiceQualityDefinition): LatencyBand {
   if (entry.average_latency_ms === null) return "unknown";
   if (entry.last_success === false) return "high";
-  if (entry.average_latency_ms <= LATENCY_GOOD_MAX_MS) return "good";
-  if (entry.average_latency_ms <= LATENCY_ACCEPTABLE_MAX_MS) return "acceptable";
+  if (entry.average_latency_ms <= definition.green_max_ms) return "good";
+  if (entry.average_latency_ms <= definition.yellow_max_ms) return "acceptable";
   return "high";
 }
 
-function latencyBandLabel(band: LatencyBand): string {
-  if (band === "good") return "Good (<=100 ms)";
-  if (band === "acceptable") return "Acceptable (101-200 ms)";
-  if (band === "high") return "High (>200 ms) or unavailable";
+function latencyBandLabel(band: LatencyBand, definition: ServiceQualityDefinition, t: (key: string, values?: Record<string, string | number>) => string): string {
+  if (band === "good") return t("Good (<= {value} ms)", { value: definition.green_max_ms });
+  if (band === "acceptable") return t("Acceptable ({from}-{to} ms)", { from: definition.green_max_ms + 1, to: definition.yellow_max_ms });
+  if (band === "high") return t("High (>{value} ms) or unavailable", { value: definition.yellow_max_ms });
   return "No samples";
 }
 
@@ -77,6 +81,7 @@ export default function ServiceQualityPage() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const sites = useQuery({ queryKey: ["sites"], queryFn: getSites, enabled: session === true, staleTime: 30_000 });
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, staleTime: 10_000 });
+  const settings = useQuery({ queryKey: ["system-settings"], queryFn: getSystemSettings, enabled: session === true, staleTime: 30_000 });
   const quality = useQuery({
     queryKey: ["service-quality", window, siteId, nodeId],
     queryFn: () => getServiceQuality({ window, siteId: siteId || undefined, nodeId: nodeId || undefined }),
@@ -100,12 +105,14 @@ export default function ServiceQualityPage() {
     });
   }, [quality.data?.entries, sortDirection, sortKey]);
 
+  const definition = settings.data?.service_quality || DEFAULT_SERVICE_QUALITY_DEFINITION;
+
   if (session === null) return <LoadingState rows={8} />;
   if (!session) return <SessionGate />;
-  if (sites.isLoading || nodes.isLoading) return <LoadingState rows={8} />;
-  if (sites.isError || nodes.isError) {
-    const issue = sites.error || nodes.error;
-    return <ErrorState error={issue instanceof Error ? issue.message : t("The control plane did not respond.")} onRetry={() => void Promise.all([sites.refetch(), nodes.refetch()])} />;
+  if (sites.isLoading || nodes.isLoading || settings.isLoading) return <LoadingState rows={8} />;
+  if (sites.isError || nodes.isError || settings.isError) {
+    const issue = sites.error || nodes.error || settings.error;
+    return <ErrorState error={issue instanceof Error ? issue.message : t("The control plane did not respond.")} onRetry={() => void Promise.all([sites.refetch(), nodes.refetch(), settings.refetch()])} />;
   }
 
   function selectSort(nextKey: SortKey) {
@@ -167,18 +174,20 @@ export default function ServiceQualityPage() {
           <FilterSelect label="Time range" value={window} setValue={(value) => setWindow(value as ServiceQualityWindow)} options={qualityWindows} icon={<CalendarRange size={15} aria-hidden="true" />} />
         </div>
       </Panel>
-      {quality.isLoading ? <Panel><LoadingState rows={8} /></Panel> : quality.isError ? <ErrorState error={quality.error instanceof Error ? quality.error.message : t("Unable to load service quality.")} onRetry={() => void quality.refetch()} /> : entries.length === 0 ? <Panel><EmptyState title="No service quality samples." detail="The monitor will report subscription outbound latency after its next proxy snapshot." /></Panel> : viewMode === "chart" ? <QualityChart entries={entries} formatDuration={formatDuration} formatNumber={formatNumber} t={t} /> : <QualityTable entries={entries} formatDate={formatDate} formatDuration={formatDuration} formatNumber={formatNumber} formatPercent={formatPercent} selectSort={selectSort} sortDirection={sortDirection} sortKey={sortKey} t={t} />}
+      {quality.isLoading ? <Panel><LoadingState rows={8} /></Panel> : quality.isError ? <ErrorState error={quality.error instanceof Error ? quality.error.message : t("Unable to load service quality.")} onRetry={() => void quality.refetch()} /> : entries.length === 0 ? <Panel><EmptyState title="No service quality samples." detail="The monitor will report subscription outbound latency after its next proxy snapshot." /></Panel> : viewMode === "chart" ? <QualityChart entries={entries} definition={definition} formatDuration={formatDuration} formatNumber={formatNumber} t={t} /> : <QualityTable entries={entries} definition={definition} formatDate={formatDate} formatDuration={formatDuration} formatNumber={formatNumber} formatPercent={formatPercent} selectSort={selectSort} sortDirection={sortDirection} sortKey={sortKey} t={t} />}
     </div>
   );
 }
 
 function QualityChart({
   entries,
+  definition,
   formatDuration,
   formatNumber,
   t,
 }: {
   entries: ServiceQualityStat[];
+  definition: ServiceQualityDefinition;
   formatDuration: (value: number | null | undefined) => string;
   formatNumber: (value: number | null | undefined) => string;
   t: (key: string, values?: Record<string, string | number>) => string;
@@ -192,23 +201,23 @@ function QualityChart({
         <span className="toolbar-note">{t("Lower is better")}</span>
       </div>
       <div className="quality-chart-legend" role="list" aria-label={t("Latency quality")}>
-        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-good" aria-hidden="true" />{t("Good (<=100 ms)")}</span>
-        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-acceptable" aria-hidden="true" />{t("Acceptable (101-200 ms)")}</span>
-        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-high" aria-hidden="true" />{t("High (>200 ms) or unavailable")}</span>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-good" aria-hidden="true" />{latencyBandLabel("good", definition, t)}</span>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-acceptable" aria-hidden="true" />{latencyBandLabel("acceptable", definition, t)}</span>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-high" aria-hidden="true" />{latencyBandLabel("high", definition, t)}</span>
       </div>
       <div className="quality-chart" role="img" aria-label={t("Average latency by node and subscription outbound")}>
         <div className="quality-chart-axis"><span>{formatDuration(0)}</span><span>{formatDuration(max)}</span></div>
         {entries.map((entry) => {
           const value = entry.average_latency_ms;
           const percentage = value === null ? 0 : Math.max(2, (value / max) * 100);
-          const band = latencyBand(entry);
+          const band = latencyBand(entry, definition);
           return (
             <div className="quality-chart-row" key={`${entry.node_id}:${entry.outbound_tag}`}>
               <div className="quality-chart-label">
                 <strong>{entry.node_name}</strong>
                 <span>{t("Subscription")} · {entry.outbound_tag}</span>
               </div>
-              <div className="quality-chart-track" role="progressbar" aria-label={`${entry.node_name} ${entry.outbound_tag}`} aria-valuemin={0} aria-valuemax={max} aria-valuenow={value || 0} aria-valuetext={value === null ? t("No samples") : `${formatDuration(value)} · ${t(latencyBandLabel(band))}`}>
+              <div className="quality-chart-track" role="progressbar" aria-label={`${entry.node_name} ${entry.outbound_tag}`} aria-valuemin={0} aria-valuemax={max} aria-valuenow={value || 0} aria-valuetext={value === null ? t("No samples") : `${formatDuration(value)} · ${latencyBandLabel(band, definition, t)}`}>
                 {value !== null ? <span className={`quality-chart-bar quality-chart-bar-${band}`} style={{ width: `${Math.min(100, percentage)}%` }} /> : null}
               </div>
               <strong className="quality-chart-value">{value === null ? t("No samples") : formatDuration(value)}</strong>
@@ -223,6 +232,7 @@ function QualityChart({
 
 function QualityTable({
   entries,
+  definition,
   formatDate,
   formatDuration,
   formatNumber,
@@ -233,6 +243,7 @@ function QualityTable({
   t,
 }: {
   entries: ServiceQualityStat[];
+  definition: ServiceQualityDefinition;
   formatDate: (value: string | null | undefined, withTime?: boolean) => string;
   formatDuration: (value: number | null | undefined) => string;
   formatNumber: (value: number | null | undefined, options?: Intl.NumberFormatOptions) => string;
@@ -263,7 +274,7 @@ function QualityTable({
             <td><strong>{formatPercent(entry.success_rate)}</strong><span className="cell-secondary">{t("Success / failed")}: {formatNumber(entry.successful_samples)} / {formatNumber(entry.failed_samples)}</span></td>
             <td><span className="cell-secondary">{t("Min")}: {formatDuration(entry.min_latency_ms)}</span><span className="cell-secondary">{t("Max")}: {formatDuration(entry.max_latency_ms)}</span></td>
             <td><strong>{formatNumber(entry.sample_count)}</strong></td>
-            <td><span className="quality-last-sample"><StatusBadge status={qualityStatus(entry)} /><span className="cell-secondary">{formatDate(entry.last_sampled_at)}</span></span></td>
+            <td><span className="quality-last-sample"><StatusBadge status={qualityStatus(entry, definition)} /><span className="cell-secondary">{formatDate(entry.last_sampled_at)}</span></span></td>
           </tr>)}</tbody>
         </table>
       </div>
