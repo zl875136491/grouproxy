@@ -19,6 +19,10 @@ import { Panel, RefreshButton, StatusBadge } from "../../components/ui";
 
 type ViewMode = "chart" | "table";
 type SortKey = "node_name" | "outbound_tag" | "average_latency_ms" | "success_rate" | "sample_count" | "last_sampled_at";
+type LatencyBand = "good" | "acceptable" | "high" | "unknown";
+
+const LATENCY_GOOD_MAX_MS = 100;
+const LATENCY_ACCEPTABLE_MAX_MS = 200;
 
 const qualityWindows: Array<{ value: ServiceQualityWindow; label: string }> = [
   { value: "1h", label: "Last hour" },
@@ -42,9 +46,24 @@ function compareValues(left: ServiceQualityStat, right: ServiceQualityStat, key:
 function qualityStatus(entry: ServiceQualityStat): string {
   if (entry.sample_count === 0 || entry.last_success === null) return "pending";
   if (!entry.last_success) return "offline";
-  if (entry.average_latency_ms !== null && entry.average_latency_ms > 800) return "attention";
-  if (entry.average_latency_ms !== null && entry.average_latency_ms > 250) return "degraded";
+  if (entry.average_latency_ms !== null && entry.average_latency_ms > LATENCY_ACCEPTABLE_MAX_MS) return "attention";
+  if (entry.average_latency_ms !== null && entry.average_latency_ms > LATENCY_GOOD_MAX_MS) return "degraded";
   return "healthy";
+}
+
+function latencyBand(entry: ServiceQualityStat): LatencyBand {
+  if (entry.average_latency_ms === null) return "unknown";
+  if (entry.last_success === false) return "high";
+  if (entry.average_latency_ms <= LATENCY_GOOD_MAX_MS) return "good";
+  if (entry.average_latency_ms <= LATENCY_ACCEPTABLE_MAX_MS) return "acceptable";
+  return "high";
+}
+
+function latencyBandLabel(band: LatencyBand): string {
+  if (band === "good") return "Good (<=100 ms)";
+  if (band === "acceptable") return "Acceptable (101-200 ms)";
+  if (band === "high") return "High (>200 ms) or unavailable";
+  return "No samples";
 }
 
 export default function ServiceQualityPage() {
@@ -120,7 +139,7 @@ export default function ServiceQualityPage() {
               aria-pressed={viewMode === "chart"}
               onClick={() => setViewMode("chart")}
             >
-              <BarChart3 size={15} />{t("Chart")}
+              <BarChart3 size={15} />{t("Statistics chart")}
             </button>
             <button
               type="button"
@@ -128,7 +147,7 @@ export default function ServiceQualityPage() {
               aria-pressed={viewMode === "table"}
               onClick={() => setViewMode("table")}
             >
-              <Table2 size={15} />{t("Sortable list")}
+              <Table2 size={15} />{t("Table")}
             </button>
           </div>
         </div>
@@ -172,19 +191,25 @@ function QualityChart({
         <div><span className="panel-kicker">{t("AVERAGE LATENCY")}</span><h2>{t("Subscription: outbound comparison")}</h2></div>
         <span className="toolbar-note">{t("Lower is better")}</span>
       </div>
+      <div className="quality-chart-legend" role="list" aria-label={t("Latency quality")}>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-good" aria-hidden="true" />{t("Good (<=100 ms)")}</span>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-acceptable" aria-hidden="true" />{t("Acceptable (101-200 ms)")}</span>
+        <span className="quality-chart-legend-item" role="listitem"><span className="quality-chart-swatch quality-chart-swatch-high" aria-hidden="true" />{t("High (>200 ms) or unavailable")}</span>
+      </div>
       <div className="quality-chart" role="img" aria-label={t("Average latency by node and subscription outbound")}>
         <div className="quality-chart-axis"><span>{formatDuration(0)}</span><span>{formatDuration(max)}</span></div>
         {entries.map((entry) => {
           const value = entry.average_latency_ms;
           const percentage = value === null ? 0 : Math.max(2, (value / max) * 100);
+          const band = latencyBand(entry);
           return (
             <div className="quality-chart-row" key={`${entry.node_id}:${entry.outbound_tag}`}>
               <div className="quality-chart-label">
                 <strong>{entry.node_name}</strong>
                 <span>{t("Subscription")} · {entry.outbound_tag}</span>
               </div>
-              <div className="quality-chart-track" role="progressbar" aria-label={`${entry.node_name} ${entry.outbound_tag}`} aria-valuemin={0} aria-valuemax={max} aria-valuenow={value || 0}>
-                {value !== null ? <span className="quality-chart-bar" style={{ width: `${Math.min(100, percentage)}%` }} /> : null}
+              <div className="quality-chart-track" role="progressbar" aria-label={`${entry.node_name} ${entry.outbound_tag}`} aria-valuemin={0} aria-valuemax={max} aria-valuenow={value || 0} aria-valuetext={value === null ? t("No samples") : `${formatDuration(value)} · ${t(latencyBandLabel(band))}`}>
+                {value !== null ? <span className={`quality-chart-bar quality-chart-bar-${band}`} style={{ width: `${Math.min(100, percentage)}%` }} /> : null}
               </div>
               <strong className="quality-chart-value">{value === null ? t("No samples") : formatDuration(value)}</strong>
             </div>
@@ -219,7 +244,7 @@ function QualityTable({
 }) {
   return (
     <Panel className="service-quality-table-panel">
-      <div className="table-toolbar"><div className="toolbar-title"><List size={18} /><span>{t("Sortable quality list")}</span></div><span className="toolbar-note">{t("Select a column to sort")}</span></div>
+      <div className="table-toolbar"><div className="toolbar-title"><List size={18} /><span>{t("Service quality table")}</span></div><span className="toolbar-note">{t("Select a column to sort")}</span></div>
       <div className="table-wrap table-scroll service-quality-table-wrap">
         <table>
           <thead><tr>
