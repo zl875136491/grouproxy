@@ -6,6 +6,8 @@ from beanie import Document, Indexed
 from pydantic import Field
 from pymongo import ASCENDING, IndexModel
 
+from .config import DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -445,6 +447,12 @@ class AccessLog(Document):
 
 
 class ConnectionSnapshot(Document):
+    """Historical connection summary reported by a node monitor.
+
+    The latest document per node powers the live view; older documents remain
+    queryable for audit and troubleshooting until their retention deadline.
+    """
+
     node_id: str
     site_id: str
     batch_id: str = ""
@@ -460,12 +468,27 @@ class ConnectionSnapshot(Document):
     connections: list[dict[str, Any]] = Field(default_factory=list)
     api_available: bool = True
     received_at: datetime = Field(default_factory=utcnow)
-    expires_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(
+        default_factory=lambda: utcnow()
+        + timedelta(days=DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS)
+    )
 
     class Settings:
         indexes = [
             IndexModel([("node_id", ASCENDING), ("sampled_at", -1)], name="connection_node_ts"),
             IndexModel([("site_id", ASCENDING), ("sampled_at", -1)], name="connection_site_ts"),
+            IndexModel(
+                [("connections.src_ip", ASCENDING), ("sampled_at", -1)],
+                name="connection_source_ts",
+            ),
+            IndexModel(
+                [("connections.dst_host", ASCENDING), ("sampled_at", -1)],
+                name="connection_destination_ts",
+            ),
+            IndexModel(
+                [("connections.outbound_chain", ASCENDING), ("sampled_at", -1)],
+                name="connection_outbound_ts",
+            ),
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="connection_snapshot_ttl",
@@ -504,6 +527,47 @@ class ProxyConfigSnapshot(Document):
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="proxy_config_snapshot_ttl",
+                expireAfterSeconds=0,
+            ),
+        ]
+
+
+class ProxyQualitySample(Document):
+    """One measured delay/availability sample for a subscription outbound."""
+
+    node_id: str
+    site_id: str
+    service: str = "subscription"
+    outbound_tag: str
+    delay_ms: int | None = None
+    success: bool = True
+    sampled_at: datetime = Field(default_factory=utcnow)
+    received_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime = Field(default_factory=lambda: utcnow() + timedelta(days=35))
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [
+                    ("node_id", ASCENDING),
+                    ("service", ASCENDING),
+                    ("outbound_tag", ASCENDING),
+                    ("sampled_at", ASCENDING),
+                ],
+                name="unique_proxy_quality_sample",
+                unique=True,
+            ),
+            IndexModel(
+                [("site_id", ASCENDING), ("sampled_at", -1)],
+                name="proxy_quality_site_ts",
+            ),
+            IndexModel(
+                [("node_id", ASCENDING), ("outbound_tag", ASCENDING), ("sampled_at", -1)],
+                name="proxy_quality_node_outbound_ts",
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="proxy_quality_sample_ttl",
                 expireAfterSeconds=0,
             ),
         ]
@@ -674,6 +738,7 @@ DOCUMENT_MODELS: list[type[Document]] = [
     AccessLog,
     ConnectionSnapshot,
     ProxyConfigSnapshot,
+    ProxyQualitySample,
     ProbeHistory,
     ProbeCircuit,
     TelemetryBatch,

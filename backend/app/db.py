@@ -31,6 +31,7 @@ LEGACY_PROXY_CREDENTIAL_COLLECTION = "ProxyCredential"
 DESIRED_RELEASE_COLLECTION = "DesiredRelease"
 CONFIG_DRAFT_COLLECTION = "ConfigDraft"
 SOURCE_BLACKLIST_COLLECTION = "SourceBlacklist"
+CONNECTION_SNAPSHOT_COLLECTION = "ConnectionSnapshot"
 RETIRED_POLICY_COLLECTIONS = (
     "SiteCIDR",
     "TravelException",
@@ -370,6 +371,52 @@ async def _migrate_subscription_source_types(database: Any) -> None:
         )
 
 
+async def _migrate_connection_snapshot_retention(database: Any, settings: Settings) -> int:
+    """Extend legacy connection snapshots to the configured audit deadline.
+
+    Earlier releases wrote snapshots with a seven-day TTL.  The update pipeline
+    derives the deadline from each snapshot's sampling time, so records are not
+    accidentally retained longer merely because the service restarted later.
+    """
+
+    collections = set(await database.list_collection_names())
+    if CONNECTION_SNAPSHOT_COLLECTION not in collections:
+        return 0
+
+    retention_milliseconds = settings.connection_history_retention_days * 24 * 60 * 60 * 1_000
+    result = await database[CONNECTION_SNAPSHOT_COLLECTION].update_many(
+        {
+            "sampled_at": {"$type": "date"},
+            "$or": [
+                {"expires_at": {"$exists": False}},
+                {
+                    "$expr": {
+                        "$lt": [
+                            "$expires_at",
+                            {"$add": ["$sampled_at", retention_milliseconds]},
+                        ]
+                    }
+                },
+            ],
+        },
+        [
+            {
+                "$set": {
+                    "expires_at": {"$add": ["$sampled_at", retention_milliseconds]}
+                }
+            }
+        ],
+    )
+    modified_count = int(result.modified_count)
+    if modified_count:
+        logger.info(
+            "Extended connection snapshot retention; records=%d days=%d",
+            modified_count,
+            settings.connection_history_retention_days,
+        )
+    return modified_count
+
+
 async def _deduplicate_markers(
     collection: Any,
     *,
@@ -455,6 +502,7 @@ class Database:
         await _migrate_retired_policy_state(database, self.settings)
         await _migrate_source_blacklist_state(database)
         await _migrate_subscription_source_types(database)
+        await _migrate_connection_snapshot_retention(database, self.settings)
         await _prepare_telemetry_indexes(database)
         await init_beanie(
             database=database,

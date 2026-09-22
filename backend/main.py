@@ -19,13 +19,14 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from beanie.exceptions import CollectionWasNotInitialized
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pymongo import UpdateOne
 from pymongo.errors import DuplicateKeyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -48,6 +49,7 @@ from app.models import (
     ProbeCircuit,
     ProbeHistory,
     ProxyConfigSnapshot,
+    ProxyQualitySample,
     Site,
     SiteSubscription,
     SourceBlacklist,
@@ -80,6 +82,7 @@ from app.schemas import (
     BackupRecordOut,
     BackupRestoreRequest,
     BackupRestoreResponse,
+    ConnectionHistoryResponse,
     ConnectionSnapshotOut,
     DesiredResponse,
     DraftCreate,
@@ -101,12 +104,13 @@ from app.schemas import (
     ProxyEndpointSnapshot,
     ProxyGroupSnapshot,
     ProxySelectionRequest,
-    RoleUpdate,
     RegistrationRequest,
     ReleaseCreate,
     ReleaseDetailOut,
     ReleaseEventOut,
     ReleaseOut,
+    RoleUpdate,
+    ServiceQualityResponse,
     SiteNameUpdate,
     SiteOut,
     SiteSubscriptionOut,
@@ -159,6 +163,8 @@ from app.services.bundles import (
 from app.services.cidr import (
     effective_blacklist,
     normalize_source_ip,
+)
+from app.services.cidr import (
     preview_source_blacklist as preview_blacklist_helper,
 )
 from app.services.probes import record_probe_result
@@ -178,6 +184,8 @@ from app.services.tasks import (
     fail_task,
     reclaim_expired_tasks,
 )
+
+SERVICE_QUALITY_RETENTION = timedelta(days=35)
 
 
 # Configure logging with sensitive-field redaction
@@ -806,6 +814,77 @@ def _connection_out(item: ConnectionSnapshot) -> ConnectionSnapshotOut:
     )
 
 
+async def _connection_scope_query(site_id: str | None, node_id: str | None) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    if site_id:
+        query["site_id"] = site_id
+    if node_id:
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        query["node_id"] = node.agent_id
+    return query
+
+
+async def _connection_history_query(
+    *,
+    site_id: str | None,
+    node_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    source_ip: str | None,
+    destination: str | None,
+    network: str | None,
+    outbound: str | None,
+    search: str | None,
+) -> dict[str, Any]:
+    query = await _connection_scope_query(site_id, node_id)
+    if since is not None or until is not None:
+        query["sampled_at"] = {
+            **({"$gte": since} if since is not None else {}),
+            **({"$lte": until} if until is not None else {}),
+        }
+
+    connection_match: dict[str, Any] = {}
+    if source_ip and source_ip.strip():
+        connection_match["src_ip"] = {
+            "$regex": re.escape(source_ip.strip()[:128]),
+            "$options": "i",
+        }
+    if destination and destination.strip():
+        pattern = {"$regex": re.escape(destination.strip()[:128]), "$options": "i"}
+        connection_match["$or"] = [{"dst_host": pattern}, {"dst_ip": pattern}]
+    if network and network.strip():
+        connection_match["network"] = {
+            "$regex": f"^{re.escape(network.strip()[:32])}$",
+            "$options": "i",
+        }
+    if outbound and outbound.strip():
+        connection_match["outbound_chain"] = {
+            "$regex": re.escape(outbound.strip()[:128]),
+            "$options": "i",
+        }
+    if connection_match:
+        query["connections"] = {"$elemMatch": connection_match}
+
+    if search and search.strip():
+        pattern = {"$regex": re.escape(search.strip()[:128]), "$options": "i"}
+        query["$or"] = [
+            {"node_id": pattern},
+            {"top_sources.label": pattern},
+            {"top_destinations.label": pattern},
+            {"top_users.label": pattern},
+            {"connections.src_ip": pattern},
+            {"connections.dst_host": pattern},
+            {"connections.dst_ip": pattern},
+            {"connections.network": pattern},
+            {"connections.inbound": pattern},
+            {"connections.outbound_chain": pattern},
+            {"connections.rule": pattern},
+        ]
+    return query
+
+
 def _safe_proxy_label(value: Any, limit: int = 255) -> str:
     """Normalize operator-visible labels without retaining arbitrary payloads."""
 
@@ -897,6 +976,118 @@ def _proxy_config_out(item: ProxyConfigSnapshot) -> ProxyConfigSnapshotOut:
         error=_safe_error(item.error, 256),
         received_at=item.received_at,
     )
+
+
+def _proxy_quality_samples(
+    *,
+    node: Node,
+    groups: list[ProxyGroupSnapshot],
+    sampled_at: datetime,
+    received_at: datetime,
+) -> list[dict[str, Any]]:
+    """Project one current sample per subscription outbound.
+
+    Monitor snapshots repeat a bounded local history. Persisting only the most
+    recent history point keeps the ingest path small while still preserving a
+    minute-level series; the first snapshot after a deployment also backfills
+    the latest point already known by the monitor.
+    """
+
+    subscription = next(
+        (group for group in groups if group.name.strip().casefold() == "subscription"),
+        None,
+    )
+    if subscription is None:
+        return []
+
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, datetime]] = set()
+    expires_at = received_at + SERVICE_QUALITY_RETENTION
+    for endpoint in subscription.nodes[:500]:
+        outbound_tag = _safe_log_text(endpoint.name, 255)
+        if not outbound_tag:
+            continue
+        valid_history = [
+            point
+            for point in endpoint.history
+            if point.delay_ms is not None and point.at is not None
+        ]
+        latest_point = max(valid_history, key=lambda point: point.at or sampled_at, default=None)
+        if latest_point is not None:
+            point_at = latest_point.at or sampled_at
+            key = (outbound_tag, point_at)
+            if key not in seen:
+                result.append(
+                    {
+                        "node_id": node.agent_id,
+                        "site_id": node.site_id,
+                        "service": "subscription",
+                        "outbound_tag": outbound_tag,
+                        "delay_ms": latest_point.delay_ms,
+                        "success": True,
+                        "sampled_at": point_at,
+                        "received_at": received_at,
+                        "expires_at": expires_at,
+                    }
+                )
+                seen.add(key)
+        elif endpoint.delay_ms is not None and endpoint.alive is not False:
+            key = (outbound_tag, sampled_at)
+            if key not in seen:
+                result.append(
+                    {
+                        "node_id": node.agent_id,
+                        "site_id": node.site_id,
+                        "service": "subscription",
+                        "outbound_tag": outbound_tag,
+                        "delay_ms": endpoint.delay_ms,
+                        "success": True,
+                        "sampled_at": sampled_at,
+                        "received_at": received_at,
+                        "expires_at": expires_at,
+                    }
+                )
+                seen.add(key)
+
+        # A failed /delay call does not append a history point. Keep the
+        # availability dimension visible with a failure-only sample.
+        if endpoint.alive is False:
+            key = (outbound_tag, sampled_at)
+            if key not in seen:
+                result.append(
+                    {
+                        "node_id": node.agent_id,
+                        "site_id": node.site_id,
+                        "service": "subscription",
+                        "outbound_tag": outbound_tag,
+                        "delay_ms": None,
+                        "success": False,
+                        "sampled_at": sampled_at,
+                        "received_at": received_at,
+                        "expires_at": expires_at,
+                    }
+                )
+                seen.add(key)
+    return result
+
+
+async def _persist_proxy_quality_samples(samples: list[dict[str, Any]]) -> None:
+    if not samples:
+        return
+    operations = [
+        UpdateOne(
+            {
+                "node_id": sample["node_id"],
+                "service": sample["service"],
+                "outbound_tag": sample["outbound_tag"],
+                "sampled_at": sample["sampled_at"],
+            },
+            {"$setOnInsert": sample},
+            upsert=True,
+        )
+        for sample in samples
+    ]
+    await ProxyQualitySample.get_motor_collection().bulk_write(operations, ordered=False)
 
 
 def _probe_history_out(item: ProbeHistory) -> ProbeHistoryOut:
@@ -3249,6 +3440,81 @@ async def list_connections(
     return [_connection_out(item) for item in entries]
 
 
+@app.get("/api/v1/connections/live", response_model=list[ConnectionSnapshotOut])
+async def list_live_connections(
+    site_id: str | None = None,
+    node_id: str | None = None,
+    _: str = Depends(require_management),
+) -> list[ConnectionSnapshotOut]:
+    """Return the latest connection snapshot for each selected node."""
+
+    if node_id:
+        node = await _find_node_reference(node_id)
+        if node is None:
+            raise HTTPException(404, "node_not_found")
+        selected_nodes = [node]
+    else:
+        selected_nodes = await Node.find({"site_id": site_id} if site_id else {}).to_list()
+    entries: list[ConnectionSnapshot] = []
+    for node in selected_nodes:
+        snapshot = (
+            await ConnectionSnapshot.find(ConnectionSnapshot.node_id == node.agent_id)
+            .sort(-ConnectionSnapshot.sampled_at)
+            .first_or_none()
+        )
+        if snapshot is not None:
+            entries.append(snapshot)
+    entries.sort(key=lambda item: item.sampled_at, reverse=True)
+    return [_connection_out(entry) for entry in entries]
+
+
+@app.get("/api/v1/connections/history", response_model=ConnectionHistoryResponse)
+async def list_connection_history(
+    site_id: str | None = None,
+    node_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    source_ip: str | None = None,
+    destination: str | None = None,
+    network: str | None = None,
+    outbound: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    _: str = Depends(require_management),
+) -> ConnectionHistoryResponse:
+    """Return retained connection snapshots with audit-oriented filters."""
+
+    safe_limit = min(max(limit, 1), 250)
+    safe_offset = min(max(offset, 0), 100_000)
+    query = await _connection_history_query(
+        site_id=site_id,
+        node_id=node_id,
+        since=since,
+        until=until,
+        source_ip=source_ip,
+        destination=destination,
+        network=network,
+        outbound=outbound,
+        search=search,
+    )
+    total = await ConnectionSnapshot.find(query).count()
+    entries = (
+        await ConnectionSnapshot.find(query)
+        .sort(-ConnectionSnapshot.sampled_at)
+        .skip(safe_offset)
+        .limit(safe_limit)
+        .to_list()
+    )
+    return ConnectionHistoryResponse(
+        items=[_connection_out(item) for item in entries],
+        total=total,
+        limit=safe_limit,
+        offset=safe_offset,
+        has_more=safe_offset + len(entries) < total,
+    )
+
+
 @app.get("/api/v1/nodes/{node_id}/connections", response_model=ConnectionSnapshotOut)
 async def get_node_live_connections(
     node_id: str, _: str = Depends(require_management)
@@ -3264,6 +3530,191 @@ async def get_node_live_connections(
     if snapshot is None:
         raise HTTPException(404, "connection_snapshot_not_found")
     return _connection_out(snapshot)
+
+
+@app.get("/api/v1/service-quality", response_model=ServiceQualityResponse)
+async def list_service_quality(
+    window: Literal["1h", "24h", "7d", "30d"] = "24h",
+    site_id: str | None = None,
+    node_id: str | None = None,
+    service: Literal["subscription"] = "subscription",
+    _: str = Depends(require_management),
+) -> ServiceQualityResponse:
+    """Aggregate the measured subscription outbound quality for a time window."""
+
+    window_delta = {
+        "1h": timedelta(hours=1),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }[window]
+    until = utcnow()
+    from_at = until - window_delta
+    nodes = await Node.find_all().to_list()
+    selected_node: Node | None = None
+    if node_id:
+        selected_node = await _find_node_reference(node_id)
+        if selected_node is None:
+            raise HTTPException(404, "node_not_found")
+    selected_nodes = [
+        node
+        for node in nodes
+        if (not site_id or node.site_id == site_id)
+        and (selected_node is None or node.agent_id == selected_node.agent_id)
+    ]
+    node_ids = [node.agent_id for node in selected_nodes]
+    node_by_id = {node.agent_id: node for node in selected_nodes}
+    sites = await Site.find_all().to_list()
+    site_names = {str(site.id): site.name for site in sites}
+
+    match: dict[str, Any] = {
+        "service": service,
+        "sampled_at": {"$gte": from_at, "$lte": until},
+    }
+    if site_id:
+        match["site_id"] = site_id
+    if node_id:
+        match["node_id"] = selected_node.agent_id if selected_node else ""
+    pipeline = [
+        {"$match": match},
+        {
+            "$sort": {
+                "node_id": 1,
+                "site_id": 1,
+                "service": 1,
+                "outbound_tag": 1,
+                "sampled_at": 1,
+            }
+        },
+        {
+            "$group": {
+                "_id": {
+                    "node_id": "$node_id",
+                    "site_id": "$site_id",
+                    "service": "$service",
+                    "outbound_tag": "$outbound_tag",
+                },
+                "sample_count": {"$sum": 1},
+                "successful_samples": {
+                    "$sum": {"$cond": ["$success", 1, 0]}
+                },
+                "average_latency_ms": {"$avg": "$delay_ms"},
+                "min_latency_ms": {"$min": "$delay_ms"},
+                "max_latency_ms": {"$max": "$delay_ms"},
+                "last_latency_ms": {"$last": "$delay_ms"},
+                "last_success": {"$last": "$success"},
+                "last_sampled_at": {"$last": "$sampled_at"},
+            }
+        },
+    ]
+    aggregated: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    async for row in ProxyQualitySample.get_motor_collection().aggregate(pipeline):
+        identity = row.get("_id") or {}
+        row_node_id = str(identity.get("node_id") or "")
+        row_site_id = str(identity.get("site_id") or "")
+        row_service = str(identity.get("service") or service)
+        outbound_tag = str(identity.get("outbound_tag") or "")
+        if not outbound_tag:
+            continue
+        sample_count = int(row.get("sample_count") or 0)
+        successful_samples = int(row.get("successful_samples") or 0)
+        aggregated[(row_node_id, row_site_id, row_service, outbound_tag)] = {
+            "node_id": row_node_id,
+            "node_name": (
+                node_by_id.get(row_node_id).name
+                if row_node_id in node_by_id
+                else row_node_id
+            ),
+            "site_id": row_site_id,
+            "site_name": site_names.get(row_site_id, row_site_id),
+            "service": row_service,
+            "outbound_tag": outbound_tag,
+            "average_latency_ms": (
+                float(row["average_latency_ms"])
+                if row.get("average_latency_ms") is not None
+                else None
+            ),
+            "min_latency_ms": (
+                int(row["min_latency_ms"]) if row.get("min_latency_ms") is not None else None
+            ),
+            "max_latency_ms": (
+                int(row["max_latency_ms"]) if row.get("max_latency_ms") is not None else None
+            ),
+            "success_rate": successful_samples / sample_count * 100 if sample_count else None,
+            "sample_count": sample_count,
+            "successful_samples": successful_samples,
+            "failed_samples": max(sample_count - successful_samples, 0),
+            "last_latency_ms": (
+                int(row["last_latency_ms"])
+                if row.get("last_latency_ms") is not None
+                else None
+            ),
+            "last_success": row.get("last_success"),
+            "last_sampled_at": row.get("last_sampled_at"),
+        }
+
+    # Include currently reported subscription endpoints even before their first
+    # quality sample arrives, so a new node does not disappear from the page.
+    if node_ids:
+        snapshots = await ProxyConfigSnapshot.find({"node_id": {"$in": node_ids}}).to_list()
+        for snapshot in snapshots:
+            node = node_by_id.get(snapshot.node_id)
+            if node is None:
+                continue
+            for raw_group in snapshot.groups:
+                try:
+                    group = ProxyGroupSnapshot.model_validate(raw_group)
+                except Exception:
+                    continue
+                if group.name.strip().casefold() != service:
+                    continue
+                endpoint_names = list(
+                    dict.fromkeys(group.all + [endpoint.name for endpoint in group.nodes])
+                )
+                for outbound_tag in endpoint_names:
+                    clean_tag = _safe_log_text(outbound_tag, 255)
+                    if not clean_tag:
+                        continue
+                    key = (node.agent_id, node.site_id, service, clean_tag)
+                    aggregated.setdefault(
+                        key,
+                        {
+                            "node_id": node.agent_id,
+                            "node_name": node.name,
+                            "site_id": node.site_id,
+                            "site_name": site_names.get(node.site_id, node.site_id),
+                            "service": service,
+                            "outbound_tag": clean_tag,
+                            "average_latency_ms": None,
+                            "min_latency_ms": None,
+                            "max_latency_ms": None,
+                            "success_rate": None,
+                            "sample_count": 0,
+                            "successful_samples": 0,
+                            "failed_samples": 0,
+                            "last_latency_ms": None,
+                            "last_success": None,
+                            "last_sampled_at": None,
+                        },
+                    )
+
+    entries = list(aggregated.values())
+    entries.sort(
+        key=lambda item: (
+            item["node_name"].casefold(),
+            item["average_latency_ms"] is None,
+            item["average_latency_ms"] if item["average_latency_ms"] is not None else float("inf"),
+            item["outbound_tag"].casefold(),
+        )
+    )
+    return ServiceQualityResponse(
+        window=window,
+        from_at=from_at,
+        until=until,
+        service=service,
+        samples=sum(item["sample_count"] for item in entries),
+        entries=entries,
+    )
 
 
 @app.get("/api/v1/proxy-configs", response_model=list[ProxyConfigSnapshotOut])
@@ -3757,7 +4208,8 @@ async def agent_connections(
             top_users=[item.model_dump() for item in snapshot.top_users],
             connections=[item.model_dump() for item in snapshot.connections],
             api_available=snapshot.api_available,
-            expires_at=snapshot.sampled_at + timedelta(days=7),
+            expires_at=snapshot.sampled_at
+            + timedelta(days=_settings().connection_history_retention_days),
         )
         for snapshot in payload.snapshots
     ]
@@ -3796,6 +4248,16 @@ async def agent_proxy_config(
         if sanitized is not None:
             groups.append(sanitized.model_dump(mode="json"))
     received = utcnow()
+    quality_samples = (
+        _proxy_quality_samples(
+            node=node,
+            groups=payload.groups,
+            sampled_at=payload.sampled_at,
+            received_at=received,
+        )
+        if payload.api_available
+        else []
+    )
     snapshot = await ProxyConfigSnapshot.find_one(ProxyConfigSnapshot.node_id == node.agent_id)
     is_new_snapshot = snapshot is None
     if snapshot is None:
@@ -3817,6 +4279,7 @@ async def agent_proxy_config(
         await snapshot.insert()
     else:
         await snapshot.save()
+    await _persist_proxy_quality_samples(quality_samples)
     return TelemetryBatchResponse(accepted=True)
 
 

@@ -696,6 +696,14 @@ class ConnectionSnapshotOut(BaseModel):
     received_at: datetime
 
 
+class ConnectionHistoryResponse(BaseModel):
+    items: list[ConnectionSnapshotOut]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class ProxyConfigSnapshotOut(BaseModel):
     id: str
     node_id: str
@@ -705,6 +713,34 @@ class ProxyConfigSnapshotOut(BaseModel):
     groups: list[ProxyGroupSnapshot]
     error: str
     received_at: datetime
+
+
+class ServiceQualityStatOut(BaseModel):
+    node_id: str
+    node_name: str
+    site_id: str
+    site_name: str
+    service: str
+    outbound_tag: str
+    average_latency_ms: float | None
+    min_latency_ms: int | None
+    max_latency_ms: int | None
+    success_rate: float | None
+    sample_count: int
+    successful_samples: int
+    failed_samples: int
+    last_latency_ms: int | None
+    last_success: bool | None
+    last_sampled_at: datetime | None
+
+
+class ServiceQualityResponse(BaseModel):
+    window: Literal["1h", "24h", "7d", "30d"]
+    from_at: datetime
+    until: datetime
+    service: str
+    samples: int
+    entries: list[ServiceQualityStatOut]
 
 
 class ProbeHistoryOut(BaseModel):

@@ -5,7 +5,7 @@ import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { usePreferences } from "../lib/preferences";
 import { IconButton } from "./ui";
 
-export type TimeRange = "24h" | "7d" | "30d" | "all";
+export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
 
 export type FilterOption = { value: string; label: string };
 
@@ -39,7 +39,7 @@ export function FilterSelect({
 
 export function timeRangeStart(value: TimeRange): string | undefined {
   if (value === "all") return undefined;
-  const hours = value === "24h" ? 24 : value === "7d" ? 24 * 7 : 24 * 30;
+  const hours = value === "1h" ? 1 : value === "24h" ? 24 : value === "7d" ? 24 * 7 : 24 * 30;
   return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
@@ -75,6 +75,7 @@ export function ListFilters({
         value={timeRange}
         setValue={(value) => setTimeRange(value as TimeRange)}
         options={[
+          { value: "1h", label: "Last hour" },
           { value: "24h", label: "Last 24 hours" },
           { value: "7d", label: "Last 7 days" },
           { value: "30d", label: "Last 30 days" },

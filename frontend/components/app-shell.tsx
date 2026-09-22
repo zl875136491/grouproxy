@@ -6,6 +6,7 @@ import {
   Archive,
   Ban,
   BellRing,
+  BarChart3,
   BookOpen,
   Boxes,
   ClipboardList,
@@ -69,6 +70,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
     items: [
       { href: "/logs", label: "Logs", icon: ScrollText },
       { href: "/connections", label: "Connections", icon: Activity },
+      { href: "/service-quality", label: "Service quality", icon: BarChart3 },
       { href: "/probes", label: "Probes", icon: Radio },
       { href: "/alerts", label: "Alerts", icon: BellRing },
     ],

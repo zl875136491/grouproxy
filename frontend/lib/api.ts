@@ -113,6 +113,36 @@ export type ProxyConfigSnapshot = {
   received_at: string;
 };
 
+export type ServiceQualityWindow = "1h" | "24h" | "7d" | "30d";
+
+export type ServiceQualityStat = {
+  node_id: string;
+  node_name: string;
+  site_id: string;
+  site_name: string;
+  service: string;
+  outbound_tag: string;
+  average_latency_ms: number | null;
+  min_latency_ms: number | null;
+  max_latency_ms: number | null;
+  success_rate: number | null;
+  sample_count: number;
+  successful_samples: number;
+  failed_samples: number;
+  last_latency_ms: number | null;
+  last_success: boolean | null;
+  last_sampled_at: string | null;
+};
+
+export type ServiceQualityResponse = {
+  window: ServiceQualityWindow;
+  from_at: string;
+  until: string;
+  service: string;
+  samples: number;
+  entries: ServiceQualityStat[];
+};
+
 export type ProxySelectionRequest = {
   group: string;
   outbound: string;
@@ -391,6 +421,14 @@ export type ConnectionSnapshot = {
   connections?: ConnectionLiveItem[];
   api_available: boolean;
   received_at: string;
+};
+
+export type ConnectionHistoryResponse = {
+  items: ConnectionSnapshot[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
 };
 
 export type ProbeHistory = {
@@ -807,6 +845,18 @@ export function getProxyConfigs(filters: { siteId?: string; nodeId?: string } = 
   return request<ProxyConfigSnapshot[]>(`/api/v1/proxy-configs${suffix}`);
 }
 
+export function getServiceQuality(filters: {
+  window?: ServiceQualityWindow;
+  siteId?: string;
+  nodeId?: string;
+} = {}) {
+  const query = new URLSearchParams();
+  query.set("window", filters.window || "24h");
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  return request<ServiceQualityResponse>(`/api/v1/service-quality?${query.toString()}`);
+}
+
 export function getNodeProxyConfig(nodeId: string) {
   return request<ProxyConfigSnapshot>(
     `/api/v1/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
@@ -1020,6 +1070,41 @@ export function getConnections(filters: { siteId?: string; nodeId?: string; sinc
   if (filters.until) query.set("until", filters.until);
   if (filters.limit) query.set("limit", String(filters.limit));
   return request<ConnectionSnapshot[]>(`/api/v1/connections${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function getLiveConnections(filters: { siteId?: string; nodeId?: string } = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  return request<ConnectionSnapshot[]>(`/api/v1/connections/live${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function getConnectionHistory(filters: {
+  siteId?: string;
+  nodeId?: string;
+  since?: string;
+  until?: string;
+  sourceIp?: string;
+  destination?: string;
+  network?: string;
+  outbound?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const query = new URLSearchParams();
+  if (filters.siteId) query.set("site_id", filters.siteId);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  if (filters.since) query.set("since", filters.since);
+  if (filters.until) query.set("until", filters.until);
+  if (filters.sourceIp) query.set("source_ip", filters.sourceIp);
+  if (filters.destination) query.set("destination", filters.destination);
+  if (filters.network) query.set("network", filters.network);
+  if (filters.outbound) query.set("outbound", filters.outbound);
+  if (filters.search) query.set("search", filters.search);
+  if (filters.limit) query.set("limit", String(filters.limit));
+  if (filters.offset) query.set("offset", String(filters.offset));
+  return request<ConnectionHistoryResponse>(`/api/v1/connections/history?${query.toString()}`);
 }
 
 export function getNodeProbes(nodeId: string) {

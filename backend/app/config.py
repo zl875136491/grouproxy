@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROXY_LISTEN_PORT = 1080
 ROOT_ITCODE = "zhangle"
 MANAGEMENT_ROLES = frozenset({"root", "admin"})
+DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS = 90
 
 
 def is_management_role(role: str) -> bool:
@@ -35,6 +36,11 @@ class Settings(BaseSettings):
     deny_spike_window_seconds: int = Field(default=300, ge=60, le=3_600)
     deny_spike_baseline_seconds: int = Field(default=3_600, ge=300, le=86_400)
     deny_spike_min_events: int = Field(default=20, ge=1, le=100_000)
+    connection_history_retention_days: int = Field(
+        default=DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS,
+        ge=7,
+        le=3_650,
+    )
     backup_directory: str = ""
     backup_encryption_key: SecretStr | None = None
     # Backup maintenance is opt-in so a new installation never starts writing

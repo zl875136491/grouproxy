@@ -192,7 +192,7 @@ Monitor 内部边界：
 
 - Dashboard 使用服务端 opaque session；已有本地验收脚本也可使用 `GROUPROXY_MANAGEMENT_TOKEN` Bearer token。
 - 管理写操作受 Origin 检查和内存滑动窗口限流保护。
-- 常用接口包括 `/auth/*`、`/sites`、`/nodes`、`/blacklist`、`/subscriptions`、`/config/drafts`、`/config/releases`、`/tasks`、`/logs`、`/connections`、`/alerts`、`/backups` 和 `/overview`。
+- 常用接口包括 `/auth/*`、`/sites`、`/nodes`、`/blacklist`、`/subscriptions`、`/config/drafts`、`/config/releases`、`/tasks`、`/logs`、`/connections/live`、`/connections/history`、`/alerts`、`/backups` 和 `/overview`。连接历史支持站点、节点、时间、来源 IP、目标、协议、出站和关键词筛选。
 - 员工接入资产位于 `/access/config`、`/access/proxy.pac`、`/access/linux-setup.sh` 和 `/access/windows-setup.ps1`。
 
 节点面 `/agent/v1/*`：
@@ -657,6 +657,7 @@ Compose 不包含 monitor 和 sing-box。节点仍应使用 systemd 和 `deploy/
 | `GROUPROXY_ALLOW_INSECURE_AGENT_HTTP` | `false` | Backend URL 为 HTTP 时必须显式为 `true` |
 | `GROUPROXY_CORS_ALLOWED_ORIGINS` | 开发有 localhost | 正式同源 Dashboard 建议留空 |
 | `GROUPROXY_SEED_DEFAULT_SITES` | `true` | 是否初始化默认五站点 |
+| `GROUPROXY_CONNECTION_HISTORY_RETENTION_DAYS` | `90` | 连接摘要历史保留天数，范围 7–3650 |
 | `GROUPROXY_AUTH_SESSION_TTL_MINUTES` | `43200` | 管理会话默认 30 天，上限也是 30 天 |
 | `GROUPROXY_GQUAN_DELIVERY_MODE` | `app` | 正式使用 GQuan APP API |
 | `GROUPROXY_GQUAN_APP_TOKEN` | app 模式需要 | One Login APP Bearer token |
