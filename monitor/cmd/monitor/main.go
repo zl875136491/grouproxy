@@ -1499,14 +1499,7 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err := a.runtime.Check(candidatePath); err != nil {
 		return a.ackFailure(value, "singbox_check_failed", err.Error(), true, false, false, false)
 	}
-	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
-	for _, rule := range sourceRules {
-		if ruleDirection(rule) != "source" {
-			continue
-		}
-		nftRules = append(nftRules, firewall.SourceRule{Action: rule.Action, Kind: rule.Kind, Pattern: rule.Pattern})
-	}
-	nftScript := firewall.RenderSourceRules(firewallPort, nftRules, boolValue(value["shutdown"]))
+	nftScript := firewall.RenderSourceRules(firewallPort, nftSourceRules(sourceRules), boolValue(value["shutdown"]))
 	if err := firewall.Check(nftScript); err != nil {
 		return a.ackFailure(value, "nft_check_failed", err.Error(), true, false, false, false)
 	}
@@ -1693,14 +1686,7 @@ func (a *agent) restoreLastGoodFirewallForBundle(lastGood map[string]any) error 
 	if err != nil {
 		return err
 	}
-	nftRules := make([]firewall.SourceRule, 0, len(sourceRules))
-	for _, rule := range sourceRules {
-		if ruleDirection(rule) != "source" {
-			continue
-		}
-		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
-	}
-	script := firewall.RenderSourceRules(a.firewallPort(port), nftRules, boolValue(lastGood["shutdown"]))
+	script := firewall.RenderSourceRules(a.firewallPort(port), nftSourceRules(sourceRules), boolValue(lastGood["shutdown"]))
 	if err := firewall.Check(script); err != nil {
 		return err
 	}
@@ -2396,6 +2382,46 @@ func ruleDirection(rule sourceBlacklistRule) string {
 		return "destination"
 	}
 	return "source"
+}
+
+// nftSourceRules keeps only the source IP and CIDR policy that nftables can
+// enforce on the proxy port. A destination allow, or a source allow that is
+// still a domain, can exempt a source blacklist after sing-box sees the
+// request. An unconditional drop would reject that traffic first, so those
+// drops stay in the route rules. Resolved source-domain addresses are already
+// IP rules by the time this runs and remain enforceable here.
+func nftSourceRules(rules []sourceBlacklistRule) []firewall.SourceRule {
+	deferDrops := false
+	for _, rule := range rules {
+		if rule.Action == "allow" && !nftCanMatchSource(rule) {
+			deferDrops = true
+			break
+		}
+	}
+	result := make([]firewall.SourceRule, 0, len(rules))
+	for _, rule := range rules {
+		if !nftCanMatchSource(rule) {
+			continue
+		}
+		if deferDrops && rule.Action != "allow" {
+			continue
+		}
+		result = append(result, firewall.SourceRule{
+			Action: rule.Action, Kind: rule.Kind, Pattern: rule.Pattern,
+		})
+	}
+	return result
+}
+
+func nftCanMatchSource(rule sourceBlacklistRule) bool {
+	if ruleDirection(rule) != "source" {
+		return false
+	}
+	kind := rule.Kind
+	if kind == "network" {
+		kind = "cidr"
+	}
+	return kind == "ip" || kind == "cidr"
 }
 
 func dedupeSourceBlacklistRules(values []sourceBlacklistRule) []sourceBlacklistRule {

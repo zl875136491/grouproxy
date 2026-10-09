@@ -2588,7 +2588,7 @@ async def update_network_group(group_id: str, payload: NetworkGroupCreate, reque
     item.name, item.entries, item.updated_at = name, entries, utcnow()
     await item.save()
     distribution = await _release_access_control_nodes(node_ids, operation="updated", target_id=group_id, actor=_actor(), request_id=_request_id(request)) if node_ids else None
-    await append_audit(action="network_group.update", target_type="network_group", target_id=group_id, actor=_actor(), after={"name": name, "distribution": [target.model_dump() for target in (distribution.targets if distribution else [])]})
+    await append_audit(action="network_group.update", target_type="network_group", target_id=group_id, actor=_actor(), after={"name": name, "distribution": [target.model_dump(mode="json") for target in (distribution.targets if distribution else [])]})
     return _network_group_out(item)
 
 
@@ -3355,7 +3355,10 @@ async def _distribute_source_blacklist_change(
                 site=site,
                 requested_node_ids=draft.node_ids,
                 expected_current_version=None,
-                idempotency_key=f"source-blacklist:{operation}:{rule_id}:{site_id}",
+                # A later edit of the same rule must publish a new bundle.
+                # Reusing a stable key made the second update return the first
+                # release and left the nodes on the previous policy.
+                idempotency_key=f"source-blacklist:{operation}:{rule_id}:{site_id}:{secrets.token_hex(8)}",
                 request_id=request_id,
                 actor=actor,
             )

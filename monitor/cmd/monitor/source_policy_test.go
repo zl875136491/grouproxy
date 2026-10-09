@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/zl875136491/grouproxy/monitor/internal/config"
+	"github.com/zl875136491/grouproxy/monitor/internal/firewall"
 	"github.com/zl875136491/grouproxy/monitor/internal/routingdata"
 )
 
@@ -321,5 +322,51 @@ func TestWhitelistExemptsBlacklistWithoutForcingDirect(t *testing.T) {
 	}
 	if subrules[1].(map[string]any)["invert"] != true || subrules[2].(map[string]any)["invert"] != true {
 		t.Fatalf("allow exceptions = %#v", subrules)
+	}
+}
+
+func TestNftKeepsSourceIPPolicyWhenItCanExpressEveryAllow(t *testing.T) {
+	script := firewall.RenderSourceRules(1080, nftSourceRules([]sourceBlacklistRule{
+		{Action: "deny", Direction: "source", Kind: "ip", Pattern: "10.32.12.112"},
+		{Action: "allow", Direction: "source", Kind: "ip", Pattern: "10.32.12.110"},
+		{Action: "deny", Direction: "destination", Kind: "domain", Pattern: "baidu.com"},
+	}), false)
+	for _, expected := range []string{
+		"ip saddr 10.32.12.110 tcp dport 1080 accept",
+		"ip saddr 10.32.12.112 tcp dport 1080 drop",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("firewall missing %q:\n%s", expected, script)
+		}
+	}
+	if strings.Contains(script, "baidu.com") {
+		t.Fatalf("destination rule leaked into nft:\n%s", script)
+	}
+}
+
+func TestNftDefersSourceDropWhenDestinationAllowCanExemptIt(t *testing.T) {
+	script := firewall.RenderSourceRules(1080, nftSourceRules([]sourceBlacklistRule{
+		{Action: "deny", Direction: "source", Kind: "ip", Pattern: "10.32.12.112"},
+		{Action: "allow", Direction: "destination", Kind: "domain", Pattern: "google.com"},
+		{Action: "allow", Direction: "source", Kind: "ip", Pattern: "10.32.12.110"},
+	}), false)
+	if strings.Contains(script, "10.32.12.112") || strings.Contains(script, " drop") {
+		t.Fatalf("source drop must wait for sing-box when a destination allow exists:\n%s", script)
+	}
+	if !strings.Contains(script, "ip saddr 10.32.12.110 tcp dport 1080 accept") {
+		t.Fatalf("expressible source allow should remain:\n%s", script)
+	}
+	if !strings.Contains(script, "tcp dport 1080 accept") {
+		t.Fatalf("listener must stay open:\n%s", script)
+	}
+}
+
+func TestNftDefersSourceDropForUnresolvedSourceDomainAllow(t *testing.T) {
+	script := firewall.RenderSourceRules(1080, nftSourceRules([]sourceBlacklistRule{
+		{Action: "deny", Direction: "source", Kind: "ip", Pattern: "10.32.12.112"},
+		{Action: "allow", Direction: "source", Kind: "domain", Pattern: "exempt.example"},
+	}), false)
+	if strings.Contains(script, "drop") || strings.Contains(script, "exempt.example") {
+		t.Fatalf("unresolved source-domain allow must not become an nft drop:\n%s", script)
 	}
 }
