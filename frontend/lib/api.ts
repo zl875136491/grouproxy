@@ -196,6 +196,41 @@ export type SourceBlacklistMutation = {
   distribution: SourceBlacklistDistribution[];
 };
 
+export type NetworkGroupEntry = { kind: "ip" | "cidr" | "domain"; pattern: string };
+export type NetworkGroup = {
+  id: string;
+  name: string;
+  entries: NetworkGroupEntry[];
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AccessControlRule = {
+  id: string;
+  node_ids: string[];
+  network_group_id: string;
+  network_group_name: string;
+  mode: "deny" | "allow";
+  direction: "source" | "destination";
+  reason: string;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AccessControlMutation = {
+  rules: AccessControlRule[];
+  operation: "created" | "updated" | "deleted";
+  distribution: SourceBlacklistDistribution[];
+};
+export type ListPage<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
+
 export type SubscriptionSource = {
   id: string;
   name: string;
@@ -909,6 +944,73 @@ export function setSiteShutdown(siteId: string, shutdown: boolean) {
 
 export function getSourceBlacklist() {
   return request<SourceBlacklist[]>("/api/v1/blacklist");
+}
+
+export function getNetworkGroups(filters: { search?: string; kind?: NetworkGroupEntry["kind"]; limit?: number; offset?: number } = {}) {
+  const query = new URLSearchParams();
+  if (filters.search) query.set("search", filters.search);
+  if (filters.kind) query.set("kind", filters.kind);
+  if (filters.limit) query.set("limit", String(filters.limit));
+  if (filters.offset) query.set("offset", String(filters.offset));
+  return request<ListPage<NetworkGroup>>(`/api/v1/network-groups${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function createNetworkGroup(value: { name: string; entries: NetworkGroupEntry[] }) {
+  return request<NetworkGroup>("/api/v1/network-groups", jsonRequest("POST", value));
+}
+
+export function updateNetworkGroup(groupId: string, value: { name: string; entries: NetworkGroupEntry[] }) {
+  return request<NetworkGroup>(`/api/v1/network-groups/${encodeURIComponent(groupId)}`, jsonRequest("PATCH", value));
+}
+
+export function deleteNetworkGroup(groupId: string) {
+  return request<{ id: string; deleted: boolean }>(`/api/v1/network-groups/${encodeURIComponent(groupId)}`, jsonRequest("DELETE"));
+}
+
+export function getAccessControl(filters: {
+  search?: string;
+  nodeId?: string;
+  networkGroupId?: string;
+  mode?: AccessControlRule["mode"];
+  direction?: AccessControlRule["direction"];
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const query = new URLSearchParams();
+  if (filters.search) query.set("search", filters.search);
+  if (filters.nodeId) query.set("node_id", filters.nodeId);
+  if (filters.networkGroupId) query.set("network_group_id", filters.networkGroupId);
+  if (filters.mode) query.set("mode", filters.mode);
+  if (filters.direction) query.set("direction", filters.direction);
+  if (filters.limit) query.set("limit", String(filters.limit));
+  if (filters.offset) query.set("offset", String(filters.offset));
+  return request<ListPage<AccessControlRule>>(`/api/v1/access-control${query.size ? `?${query.toString()}` : ""}`);
+}
+
+export function createAccessControl(value: {
+  node_ids: string[];
+  network_group_id: string;
+  mode: AccessControlRule["mode"];
+  direction: AccessControlRule["direction"];
+  reason: string;
+  enabled?: boolean;
+}) {
+  return request<AccessControlMutation>("/api/v1/access-control", jsonRequest("POST", value));
+}
+
+export function updateAccessControl(ruleId: string, value: {
+  node_ids: string[];
+  network_group_id: string;
+  mode: AccessControlRule["mode"];
+  direction: AccessControlRule["direction"];
+  reason: string;
+  enabled?: boolean;
+}) {
+  return request<AccessControlMutation>(`/api/v1/access-control/${encodeURIComponent(ruleId)}`, jsonRequest("PATCH", value));
+}
+
+export function deleteAccessControl(ruleId: string) {
+  return request<AccessControlMutation>(`/api/v1/access-control/${encodeURIComponent(ruleId)}`, jsonRequest("DELETE"));
 }
 
 export function createSourceBlacklist(value: {

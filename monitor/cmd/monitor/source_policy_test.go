@@ -200,9 +200,9 @@ func TestLastGoodSourceRulesIgnoreSnapshotForLegacyBundle(t *testing.T) {
 func TestLastGoodSourceRulesIgnoreSnapshotWhenRetiredAliasRemains(t *testing.T) {
 	agent := &agent{cfg: config.Config{StateDir: t.TempDir()}}
 	legacy := map[string]any{
-		"bundle_hash": "legacy-alias-hash",
-		"site_id":     "site-a",
-		"blacklist":   []any{},
+		"bundle_hash":  "legacy-alias-hash",
+		"site_id":      "site-a",
+		"blacklist":    []any{},
 		"deny_sources": []any{},
 	}
 	materialized := []sourceBlacklistRule{{Direction: "source", Kind: "ip", Pattern: "192.0.2.1"}}
@@ -284,5 +284,42 @@ func TestSanitizeLegacyBundleRemovesRetiredPolicyFields(t *testing.T) {
 	}
 	if hasRetiredSourcePolicy(canonical) || sanitizeLegacyBundle(canonical) {
 		t.Fatalf("canonical blacklist was unexpectedly sanitized: %#v", canonical)
+	}
+}
+
+func TestWhitelistOnlyDoesNotChangeDefaultRoute(t *testing.T) {
+	rules := sourceBlacklistRouteRules([]sourceBlacklistRule{
+		{Action: "allow", Direction: "destination", Kind: "domain", Pattern: "example.com"},
+	})
+	if len(rules) != 0 {
+		t.Fatalf("allow-only rules = %#v, want no route change", rules)
+	}
+}
+
+func TestWhitelistExemptsBlacklistWithoutForcingDirect(t *testing.T) {
+	rules := sourceBlacklistRouteRules([]sourceBlacklistRule{
+		{Action: "deny", Direction: "source", Kind: "cidr", Pattern: "10.0.0.0/8"},
+		{Action: "allow", Direction: "source", Kind: "ip", Pattern: "10.1.2.3"},
+		{Action: "allow", Direction: "destination", Kind: "domain", Pattern: "example.com"},
+	})
+	if len(rules) != 1 {
+		t.Fatalf("rules = %#v", rules)
+	}
+	rule := rules[0].(map[string]any)
+	if rule["action"] != "reject" || rule["type"] != "logical" || rule["mode"] != "and" {
+		t.Fatalf("rule = %#v", rule)
+	}
+	if _, exists := rule["outbound"]; exists {
+		t.Fatalf("whitelist must not force an outbound: %#v", rule)
+	}
+	subrules, ok := rule["rules"].([]any)
+	if !ok || len(subrules) != 3 {
+		t.Fatalf("subrules = %#v", rule["rules"])
+	}
+	if subrules[0].(map[string]any)["source_ip_cidr"].([]string)[0] != "10.0.0.0/8" {
+		t.Fatalf("deny matcher = %#v", subrules[0])
+	}
+	if subrules[1].(map[string]any)["invert"] != true || subrules[2].(map[string]any)["invert"] != true {
+		t.Fatalf("allow exceptions = %#v", subrules)
 	}
 }

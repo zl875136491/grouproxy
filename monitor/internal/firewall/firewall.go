@@ -11,6 +11,7 @@ import (
 // be enforced by nftables and are intentionally ignored by the renderer;
 // sing-box applies those entries at the proxy route layer.
 type SourceRule struct {
+	Action  string
 	Kind    string
 	Pattern string
 }
@@ -28,6 +29,18 @@ func RenderSourceRules(port int, rules []SourceRule, shutdown bool) string {
 	lines = append(lines, "  chain grouproxy_input {")
 	lines = append(lines, "    type filter hook input priority -100; policy accept;")
 	for _, rule := range rules {
+		if strings.ToLower(strings.TrimSpace(rule.Action)) != "allow" {
+			continue
+		}
+		family, pattern, ok := normalizeSourceRule(rule)
+		if ok {
+			lines = append(lines, fmt.Sprintf("    %s saddr %s tcp dport %d accept", family, pattern, port))
+		}
+	}
+	for _, rule := range rules {
+		if strings.ToLower(strings.TrimSpace(rule.Action)) == "allow" {
+			continue
+		}
 		family, pattern, ok := normalizeSourceRule(rule)
 		if !ok {
 			continue

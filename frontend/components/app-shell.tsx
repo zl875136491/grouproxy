@@ -6,6 +6,7 @@ import {
   Archive,
   Ban,
   BellRing,
+  Layers,
   BarChart3,
   BookOpen,
   Boxes,
@@ -55,7 +56,8 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "POLICY",
     items: [
-      { href: "/blacklist", label: "Blacklist", icon: Ban },
+      { href: "/access-control/groups", label: "Access groups", icon: Layers, matches: ["/access-control/groups", "/blacklist"] },
+      { href: "/access-control/rules", label: "Access rules", icon: Ban },
     ],
   },
   {

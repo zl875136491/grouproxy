@@ -187,7 +187,7 @@ export default function OverviewPage() {
               <span className="toolbar-note">{selectedSite ? t(selectedSite.name) : t("No node enrolled")} · {t("{count} nodes", { count: formatNumber(selectedSiteNodes.length) })}</span>
             </div>
             <div className="page-action-group">
-              <Link href="/blacklist"><Ban size={15} /> {t("Manage blacklist")}</Link>
+              <Link href="/access-control"><Ban size={15} /> {t("Manage access control")}</Link>
               <Link href="/connections">{t("Live connections")} <ArrowRight size={15} /></Link>
             </div>
           </div>
@@ -389,7 +389,7 @@ function TopologySiteDetail({
         </div>
         <div className="topology-site-detail-actions">
           <StatusBadge status={state} />
-          <Link href="/blacklist">{t("Manage blacklist")} <ArrowRight size={14} /></Link>
+          <Link href="/access-control">{t("Manage access control")} <ArrowRight size={14} /></Link>
         </div>
       </header>
       <div className="topology-site-facts">

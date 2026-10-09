@@ -193,6 +193,74 @@ class SourceBlacklist(Document):
         ]
 
 
+class NetworkGroupEntry(BaseModel):
+    kind: Literal["ip", "cidr", "domain"]
+    pattern: str
+
+
+class NetworkGroup(Document):
+    """Named reusable collection of normalized network values."""
+
+    name: str
+    entries: list[NetworkGroupEntry] = Field(default_factory=list)
+    created_by: str = "system"
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [IndexModel([("name", ASCENDING)], name="unique_network_group_name", unique=True)]
+
+
+class AccessControlRule(Document):
+    """Retired per-node row. Startup migrates these into AccessControlSet."""
+
+    node_id: str
+    network_group_id: str
+    mode: Literal["deny", "allow"] = "deny"
+    direction: Literal["source", "destination"] = "source"
+    reason: str = Field(min_length=1, max_length=512)
+    enabled: bool = True
+    created_by: str = "system"
+    created_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("node_id", ASCENDING), ("network_group_id", ASCENDING), ("mode", ASCENDING), ("direction", ASCENDING)],
+                name="unique_access_control_binding",
+                unique=True,
+            ),
+            IndexModel([("node_id", ASCENDING), ("enabled", ASCENDING)], name="access_control_node_enabled"),
+        ]
+
+
+class AccessControlSet(Document):
+    """One access rule as defined by the operator, covering every selected node.
+
+    Bundle generation expands a set into one delivery record per node. The
+    per-node rows are not stored or edited on their own.
+    """
+
+    node_ids: list[str] = Field(min_length=1, max_length=64)
+    network_group_id: str
+    mode: Literal["deny", "allow"] = "deny"
+    direction: Literal["source", "destination"] = "source"
+    reason: str = Field(min_length=1, max_length=512)
+    enabled: bool = True
+    created_by: str = "system"
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        indexes = [
+            IndexModel(
+                [("network_group_id", ASCENDING), ("mode", ASCENDING), ("direction", ASCENDING)],
+                name="access_control_set_policy",
+            ),
+            IndexModel([("node_ids", ASCENDING), ("enabled", ASCENDING)], name="access_control_set_nodes_enabled"),
+        ]
+
+
 class SubscriptionSource(Document):
     """A control-plane-owned upstream subscription definition.
 
@@ -747,6 +815,9 @@ DOCUMENT_MODELS: list[type[Document]] = [
     Site,
     Node,
     SourceBlacklist,
+    NetworkGroup,
+    AccessControlRule,
+    AccessControlSet,
     SubscriptionSource,
     SubscriptionVersion,
     SiteSubscription,

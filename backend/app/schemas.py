@@ -183,6 +183,64 @@ class SourceBlacklistCreate(BaseModel):
         return self
 
 
+class NetworkGroupEntryInput(BaseModel):
+    kind: Literal["ip", "cidr", "domain"]
+    pattern: str = Field(min_length=1, max_length=512)
+
+
+class NetworkGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    entries: list[NetworkGroupEntryInput] = Field(min_length=1, max_length=10_000)
+
+
+class NetworkGroupOut(BaseModel):
+    id: str
+    name: str
+    entries: list[NetworkGroupEntryInput]
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NetworkGroupPage(BaseModel):
+    items: list[NetworkGroupOut]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class AccessControlCreate(BaseModel):
+    node_ids: list[str] = Field(min_length=1, max_length=64)
+    network_group_id: str = Field(min_length=1, max_length=128)
+    mode: Literal["deny", "allow"] = "deny"
+    direction: Literal["source", "destination"] = "source"
+    reason: str = Field(min_length=1, max_length=512)
+    enabled: bool = True
+
+
+class AccessControlOut(BaseModel):
+    id: str
+    node_ids: list[str]
+    network_group_id: str
+    network_group_name: str
+    mode: Literal["deny", "allow"]
+    direction: Literal["source", "destination"]
+    reason: str
+    enabled: bool
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AccessControlPage(BaseModel):
+    items: list[AccessControlOut]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class SourceBlacklistOut(BaseModel):
     id: str
     node_id: str
@@ -406,6 +464,12 @@ class SourceBlacklistDistributionOut(BaseModel):
     node_ids: list[str] = Field(default_factory=list)
     state: Literal["released", "no_nodes", "no_effect"]
     release: ReleaseOut | None = None
+
+
+class AccessControlMutationOut(BaseModel):
+    rules: list[AccessControlOut]
+    operation: Literal["created", "updated", "deleted"]
+    distribution: list[SourceBlacklistDistributionOut] = Field(default_factory=list)
 
 
 class SourceBlacklistMutationOut(BaseModel):

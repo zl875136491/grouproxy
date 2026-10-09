@@ -1504,7 +1504,7 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 		if ruleDirection(rule) != "source" {
 			continue
 		}
-		nftRules = append(nftRules, firewall.SourceRule{Kind: rule.Kind, Pattern: rule.Pattern})
+		nftRules = append(nftRules, firewall.SourceRule{Action: rule.Action, Kind: rule.Kind, Pattern: rule.Pattern})
 	}
 	nftScript := firewall.RenderSourceRules(firewallPort, nftRules, boolValue(value["shutdown"]))
 	if err := firewall.Check(nftScript); err != nil {
@@ -2316,6 +2316,7 @@ func isCanonicalSourceBlacklist(value map[string]any) bool {
 
 // sourceBlacklistRule is the monitor's normalized deny contract.
 type sourceBlacklistRule struct {
+	Action    string `json:"action,omitempty"`
 	Direction string `json:"direction"`
 	Kind      string `json:"kind"`
 	Pattern   string `json:"pattern"`
@@ -2359,7 +2360,33 @@ func sourceBlacklistRules(value map[string]any, _ string) []sourceBlacklistRule 
 		if kind == "network" {
 			kind = "cidr"
 		}
-		result = append(result, sourceBlacklistRule{Direction: direction, Kind: kind, Pattern: pattern})
+		action := stringValue(entry["action"])
+		if action == "" {
+			action = "deny"
+		}
+		if action != "deny" && action != "allow" {
+			continue
+		}
+		result = append(result, sourceBlacklistRule{Action: action, Direction: direction, Kind: kind, Pattern: pattern})
+	}
+	if entries, ok := value["access_control"].([]any); ok {
+		for _, raw := range entries {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			action := stringValue(entry["action"])
+			if action != "deny" && action != "allow" {
+				continue
+			}
+			direction := stringValue(entry["direction"])
+			kind := stringValue(entry["kind"])
+			pattern := stringValue(entry["pattern"])
+			if direction == "" || kind == "" || pattern == "" {
+				continue
+			}
+			result = append(result, sourceBlacklistRule{Action: action, Direction: direction, Kind: kind, Pattern: pattern})
+		}
 	}
 	return dedupeSourceBlacklistRules(result)
 }
@@ -2375,7 +2402,7 @@ func dedupeSourceBlacklistRules(values []sourceBlacklistRule) []sourceBlacklistR
 	result := make([]sourceBlacklistRule, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		key := ruleDirection(value) + "\x00" + value.Kind + "\x00" + value.Pattern
+		key := value.Action + "\x00" + ruleDirection(value) + "\x00" + value.Kind + "\x00" + value.Pattern
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -2432,7 +2459,7 @@ func resolveSourceBlacklistRules(ctx context.Context, rules []sourceBlacklistRul
 				return nil, fmt.Errorf("source_domain_resolution_too_many_addresses: %s", rule.Pattern)
 			}
 			result = append(result, sourceBlacklistRule{
-				Direction: ruleDirection(rule), Kind: "ip", Pattern: pattern,
+				Action: rule.Action, Direction: ruleDirection(rule), Kind: "ip", Pattern: pattern,
 			})
 		}
 		if resolvedCount == 0 {
@@ -2549,32 +2576,65 @@ func normalizeSourceCIDR(pattern string) string {
 }
 
 func sourceBlacklistRouteRules(sourceRules []sourceBlacklistRule) []any {
-	rules := make([]any, 0, len(sourceRules))
+	allows := make([]map[string]any, 0)
+	denies := make([]map[string]any, 0)
 	for _, entry := range sourceRules {
-		kind := entry.Kind
-		if kind == "network" {
-			kind = "cidr"
+		matcher := accessMatchFields(entry)
+		if matcher == nil {
+			continue
 		}
-		direction := ruleDirection(entry)
-		switch {
-		case direction == "source" && (kind == "ip" || kind == "cidr"):
-			rules = append(rules, map[string]any{
-				"source_ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
-				"action":         "reject",
-			})
-		case direction == "destination" && (kind == "ip" || kind == "cidr"):
-			rules = append(rules, map[string]any{
-				"ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)},
-				"action":  "reject",
-			})
-		case direction == "destination" && kind == "domain":
-			rules = append(rules, map[string]any{
-				"domain_suffix": []string{entry.Pattern},
-				"action":        "reject",
-			})
+		if entry.Action == "allow" {
+			allows = append(allows, matcher)
+			continue
 		}
+		denies = append(denies, matcher)
+	}
+	// Default access is allow-all. A whitelist therefore emits no route of its
+	// own. It only exempts a blacklist match so later CN and subscription
+	// rules still choose the normal outbound.
+	rules := make([]any, 0, len(denies))
+	for _, deny := range denies {
+		if len(allows) == 0 {
+			deny["action"] = "reject"
+			rules = append(rules, deny)
+			continue
+		}
+		subrules := make([]any, 0, 1+len(allows))
+		subrules = append(subrules, deny)
+		for _, allow := range allows {
+			exception := make(map[string]any, len(allow)+1)
+			for key, value := range allow {
+				exception[key] = value
+			}
+			exception["invert"] = true
+			subrules = append(subrules, exception)
+		}
+		rules = append(rules, map[string]any{
+			"type":   "logical",
+			"mode":   "and",
+			"rules":  subrules,
+			"action": "reject",
+		})
 	}
 	return rules
+}
+
+func accessMatchFields(entry sourceBlacklistRule) map[string]any {
+	kind := entry.Kind
+	if kind == "network" {
+		kind = "cidr"
+	}
+	direction := ruleDirection(entry)
+	switch {
+	case direction == "source" && (kind == "ip" || kind == "cidr"):
+		return map[string]any{"source_ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)}}
+	case direction == "destination" && (kind == "ip" || kind == "cidr"):
+		return map[string]any{"ip_cidr": []string{normalizeSourceCIDR(entry.Pattern)}}
+	case direction == "destination" && kind == "domain":
+		return map[string]any{"domain_suffix": []string{entry.Pattern}}
+	default:
+		return nil
+	}
 }
 
 func renderSingbox(

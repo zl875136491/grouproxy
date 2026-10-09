@@ -19,10 +19,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from beanie.exceptions import CollectionWasNotInitialized
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -45,6 +48,9 @@ from app.models import (
     HeartbeatLatest,
     HeartbeatSample,
     ManagementSession,
+    AccessControlSet,
+    NetworkGroup,
+    NetworkGroupEntry,
     Node,
     ProbeCircuit,
     ProbeHistory,
@@ -117,6 +123,13 @@ from app.schemas import (
     SiteOut,
     SiteSubscriptionOut,
     SourceBlacklistCreate,
+    NetworkGroupCreate,
+    NetworkGroupOut,
+    NetworkGroupPage,
+    AccessControlCreate,
+    AccessControlOut,
+    AccessControlPage,
+    AccessControlMutationOut,
     SourceBlacklistDistributionOut,
     SourceBlacklistMutationOut,
     SourceBlacklistOut,
@@ -158,6 +171,7 @@ from app.services.auth import (
     verify_password,
 )
 from app.services.backup_worker import BackupWorker
+from app.services.connection_archive import ConnectionArchiveWorker
 from app.services.bundles import (
     create_desired_release,
     latest_release,
@@ -165,7 +179,9 @@ from app.services.bundles import (
     strip_retired_policy_fields,
 )
 from app.services.cidr import (
+    effective_access_control,
     effective_blacklist,
+    normalize_source_blacklist_pattern,
     normalize_source_ip,
 )
 from app.services.cidr import (
@@ -653,6 +669,51 @@ def _source_blacklist_out(item: SourceBlacklist) -> SourceBlacklistOut:
         created_by=item.created_by,
         created_at=item.created_at,
     )
+
+
+def _network_group_out(item: NetworkGroup) -> NetworkGroupOut:
+    return NetworkGroupOut(
+        id=_model_id(item),
+        name=item.name,
+        entries=[{"kind": entry.kind, "pattern": entry.pattern} for entry in item.entries],
+        created_by=item.created_by,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+async def _access_control_out(item: AccessControlSet) -> AccessControlOut:
+    group = await NetworkGroup.get(item.network_group_id)
+    return AccessControlOut(
+        id=_model_id(item),
+        node_ids=list(item.node_ids),
+        network_group_id=item.network_group_id,
+        network_group_name=group.name if group else "(deleted)",
+        mode=item.mode,
+        direction=item.direction,
+        reason=item.reason,
+        enabled=item.enabled,
+        created_by=item.created_by,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+async def _access_control_set_conflict(
+    *,
+    node_ids: list[str],
+    network_group_id: str,
+    mode: str,
+    direction: str,
+    exclude_id: str | None = None,
+) -> bool:
+    matches = await AccessControlSet.find({
+        "network_group_id": network_group_id,
+        "mode": mode,
+        "direction": direction,
+        "node_ids": {"$in": node_ids},
+    }).to_list()
+    return any(_model_id(item) != exclude_id for item in matches)
 
 
 def _subscription_source_out(item: SubscriptionSource) -> SubscriptionSourceOut:
@@ -1622,6 +1683,8 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(worker.run())
     backup_worker = BackupWorker(settings)
     backup_worker_task = asyncio.create_task(backup_worker.run())
+    connection_archive_worker = ConnectionArchiveWorker(settings)
+    connection_archive_task = asyncio.create_task(connection_archive_worker.run())
 
     async def observe() -> None:
         """Background observability loop: refresh liveness and alerts.
@@ -1655,13 +1718,16 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(rate_limit_cleanup())
     app.state.subscription_worker = worker
     app.state.backup_worker = backup_worker
+    app.state.connection_archive_worker = connection_archive_worker
     try:
         yield
     finally:
         await worker.stop()
         await backup_worker.stop()
+        await connection_archive_worker.stop()
         worker_task.cancel()
         backup_worker_task.cancel()
+        connection_archive_task.cancel()
         observe_task.cancel()
         cleanup_task.cancel()
         try:
@@ -1670,6 +1736,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             await backup_worker_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await connection_archive_task
         except asyncio.CancelledError:
             pass
         try:
@@ -2320,6 +2390,322 @@ async def update_node(
             after={"name": node.name},
         )
     return _node_out(node)
+
+
+def _normalize_network_group_entries(entries: list[Any]) -> list[NetworkGroupEntry]:
+    normalized: list[NetworkGroupEntry] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        kind = str(entry.kind)
+        pattern = normalize_source_blacklist_pattern(kind, entry.pattern)
+        key = (kind, pattern)
+        if key not in seen:
+            normalized.append(NetworkGroupEntry(kind=kind, pattern=pattern))
+            seen.add(key)
+    if not normalized:
+        raise HTTPException(422, "network_group_entries_required")
+    return normalized
+
+
+async def _release_access_control_nodes(
+    node_ids: list[str], *, operation: str, target_id: str, actor: str, request_id: str
+) -> _SourceBlacklistDistribution:
+    plans = await _source_blacklist_release_plans(node_ids=node_ids)
+    fake_rule = SimpleNamespace(
+        id=target_id,
+        node_id=node_ids[0] if node_ids else "",
+        direction="source",
+        kind="domain",
+        pattern=f"access-control:{target_id}",
+        enabled=True,
+    )
+    return await _distribute_source_blacklist_change(
+        rule=fake_rule,
+        operation=operation,
+        plans=plans,
+        actor=actor,
+        request_id=request_id,
+    )
+
+
+_ACCESS_MODE_TERMS = {
+    "deny": "deny",
+    "allow": "allow",
+    "blacklist": "deny",
+    "whitelist": "allow",
+    "黑名单": "deny",
+    "白名单": "allow",
+    "拦截": "deny",
+    "放行": "allow",
+}
+_ACCESS_DIRECTION_TERMS = {
+    "source": "source",
+    "destination": "destination",
+    "来源": "source",
+    "目的": "destination",
+    "目标": "destination",
+}
+
+
+def _list_window(limit: int, offset: int) -> tuple[int, int]:
+    return min(max(limit, 1), 500), min(max(offset, 0), 100_000)
+
+
+def _search_pattern(search: str | None) -> dict[str, str] | None:
+    text = (search or "").strip()[:128]
+    if not text:
+        return None
+    return {"$regex": re.escape(text), "$options": "i"}
+
+
+def _and_query(clauses: list[dict[str, Any]]) -> dict[str, Any]:
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
+def _object_id_filter(value: str) -> dict[str, Any] | None:
+    if len(value) != 24:
+        return None
+    try:
+        return {"_id": ObjectId(value)}
+    except InvalidId:
+        return None
+
+
+def _network_group_list_query(*, search: str | None, kind: str | None) -> dict[str, Any]:
+    clauses: list[dict[str, Any]] = []
+    if kind in {"ip", "cidr", "domain"}:
+        clauses.append({"entries.kind": kind})
+    text = (search or "").strip()[:128]
+    pattern = _search_pattern(text)
+    if pattern:
+        choices: list[dict[str, Any]] = [{"name": pattern}, {"entries.pattern": pattern}, {"created_by": pattern}]
+        identity = _object_id_filter(text)
+        if identity:
+            choices.append(identity)
+        clauses.append({"$or": choices})
+    return _and_query(clauses)
+
+
+async def _access_control_list_query(
+    *,
+    search: str | None,
+    node_id: str | None,
+    network_group_id: str | None,
+    mode: str | None,
+    direction: str | None,
+) -> dict[str, Any]:
+    clauses: list[dict[str, Any]] = []
+    if node_id and node_id.strip():
+        clauses.append({"node_ids": node_id.strip()})
+    if network_group_id and network_group_id.strip():
+        clauses.append({"network_group_id": network_group_id.strip()})
+    if mode in {"deny", "allow"}:
+        clauses.append({"mode": mode})
+    if direction in {"source", "destination"}:
+        clauses.append({"direction": direction})
+    text = (search or "").strip()[:128]
+    pattern = _search_pattern(text)
+    if pattern:
+        choices: list[dict[str, Any]] = [{"reason": pattern}, {"node_ids": pattern}, {"network_group_id": pattern}]
+        groups = await NetworkGroup.find({"name": pattern}).to_list()
+        group_ids = [_model_id(item) for item in groups]
+        if group_ids:
+            choices.append({"network_group_id": {"$in": group_ids}})
+        nodes = await Node.find({"$or": [{"name": pattern}, {"agent_id": pattern}]}).to_list()
+        node_ids = list(dict.fromkeys(item.agent_id for item in nodes))
+        if node_ids:
+            choices.append({"node_ids": {"$in": node_ids}})
+        identity = _object_id_filter(text)
+        if identity:
+            choices.append(identity)
+        mapped_mode = _ACCESS_MODE_TERMS.get(text.casefold()) or _ACCESS_MODE_TERMS.get(text)
+        if mapped_mode:
+            choices.append({"mode": mapped_mode})
+        mapped_direction = _ACCESS_DIRECTION_TERMS.get(text.casefold()) or _ACCESS_DIRECTION_TERMS.get(text)
+        if mapped_direction:
+            choices.append({"direction": mapped_direction})
+        clauses.append({"$or": choices})
+    return _and_query(clauses)
+
+
+@app.get("/api/v1/network-groups", response_model=NetworkGroupPage)
+async def list_network_groups(
+    search: str | None = None,
+    kind: Literal["ip", "cidr", "domain"] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    _: str = Depends(require_management),
+) -> NetworkGroupPage:
+    safe_limit, safe_offset = _list_window(limit, offset)
+    query = _network_group_list_query(search=search, kind=kind)
+    total = await NetworkGroup.find(query).count()
+    items = await NetworkGroup.find(query).sort(+NetworkGroup.name).skip(safe_offset).limit(safe_limit).to_list()
+    return NetworkGroupPage(
+        items=[_network_group_out(item) for item in items],
+        total=total,
+        limit=safe_limit,
+        offset=safe_offset,
+        has_more=safe_offset + len(items) < total,
+    )
+
+
+@app.post("/api/v1/network-groups", response_model=NetworkGroupOut, status_code=201)
+async def create_network_group(payload: NetworkGroupCreate, _: str = Depends(require_management)) -> NetworkGroupOut:
+    name = " ".join(payload.name.split())
+    if await NetworkGroup.find_one(NetworkGroup.name == name):
+        raise HTTPException(409, "network_group_name_exists")
+    try:
+        entries = _normalize_network_group_entries(payload.entries)
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_network_group_entry") from exc
+    item = NetworkGroup(name=name, entries=entries, created_by=_actor())
+    await item.insert()
+    await append_audit(action="network_group.create", target_type="network_group", target_id=_model_id(item), actor=_actor(), after={"name": name, "entries": [entry.model_dump() for entry in entries]})
+    return _network_group_out(item)
+
+
+@app.patch("/api/v1/network-groups/{group_id}", response_model=NetworkGroupOut)
+async def update_network_group(group_id: str, payload: NetworkGroupCreate, request: Request, _: str = Depends(require_management)) -> NetworkGroupOut:
+    item = await NetworkGroup.get(group_id)
+    if item is None:
+        raise HTTPException(404, "network_group_not_found")
+    name = " ".join(payload.name.split())
+    other = await NetworkGroup.find_one(NetworkGroup.name == name)
+    if other is not None and _model_id(other) != group_id:
+        raise HTTPException(409, "network_group_name_exists")
+    try:
+        entries = _normalize_network_group_entries(payload.entries)
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_network_group_entry") from exc
+    bindings = await AccessControlSet.find({"network_group_id": group_id, "enabled": True}).to_list()
+    node_ids = list(dict.fromkeys(node_id for rule in bindings for node_id in rule.node_ids))
+    if node_ids:
+        await _source_blacklist_release_plans(node_ids=node_ids)
+    item.name, item.entries, item.updated_at = name, entries, utcnow()
+    await item.save()
+    distribution = await _release_access_control_nodes(node_ids, operation="updated", target_id=group_id, actor=_actor(), request_id=_request_id(request)) if node_ids else None
+    await append_audit(action="network_group.update", target_type="network_group", target_id=group_id, actor=_actor(), after={"name": name, "distribution": [target.model_dump() for target in (distribution.targets if distribution else [])]})
+    return _network_group_out(item)
+
+
+@app.delete("/api/v1/network-groups/{group_id}")
+async def delete_network_group(group_id: str, request: Request, _: str = Depends(require_management)) -> dict[str, Any]:
+    item = await NetworkGroup.get(group_id)
+    if item is None:
+        raise HTTPException(404, "network_group_not_found")
+    bindings = await AccessControlSet.find({"network_group_id": group_id}).to_list()
+    if bindings:
+        raise HTTPException(409, "network_group_in_use")
+    await item.delete()
+    await append_audit(action="network_group.delete", target_type="network_group", target_id=group_id, actor=_actor(), request_id=_request_id(request))
+    return {"id": group_id, "deleted": True}
+
+
+@app.get("/api/v1/access-control", response_model=AccessControlPage)
+async def list_access_control(
+    search: str | None = None,
+    node_id: str | None = None,
+    network_group_id: str | None = None,
+    mode: Literal["deny", "allow"] | None = None,
+    direction: Literal["source", "destination"] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    _: str = Depends(require_management),
+) -> AccessControlPage:
+    safe_limit, safe_offset = _list_window(limit, offset)
+    query = await _access_control_list_query(
+        search=search,
+        node_id=node_id,
+        network_group_id=network_group_id,
+        mode=mode,
+        direction=direction,
+    )
+    total = await AccessControlSet.find(query).count()
+    items = (
+        await AccessControlSet.find(query)
+        .sort(-AccessControlSet.created_at)
+        .skip(safe_offset)
+        .limit(safe_limit)
+        .to_list()
+    )
+    return AccessControlPage(
+        items=[await _access_control_out(item) for item in items],
+        total=total,
+        limit=safe_limit,
+        offset=safe_offset,
+        has_more=safe_offset + len(items) < total,
+    )
+
+
+@app.post("/api/v1/access-control", response_model=AccessControlMutationOut, status_code=202)
+async def create_access_control(payload: AccessControlCreate, request: Request, _: str = Depends(require_management)) -> AccessControlMutationOut:
+    if await NetworkGroup.get(payload.network_group_id) is None:
+        raise HTTPException(404, "network_group_not_found")
+    node_ids = list(dict.fromkeys(item.strip() for item in payload.node_ids if item.strip()))
+    if not node_ids:
+        raise HTTPException(422, "access_control_node_required")
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(422, "access_control_reason_required")
+    if await _access_control_set_conflict(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction):
+        raise HTTPException(409, "access_control_rule_exists")
+    if payload.enabled:
+        await _source_blacklist_release_plans(node_ids=node_ids)
+    rule = AccessControlSet(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction, reason=reason, enabled=payload.enabled, created_by=_actor())
+    await rule.insert()
+    distribution = await _release_access_control_nodes(node_ids, operation="created", target_id=_model_id(rule), actor=_actor(), request_id=_request_id(request)) if payload.enabled else None
+    await append_audit(action="access_control.create", target_type="access_control", target_id=_model_id(rule), actor=_actor(), after={"node_ids": node_ids, "network_group_id": payload.network_group_id, "mode": payload.mode, "direction": payload.direction, "reason": reason})
+    return AccessControlMutationOut(rules=[await _access_control_out(rule)], operation="created", distribution=distribution.targets if distribution else [])
+
+
+@app.patch("/api/v1/access-control/{rule_id}", response_model=AccessControlMutationOut)
+async def update_access_control(rule_id: str, payload: AccessControlCreate, request: Request, _: str = Depends(require_management)) -> AccessControlMutationOut:
+    rule = await AccessControlSet.get(rule_id)
+    if rule is None:
+        raise HTTPException(404, "access_control_rule_not_found")
+    if await NetworkGroup.get(payload.network_group_id) is None:
+        raise HTTPException(404, "network_group_not_found")
+    node_ids = list(dict.fromkeys(item.strip() for item in payload.node_ids if item.strip()))
+    if not node_ids:
+        raise HTTPException(422, "access_control_node_required")
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(422, "access_control_reason_required")
+    if await _access_control_set_conflict(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction, exclude_id=rule_id):
+        raise HTTPException(409, "access_control_rule_exists")
+    was_enabled = rule.enabled
+    affected = list(dict.fromkeys([*rule.node_ids, *node_ids]))
+    if was_enabled or payload.enabled:
+        await _source_blacklist_release_plans(node_ids=affected)
+    rule.node_ids = node_ids
+    rule.network_group_id = payload.network_group_id
+    rule.mode = payload.mode
+    rule.direction = payload.direction
+    rule.reason = reason
+    rule.enabled = payload.enabled
+    rule.updated_at = utcnow()
+    await rule.save()
+    distribution = await _release_access_control_nodes(affected, operation="updated", target_id=rule_id, actor=_actor(), request_id=_request_id(request)) if was_enabled or payload.enabled else None
+    await append_audit(action="access_control.update", target_type="access_control", target_id=rule_id, actor=_actor(), after={"node_ids": node_ids, "network_group_id": payload.network_group_id, "mode": payload.mode, "direction": payload.direction, "reason": reason})
+    return AccessControlMutationOut(rules=[await _access_control_out(rule)], operation="updated", distribution=distribution.targets if distribution else [])
+
+
+@app.delete("/api/v1/access-control/{rule_id}", response_model=AccessControlMutationOut)
+async def delete_access_control(rule_id: str, request: Request, _: str = Depends(require_management)) -> AccessControlMutationOut:
+    rule = await AccessControlSet.get(rule_id)
+    if rule is None:
+        raise HTTPException(404, "access_control_rule_not_found")
+    if rule.enabled:
+        await _source_blacklist_release_plans(node_ids=list(rule.node_ids))
+    output = await _access_control_out(rule)
+    await rule.delete()
+    distribution = await _release_access_control_nodes(list(rule.node_ids), operation="deleted", target_id=rule_id, actor=_actor(), request_id=_request_id(request)) if rule.enabled else None
+    await append_audit(action="access_control.delete", target_type="access_control", target_id=rule_id, actor=_actor(), before=output.model_dump(mode="json"))
+    return AccessControlMutationOut(rules=[output], operation="deleted", distribution=distribution.targets if distribution else [])
 
 
 @app.get("/api/v1/blacklist", response_model=list[SourceBlacklistOut])

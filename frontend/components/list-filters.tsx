@@ -43,6 +43,26 @@ export function timeRangeStart(value: TimeRange): string | undefined {
   return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
+export function FilterSearch({
+  value,
+  setValue,
+  placeholder,
+}: {
+  value: string;
+  setValue: (value: string) => void;
+  placeholder: string;
+}) {
+  const { t } = usePreferences();
+  return (
+    <label className="filter-search">
+      <Search size={15} aria-hidden="true" />
+      <span className="sr-only">{t("Search")}</span>
+      <input value={value} onChange={(event) => setValue(event.target.value)} placeholder={t(placeholder)} />
+      {value ? <IconButton label="Clear search" tooltip={false} onClick={() => setValue("")}><X size={14} /></IconButton> : null}
+    </label>
+  );
+}
+
 export function ListFilters({
   timeRange,
   setTimeRange,

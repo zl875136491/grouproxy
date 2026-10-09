@@ -11,6 +11,7 @@ from ..models import (
     SubscriptionVersion,
 )
 from .cidr import effective_blacklist
+from .cidr import effective_access_control
 from .crypto import sign_bundle
 from .subscriptions import subscription_outbound_tags
 
@@ -182,6 +183,7 @@ async def build_signed_bundle(
     proxy_selection: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     blacklist = await effective_blacklist(node.agent_id)
+    access_control = await effective_access_control(node.agent_id)
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
     selected_tags = (
@@ -199,6 +201,7 @@ async def build_signed_bundle(
         # Access is allow-all by default. Only this node's blacklist is
         # carried to the monitor and rendered as deny rules.
         "blacklist": blacklist,
+        "access_control": access_control,
         "subscription": subscription,
         "issued_at": iso(now),
         "expires_at": iso(now + timedelta(days=settings.bundle_ttl_days)),

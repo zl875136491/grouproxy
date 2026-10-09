@@ -12,7 +12,7 @@ RUN pip install .
 COPY deploy/ /app/deploy/
 
 RUN useradd --create-home --system --uid 10001 grouproxy \
-    && mkdir -p /var/lib/grouproxy/backups \
+    && mkdir -p /var/lib/grouproxy/backups /var/lib/grouproxy/connection-archives \
     && chown -R grouproxy:grouproxy /app /var/lib/grouproxy
 
 USER grouproxy

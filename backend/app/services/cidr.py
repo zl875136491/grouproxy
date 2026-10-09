@@ -2,7 +2,9 @@ import logging
 import re
 from ipaddress import ip_address, ip_network
 
-from ..models import SourceBlacklist
+from beanie.exceptions import CollectionWasNotInitialized
+
+from ..models import AccessControlRule, AccessControlSet, NetworkGroup, SourceBlacklist, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,94 @@ async def effective_blacklist(node_id: str) -> list[dict[str, str]]:
         )
     result.sort(key=lambda value: (value["direction"], value["kind"], value["pattern"]))
     return result
+
+
+async def effective_access_control(node_id: str) -> list[dict[str, str]]:
+    """Expand reusable access-control groups into monitor-ready entries."""
+
+    result: list[dict[str, str]] = []
+    try:
+        rules = await AccessControlSet.find({"enabled": True, "node_ids": node_id}).to_list()
+    except CollectionWasNotInitialized:
+        return []
+    try:
+        all_groups = await NetworkGroup.find_all().to_list()
+    except CollectionWasNotInitialized:
+        return []
+    groups = {
+        str(group.id): group
+        for group in all_groups
+        if str(group.id) in {rule.network_group_id for rule in rules}
+    }
+    seen: set[tuple[str, str, str, str]] = set()
+    for rule in rules:
+        group = groups.get(rule.network_group_id)
+        if group is None:
+            continue
+        for entry in group.entries:
+            try:
+                kind = canonicalize_kind(entry.kind)
+                pattern = normalize_source_blacklist_pattern(kind, entry.pattern)
+                direction = canonicalize_direction(rule.direction)
+            except (TypeError, ValueError):
+                continue
+            key = (rule.mode, direction, kind, pattern)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "id": str(rule.id),
+                "action": rule.mode,
+                "direction": direction,
+                "kind": kind,
+                "pattern": pattern,
+                "reason": rule.reason,
+            })
+    result.sort(key=lambda value: (value["action"], value["direction"], value["kind"], value["pattern"]))
+    return result
+
+
+async def migrate_access_control_sets() -> int:
+    """Fold retired per-node rules that share one policy into a single set."""
+
+    try:
+        legacy = await AccessControlRule.find_all().to_list()
+    except CollectionWasNotInitialized:
+        return 0
+    if not legacy:
+        return 0
+    grouped: dict[tuple[str, str, str, str, bool], list[AccessControlRule]] = {}
+    for rule in legacy:
+        key = (rule.network_group_id, rule.mode, rule.direction, rule.reason, rule.enabled)
+        grouped.setdefault(key, []).append(rule)
+    created = 0
+    for (group_id, mode, direction, reason, enabled), rules in grouped.items():
+        node_ids = list(dict.fromkeys(rule.node_id.strip() for rule in rules if rule.node_id and rule.node_id.strip()))
+        if not node_ids or not reason.strip():
+            continue
+        already = await AccessControlSet.find({
+            "network_group_id": group_id,
+            "mode": mode,
+            "direction": direction,
+            "reason": reason,
+            "node_ids": {"$all": node_ids},
+        }).to_list()
+        if not any(set(item.node_ids) == set(node_ids) for item in already):
+            await AccessControlSet(
+                node_ids=node_ids,
+                network_group_id=group_id,
+                mode=mode,
+                direction=direction,
+                reason=reason,
+                enabled=enabled,
+                created_by=rules[0].created_by,
+                created_at=min(rule.created_at for rule in rules),
+                updated_at=utcnow(),
+            ).insert()
+            created += 1
+    for rule in legacy:
+        await rule.delete()
+    return created
 
 
 async def effective_source_blacklist(node_id: str) -> list[dict[str, str]]:

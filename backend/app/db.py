@@ -508,6 +508,11 @@ class Database:
             database=database,
             document_models=DOCUMENT_MODELS,
         )
+        from .services.cidr import migrate_access_control_sets
+
+        migrated = await migrate_access_control_sets()
+        if migrated:
+            logger.info("migrated %s access-control sets from per-node rules", migrated)
 
     async def close(self) -> None:
         if self.client is not None:

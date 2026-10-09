@@ -18,6 +18,7 @@ services:
       GROUPROXY_BACKUP_DIRECTORY: /var/lib/grouproxy/backups
     volumes:
       - grouproxy-backups:/var/lib/grouproxy/backups
+      - grouproxy-connection-archives:/var/lib/grouproxy/connection-archives
     healthcheck:
       test:
         - CMD
@@ -65,3 +66,4 @@ services:
 
 volumes:
   grouproxy-backups:
+  grouproxy-connection-archives:

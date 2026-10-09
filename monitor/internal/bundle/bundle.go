@@ -144,6 +144,9 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 	if err := ValidateSourceBlacklist(value); err != nil {
 		return "", err
 	}
+	if err := ValidateAccessControl(value); err != nil {
+		return "", err
+	}
 	if err := validateSubscription(value); err != nil {
 		return "", err
 	}
@@ -151,6 +154,44 @@ func Validate(value Bundle, secret string, currentVersion int) (string, error) {
 		return "", err
 	}
 	return stringValue(value["bundle_hash"]), nil
+}
+
+// ValidateAccessControl validates the expanded reusable network-group policy.
+// The legacy blacklist remains required for compatibility with older nodes.
+func ValidateAccessControl(value Bundle) error {
+	raw, exists := value["access_control"]
+	if !exists || raw == nil {
+		return nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return errors.New("invalid_access_control_entries")
+	}
+	if len(entries) > 20_000 {
+		return errors.New("access_control_too_large")
+	}
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			return errors.New("invalid_access_control_entry")
+		}
+		action := stringValue(entry["action"])
+		if action != "allow" && action != "deny" {
+			return errors.New("invalid_access_control_action")
+		}
+		direction := stringValue(entry["direction"])
+		if direction != "source" && direction != "destination" {
+			return errors.New("invalid_access_control_direction")
+		}
+		if err := validateBlacklistEntries([]any{map[string]any{
+			"direction": direction,
+			"kind":      entry["kind"],
+			"pattern":   entry["pattern"],
+		}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func rejectRetiredPolicyFields(value Bundle) error {

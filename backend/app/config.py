@@ -41,6 +41,8 @@ class Settings(BaseSettings):
         ge=7,
         le=3_650,
     )
+    connection_history_archive_directory: str = "/var/lib/grouproxy/connection-archives"
+    connection_history_archive_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
     backup_directory: str = ""
     backup_encryption_key: SecretStr | None = None
     # Backup maintenance is opt-in so a new installation never starts writing
