@@ -683,12 +683,12 @@ def _network_group_out(item: NetworkGroup) -> NetworkGroupOut:
 
 
 async def _access_control_out(item: AccessControlSet) -> AccessControlOut:
-    group = await NetworkGroup.get(item.network_group_id)
+    groups = [await NetworkGroup.get(group_id) for group_id in item.network_group_ids]
     return AccessControlOut(
         id=_model_id(item),
         node_ids=list(item.node_ids),
-        network_group_id=item.network_group_id,
-        network_group_name=group.name if group else "(deleted)",
+        network_group_ids=list(item.network_group_ids),
+        network_group_names=[group.name if group else "(deleted)" for group in groups],
         mode=item.mode,
         direction=item.direction,
         reason=item.reason,
@@ -702,13 +702,13 @@ async def _access_control_out(item: AccessControlSet) -> AccessControlOut:
 async def _access_control_set_conflict(
     *,
     node_ids: list[str],
-    network_group_id: str,
+    network_group_ids: list[str],
     mode: str,
     direction: str,
     exclude_id: str | None = None,
 ) -> bool:
     matches = await AccessControlSet.find({
-        "network_group_id": network_group_id,
+        "network_group_ids": {"$in": network_group_ids},
         "mode": mode,
         "direction": direction,
         "node_ids": {"$in": node_ids},
@@ -2502,7 +2502,7 @@ async def _access_control_list_query(
     if node_id and node_id.strip():
         clauses.append({"node_ids": node_id.strip()})
     if network_group_id and network_group_id.strip():
-        clauses.append({"network_group_id": network_group_id.strip()})
+        clauses.append({"network_group_ids": network_group_id.strip()})
     if mode in {"deny", "allow"}:
         clauses.append({"mode": mode})
     if direction in {"source", "destination"}:
@@ -2510,11 +2510,11 @@ async def _access_control_list_query(
     text = (search or "").strip()[:128]
     pattern = _search_pattern(text)
     if pattern:
-        choices: list[dict[str, Any]] = [{"reason": pattern}, {"node_ids": pattern}, {"network_group_id": pattern}]
+        choices: list[dict[str, Any]] = [{"reason": pattern}, {"node_ids": pattern}, {"network_group_ids": pattern}]
         groups = await NetworkGroup.find({"name": pattern}).to_list()
         group_ids = [_model_id(item) for item in groups]
         if group_ids:
-            choices.append({"network_group_id": {"$in": group_ids}})
+            choices.append({"network_group_ids": {"$in": group_ids}})
         nodes = await Node.find({"$or": [{"name": pattern}, {"agent_id": pattern}]}).to_list()
         node_ids = list(dict.fromkeys(item.agent_id for item in nodes))
         if node_ids:
@@ -2581,7 +2581,7 @@ async def update_network_group(group_id: str, payload: NetworkGroupCreate, reque
         entries = _normalize_network_group_entries(payload.entries)
     except ValueError as exc:
         raise HTTPException(422, "invalid_network_group_entry") from exc
-    bindings = await AccessControlSet.find({"network_group_id": group_id, "enabled": True}).to_list()
+    bindings = await AccessControlSet.find({"network_group_ids": group_id, "enabled": True}).to_list()
     node_ids = list(dict.fromkeys(node_id for rule in bindings for node_id in rule.node_ids))
     if node_ids:
         await _source_blacklist_release_plans(node_ids=node_ids)
@@ -2597,7 +2597,7 @@ async def delete_network_group(group_id: str, request: Request, _: str = Depends
     item = await NetworkGroup.get(group_id)
     if item is None:
         raise HTTPException(404, "network_group_not_found")
-    bindings = await AccessControlSet.find({"network_group_id": group_id}).to_list()
+    bindings = await AccessControlSet.find({"network_group_ids": group_id}).to_list()
     if bindings:
         raise HTTPException(409, "network_group_in_use")
     await item.delete()
@@ -2643,22 +2643,23 @@ async def list_access_control(
 
 @app.post("/api/v1/access-control", response_model=AccessControlMutationOut, status_code=202)
 async def create_access_control(payload: AccessControlCreate, request: Request, _: str = Depends(require_management)) -> AccessControlMutationOut:
-    if await NetworkGroup.get(payload.network_group_id) is None:
-        raise HTTPException(404, "network_group_not_found")
+    for group_id in payload.network_group_ids:
+        if await NetworkGroup.get(group_id) is None:
+            raise HTTPException(404, "network_group_not_found")
     node_ids = list(dict.fromkeys(item.strip() for item in payload.node_ids if item.strip()))
     if not node_ids:
         raise HTTPException(422, "access_control_node_required")
     reason = payload.reason.strip()
     if not reason:
         raise HTTPException(422, "access_control_reason_required")
-    if await _access_control_set_conflict(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction):
+    if await _access_control_set_conflict(node_ids=node_ids, network_group_ids=payload.network_group_ids, mode=payload.mode, direction=payload.direction):
         raise HTTPException(409, "access_control_rule_exists")
     if payload.enabled:
         await _source_blacklist_release_plans(node_ids=node_ids)
-    rule = AccessControlSet(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction, reason=reason, enabled=payload.enabled, created_by=_actor())
+    rule = AccessControlSet(node_ids=node_ids, network_group_ids=payload.network_group_ids, mode=payload.mode, direction=payload.direction, reason=reason, enabled=payload.enabled, created_by=_actor())
     await rule.insert()
     distribution = await _release_access_control_nodes(node_ids, operation="created", target_id=_model_id(rule), actor=_actor(), request_id=_request_id(request)) if payload.enabled else None
-    await append_audit(action="access_control.create", target_type="access_control", target_id=_model_id(rule), actor=_actor(), after={"node_ids": node_ids, "network_group_id": payload.network_group_id, "mode": payload.mode, "direction": payload.direction, "reason": reason})
+    await append_audit(action="access_control.create", target_type="access_control", target_id=_model_id(rule), actor=_actor(), after={"node_ids": node_ids, "network_group_ids": payload.network_group_ids, "mode": payload.mode, "direction": payload.direction, "reason": reason})
     return AccessControlMutationOut(rules=[await _access_control_out(rule)], operation="created", distribution=distribution.targets if distribution else [])
 
 
@@ -2667,22 +2668,23 @@ async def update_access_control(rule_id: str, payload: AccessControlCreate, requ
     rule = await AccessControlSet.get(rule_id)
     if rule is None:
         raise HTTPException(404, "access_control_rule_not_found")
-    if await NetworkGroup.get(payload.network_group_id) is None:
-        raise HTTPException(404, "network_group_not_found")
+    for group_id in payload.network_group_ids:
+        if await NetworkGroup.get(group_id) is None:
+            raise HTTPException(404, "network_group_not_found")
     node_ids = list(dict.fromkeys(item.strip() for item in payload.node_ids if item.strip()))
     if not node_ids:
         raise HTTPException(422, "access_control_node_required")
     reason = payload.reason.strip()
     if not reason:
         raise HTTPException(422, "access_control_reason_required")
-    if await _access_control_set_conflict(node_ids=node_ids, network_group_id=payload.network_group_id, mode=payload.mode, direction=payload.direction, exclude_id=rule_id):
+    if await _access_control_set_conflict(node_ids=node_ids, network_group_ids=payload.network_group_ids, mode=payload.mode, direction=payload.direction, exclude_id=rule_id):
         raise HTTPException(409, "access_control_rule_exists")
     was_enabled = rule.enabled
     affected = list(dict.fromkeys([*rule.node_ids, *node_ids]))
     if was_enabled or payload.enabled:
         await _source_blacklist_release_plans(node_ids=affected)
     rule.node_ids = node_ids
-    rule.network_group_id = payload.network_group_id
+    rule.network_group_ids = payload.network_group_ids
     rule.mode = payload.mode
     rule.direction = payload.direction
     rule.reason = reason
@@ -2690,7 +2692,7 @@ async def update_access_control(rule_id: str, payload: AccessControlCreate, requ
     rule.updated_at = utcnow()
     await rule.save()
     distribution = await _release_access_control_nodes(affected, operation="updated", target_id=rule_id, actor=_actor(), request_id=_request_id(request)) if was_enabled or payload.enabled else None
-    await append_audit(action="access_control.update", target_type="access_control", target_id=rule_id, actor=_actor(), after={"node_ids": node_ids, "network_group_id": payload.network_group_id, "mode": payload.mode, "direction": payload.direction, "reason": reason})
+    await append_audit(action="access_control.update", target_type="access_control", target_id=rule_id, actor=_actor(), after={"node_ids": node_ids, "network_group_ids": payload.network_group_ids, "mode": payload.mode, "direction": payload.direction, "reason": reason})
     return AccessControlMutationOut(rules=[await _access_control_out(rule)], operation="updated", distribution=distribution.targets if distribution else [])
 
 

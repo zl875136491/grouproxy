@@ -16,8 +16,8 @@ import { ACCESS_PAGE_SIZE, ListPagination, useDebouncedValue } from "../list-con
 type RuleDraft = {
   id?: string;
   nodeIds: string[];
-  groupId: string;
-  groupName: string;
+  groupIds: string[];
+  groupNames: string[];
   mode: AccessControlRule["mode"];
   direction: AccessControlRule["direction"];
   reason: string;
@@ -98,12 +98,12 @@ export default function AccessRulesPage() {
     setEditor(rule ? {
       id: rule.id,
       nodeIds: rule.node_ids,
-      groupId: rule.network_group_id,
-      groupName: rule.network_group_name,
+      groupIds: rule.network_group_ids,
+      groupNames: rule.network_group_names,
       mode: rule.mode,
       direction: rule.direction,
       reason: rule.reason,
-    } : { nodeIds: [], groupId: "", groupName: "", mode: "deny", direction: "source", reason: "" });
+    } : { nodeIds: [], groupIds: [], groupNames: [], mode: "deny", direction: "source", reason: "" });
   };
   return (
     <div className="page-stack page-fill list-page">
@@ -141,13 +141,13 @@ export default function AccessRulesPage() {
                 {page.items.map((rule) => (
                   <tr key={rule.id}>
                     <td>{rule.node_ids.map((nodeId) => <div key={nodeId}><strong>{nodeName(nodeId)}</strong><span className="cell-secondary mono">{nodeId}</span></div>)}</td>
-                    <td>{rule.network_group_name}</td>
+                    <td>{rule.network_group_names.map((name, index) => <div key={rule.network_group_ids[index]}>{name}</div>)}</td>
                     <td>{modeLabel(rule.mode, t)}</td>
                     <td>{directionLabel(rule.direction, t)}</td>
                     <td>{rule.reason}</td>
                     <td>
                       <div className="row-actions">
-                        <IconButton label={t("Edit {name}", { name: rule.network_group_name })} onClick={() => openEditor(rule)}><Pencil size={15} /></IconButton>
+                        <IconButton label={t("Edit {name}", { name: rule.network_group_names.join(", ") })} onClick={() => openEditor(rule)}><Pencil size={15} /></IconButton>
                         <IconButton label="Delete access rule" className="row-icon-danger" onClick={() => setPendingDelete(rule)}><Trash2 size={15} /></IconButton>
                       </div>
                     </td>
@@ -209,13 +209,13 @@ function RuleForm({
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [nodeIds, setNodeIds] = useState(draft.nodeIds);
-  const [groupId, setGroupId] = useState(draft.groupId);
+  const [groupIds, setGroupIds] = useState(draft.groupIds);
   const [mode, setMode] = useState(draft.mode);
   const [direction, setDirection] = useState(draft.direction);
   const [reason, setReason] = useState(draft.reason);
   const save = useMutation({
     mutationFn: () => {
-      const payload = { node_ids: nodeIds, network_group_id: groupId, mode, direction, reason: reason.trim(), enabled: true };
+      const payload = { node_ids: nodeIds, network_group_ids: groupIds, mode, direction, reason: reason.trim(), enabled: true };
       return draft.id ? updateAccessControl(draft.id, payload) : createAccessControl(payload);
     },
     onSuccess: async () => {
@@ -229,7 +229,7 @@ function RuleForm({
       toast({ title: t("Operation failed"), description: t(toastErrorMessage(error)), variant: "destructive" });
     },
   });
-  const complete = Boolean(groupId && nodeIds.length && reason.trim());
+  const complete = Boolean(groupIds.length && nodeIds.length && reason.trim());
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (complete && !save.isPending) save.mutate();
@@ -237,17 +237,17 @@ function RuleForm({
   const toggleNode = (agentId: string) => {
     setNodeIds((current) => current.includes(agentId) ? current.filter((item) => item !== agentId) : [...current, agentId]);
   };
-  const groupChoices = groups.some((group) => group.id === groupId) || !groupId
-    ? groups
-    : [{ id: groupId, name: draft.groupName, entries: [], created_by: "", created_at: "", updated_at: "" }, ...groups];
+  const groupChoices = [...groups, ...draft.groupIds.filter((id) => !groups.some((group) => group.id === id)).map((id) => ({ id, name: draft.groupNames[draft.groupIds.indexOf(id)], entries: [], created_by: "", created_at: "", updated_at: "" }))];
   return (
     <form className="policy-dialog-form" onSubmit={submit}>
       <label>
         <span>{t("Access groups")}</span>
-        <select value={groupId} onChange={(event) => setGroupId(event.target.value)}>
-          <option value="">{t("Select a group")}</option>
-          {groupChoices.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
-        </select>
+        <div className="subscription-site-checks blacklist-node-checks" role="group" aria-label={t("Access groups")}>
+          {groupChoices.map((group) => <label key={group.id} className={groupIds.includes(group.id) ? "subscription-site-selected" : undefined}>
+            <input type="checkbox" checked={groupIds.includes(group.id)} onChange={() => setGroupIds((current) => current.includes(group.id) ? current.filter((id) => id !== group.id) : [...current, group.id])} />
+            <span><strong>{group.name}</strong><small className="mono">{group.id}</small></span>
+          </label>)}
+        </div>
       </label>
       <div className="access-node-block">
         <div className="subscription-selection-heading">

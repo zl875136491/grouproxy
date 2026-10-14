@@ -242,7 +242,7 @@ class AccessControlSet(Document):
     """
 
     node_ids: list[str] = Field(min_length=1, max_length=64)
-    network_group_id: str
+    network_group_ids: list[str] = Field(min_length=1, max_length=64)
     mode: Literal["deny", "allow"] = "deny"
     direction: Literal["source", "destination"] = "source"
     reason: str = Field(min_length=1, max_length=512)
@@ -254,8 +254,8 @@ class AccessControlSet(Document):
     class Settings:
         indexes = [
             IndexModel(
-                [("network_group_id", ASCENDING), ("mode", ASCENDING), ("direction", ASCENDING)],
-                name="access_control_set_policy",
+                [("network_group_ids", ASCENDING), ("mode", ASCENDING), ("direction", ASCENDING)],
+                name="access_control_set_groups_policy",
             ),
             IndexModel([("node_ids", ASCENDING), ("enabled", ASCENDING)], name="access_control_set_nodes_enabled"),
         ]

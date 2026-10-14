@@ -154,14 +154,12 @@ async def effective_access_control(node_id: str) -> list[dict[str, str]]:
     groups = {
         str(group.id): group
         for group in all_groups
-        if str(group.id) in {rule.network_group_id for rule in rules}
+        if str(group.id) in {group_id for rule in rules for group_id in rule.network_group_ids}
     }
     seen: set[tuple[str, str, str, str]] = set()
     for rule in rules:
-        group = groups.get(rule.network_group_id)
-        if group is None:
-            continue
-        for entry in group.entries:
+        entries = [entry for group_id in rule.network_group_ids if (group := groups.get(group_id)) is not None for entry in group.entries]
+        for entry in entries:
             try:
                 kind = canonicalize_kind(entry.kind)
                 pattern = normalize_source_blacklist_pattern(kind, entry.pattern)
@@ -203,16 +201,16 @@ async def migrate_access_control_sets() -> int:
         if not node_ids or not reason.strip():
             continue
         already = await AccessControlSet.find({
-            "network_group_id": group_id,
+            "network_group_ids": group_id,
             "mode": mode,
             "direction": direction,
             "reason": reason,
             "node_ids": {"$all": node_ids},
         }).to_list()
-        if not any(set(item.node_ids) == set(node_ids) for item in already):
+        if not any(set(item.node_ids) == set(node_ids) and item.network_group_ids == [group_id] for item in already):
             await AccessControlSet(
                 node_ids=node_ids,
-                network_group_id=group_id,
+                network_group_ids=[group_id],
                 mode=mode,
                 direction=direction,
                 reason=reason,

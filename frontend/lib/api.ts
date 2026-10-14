@@ -208,8 +208,8 @@ export type NetworkGroup = {
 export type AccessControlRule = {
   id: string;
   node_ids: string[];
-  network_group_id: string;
-  network_group_name: string;
+  network_group_ids: string[];
+  network_group_names: string[];
   mode: "deny" | "allow";
   direction: "source" | "destination";
   reason: string;
@@ -989,7 +989,7 @@ export function getAccessControl(filters: {
 
 export function createAccessControl(value: {
   node_ids: string[];
-  network_group_id: string;
+  network_group_ids: string[];
   mode: AccessControlRule["mode"];
   direction: AccessControlRule["direction"];
   reason: string;
@@ -1000,7 +1000,7 @@ export function createAccessControl(value: {
 
 export function updateAccessControl(ruleId: string, value: {
   node_ids: string[];
-  network_group_id: string;
+  network_group_ids: string[];
   mode: AccessControlRule["mode"];
   direction: AccessControlRule["direction"];
   reason: string;

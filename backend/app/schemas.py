@@ -212,18 +212,29 @@ class NetworkGroupPage(BaseModel):
 
 class AccessControlCreate(BaseModel):
     node_ids: list[str] = Field(min_length=1, max_length=64)
-    network_group_id: str = Field(min_length=1, max_length=128)
+    network_group_ids: list[str] = Field(min_length=1, max_length=64)
     mode: Literal["deny", "allow"] = "deny"
     direction: Literal["source", "destination"] = "source"
     reason: str = Field(min_length=1, max_length=512)
     enabled: bool = True
 
+    @model_validator(mode="after")
+    def normalize_selections(self) -> "AccessControlCreate":
+        self.node_ids = list(dict.fromkeys(value.strip() for value in self.node_ids if value.strip()))
+        self.network_group_ids = list(dict.fromkeys(value.strip() for value in self.network_group_ids if value.strip()))
+        if not self.node_ids or not self.network_group_ids:
+            raise ValueError("access_control_selections_required")
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("access_control_reason_required")
+        return self
+
 
 class AccessControlOut(BaseModel):
     id: str
     node_ids: list[str]
-    network_group_id: str
-    network_group_name: str
+    network_group_ids: list[str]
+    network_group_names: list[str]
     mode: Literal["deny", "allow"]
     direction: Literal["source", "destination"]
     reason: str

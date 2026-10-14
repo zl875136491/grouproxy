@@ -486,6 +486,13 @@ async def _prepare_telemetry_indexes(database: Any) -> None:
         )
 
 
+async def _migrate_access_control_group_arrays(database: Any) -> None:
+    await database["AccessControlSet"].update_many(
+        {"network_group_ids": {"$exists": False}, "network_group_id": {"$type": "string"}},
+        [{"$set": {"network_group_ids": ["$network_group_id"]}}, {"$unset": "network_group_id"}],
+    )
+
+
 class Database:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -504,6 +511,7 @@ class Database:
         await _migrate_subscription_source_types(database)
         await _migrate_connection_snapshot_retention(database, self.settings)
         await _prepare_telemetry_indexes(database)
+        await _migrate_access_control_group_arrays(database)
         await init_beanie(
             database=database,
             document_models=DOCUMENT_MODELS,
