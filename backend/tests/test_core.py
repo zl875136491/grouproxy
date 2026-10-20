@@ -1114,6 +1114,40 @@ def test_probe_target_rejects_private_dns_answers(monkeypatch: pytest.MonkeyPatc
         _safe_probe_target("https://example.com/ncr")
 
 
+def test_probe_target_accepts_public_ipv4_with_synthetic_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mixed_dns(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001::1", 443, 0, 0)),
+        ]
+
+    monkeypatch.setattr("main.socket.getaddrinfo", mixed_dns)
+    assert _safe_probe_target("https://www.google.com") == "https://www.google.com/"
+
+
+def test_probe_target_accepts_synthetic_ipv6_with_public_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mixed_dns(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001::1", 443, 0, 0)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:4860:4860::8888", 443, 0, 0)),
+        ]
+
+    monkeypatch.setattr("main.socket.getaddrinfo", mixed_dns)
+    assert _safe_probe_target("https://www.google.com") == "https://www.google.com/"
+
+
+def test_probe_target_rejects_public_and_private_mixed_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def mixed_dns(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443)),
+        ]
+
+    monkeypatch.setattr("main.socket.getaddrinfo", mixed_dns)
+    with pytest.raises(HTTPException, match="probe_target_private_network"):
+        _safe_probe_target("https://www.google.com")
+
+
 def test_probe_target_rejects_queries_before_dns_resolution() -> None:
     with pytest.raises(HTTPException, match="probe_target_query_not_allowed"):
         _safe_probe_target("https://example.com/ncr?unexpected=value")

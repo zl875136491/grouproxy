@@ -27,6 +27,7 @@ def test_service_quality_definition_defaults_and_order() -> None:
         "yellow_max_ms": 200,
     }
     assert SystemSettings.model_fields["settings_id"].default == "global"
+    assert SystemSettings.model_fields["default_probe_url"].default == "https://example.com/"
 
     with pytest.raises(ValidationError, match="yellow_max_ms_must_exceed_green_max_ms"):
         SystemSettingsUpdate(
@@ -42,6 +43,7 @@ async def test_update_system_settings_audits_operator_and_new_boundaries(
     settings = SimpleNamespace(
         settings_id="global",
         service_quality=ServiceQualityDefinition(),
+        default_probe_url="https://example.com/",
         updated_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
         updated_by="system",
     )
@@ -65,7 +67,8 @@ async def test_update_system_settings_audits_operator_and_new_boundaries(
 
     result = await main_module.update_system_settings(
         SystemSettingsUpdate(
-            service_quality={"green_max_ms": 80, "yellow_max_ms": 180}
+            service_quality={"green_max_ms": 80, "yellow_max_ms": 180},
+            default_probe_url="https://www.google.com/",
         ),
         _request(),
         "alice",
@@ -74,6 +77,8 @@ async def test_update_system_settings_audits_operator_and_new_boundaries(
     assert saved == [True]
     assert result.service_quality.green_max_ms == 80
     assert result.service_quality.yellow_max_ms == 180
+    assert result.default_probe_url == "https://www.google.com/"
+    assert settings.default_probe_url == "https://www.google.com/"
     assert settings.updated_by == "alice"
     assert audit["action"] == "system_settings.update"
     assert audit["target_id"] == "global"
@@ -81,6 +86,7 @@ async def test_update_system_settings_audits_operator_and_new_boundaries(
     assert audit["source_ip"] == "127.0.0.1"
     assert audit["before"] == {
         "service_quality": {"green_max_ms": 100, "yellow_max_ms": 200},
+        "default_probe_url": "https://example.com/",
         "updated_at": "2026-09-22T00:00:00+00:00",
         "updated_by": "system",
     }
@@ -88,3 +94,4 @@ async def test_update_system_settings_audits_operator_and_new_boundaries(
         "green_max_ms": 80,
         "yellow_max_ms": 180,
     }
+    assert audit["after"]["default_probe_url"] == "https://www.google.com/"

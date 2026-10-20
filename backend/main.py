@@ -463,6 +463,7 @@ def _system_settings_out(settings: SystemSettings) -> SystemSettingsOut:
     return SystemSettingsOut(
         settings_id=settings.settings_id,
         service_quality=settings.service_quality.model_dump(),
+        default_probe_url=settings.default_probe_url,
         updated_at=settings.updated_at,
         updated_by=settings.updated_by,
     )
@@ -1268,20 +1269,37 @@ def _safe_probe_target(value: str) -> str:
         raise HTTPException(422, "probe_target_unresolvable") from exc
     if not addresses:
         raise HTTPException(422, "probe_target_unresolvable")
+    parsed_addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for address in addresses:
         try:
-            parsed_ip = ipaddress.ip_address(address)
+            parsed_addresses.append(ipaddress.ip_address(address))
         except ValueError:
             continue
-        if (
-            not parsed_ip.is_global
-            or parsed_ip.is_private
-            or parsed_ip.is_loopback
-            or parsed_ip.is_link_local
-            or parsed_ip.is_reserved
-            or parsed_ip.is_multicast
-        ):
-            raise HTTPException(422, "probe_target_private_network")
+    if not parsed_addresses:
+        raise HTTPException(422, "probe_target_unresolvable")
+    # Reject definite local/private destinations while tolerating non-global
+    # IPv6 resolver answers when the hostname also has a globally routable IP.
+    private_v4 = tuple(map(ipaddress.ip_network, (
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+        "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+    )))
+    private_v6 = tuple(map(ipaddress.ip_network, (
+        "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+    )))
+    if any(
+        address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or any(
+            address.version == network.version and address in network
+            for network in (*private_v4, *private_v6)
+        )
+        for address in parsed_addresses
+    ):
+        raise HTTPException(422, "probe_target_private_network")
+    if not any(address.is_global for address in parsed_addresses):
+        raise HTTPException(422, "probe_target_private_network")
     host = parsed.hostname
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -1422,6 +1440,7 @@ async def _accept_telemetry_batch(
 async def _claim_probe_requests(node: Node) -> list[ProbeRequestForAgent]:
     await reclaim_expired_tasks(task_type="node.probe")
     settings = _settings()
+    system_settings = await _global_system_settings()
     if settings.probe_auto_enabled:
         await _schedule_automatic_probe(node, settings)
     task = await claim_probe_task_for_node(
@@ -1432,7 +1451,7 @@ async def _claim_probe_requests(node: Node) -> list[ProbeRequestForAgent]:
         return []
     try:
         target_url = _safe_probe_target(
-            str(task.payload.get("target_url", settings.probe_target_url))
+            str(task.payload.get("target_url", system_settings.default_probe_url))
         )
     except HTTPException as exc:
         # A task payload is persisted before it reaches a monitor. Do not leave
@@ -1452,7 +1471,8 @@ async def _schedule_automatic_probe(node: Node, settings: Settings) -> None:
     """Create at most one low-volume probe task per configured time slot."""
 
     try:
-        target_url = _safe_probe_target(settings.probe_target_url)
+        system_settings = await _global_system_settings()
+        target_url = _safe_probe_target(system_settings.default_probe_url)
     except HTTPException:
         # A bad operator setting must not enqueue a task that can never be
         # delivered to a monitor. The configuration error remains visible in
@@ -2224,17 +2244,23 @@ async def update_system_settings(
     settings = await _global_system_settings()
     before = {
         "service_quality": settings.service_quality.model_dump(mode="json"),
+        "default_probe_url": settings.default_probe_url,
         "updated_at": settings.updated_at.isoformat(),
         "updated_by": settings.updated_by,
     }
     settings.service_quality = ServiceQualityDefinition(
         **payload.service_quality.model_dump()
     )
+    if payload.default_probe_url is not None:
+        settings.default_probe_url = _safe_probe_target(payload.default_probe_url)
+    elif not getattr(settings, "default_probe_url", None):
+        settings.default_probe_url = "https://example.com/"
     settings.updated_at = utcnow()
     settings.updated_by = actor
     await settings.save()
     after = {
         "service_quality": settings.service_quality.model_dump(mode="json"),
+        "default_probe_url": settings.default_probe_url,
         "updated_at": settings.updated_at.isoformat(),
         "updated_by": settings.updated_by,
     }
@@ -4410,7 +4436,8 @@ async def create_node_probe(
     node = await _find_node_reference(node_id)
     if node is None:
         raise HTTPException(404, "node_not_found")
-    target_url = _safe_probe_target(payload.target_url)
+    system_settings = await _global_system_settings()
+    target_url = _safe_probe_target(payload.target_url or system_settings.default_probe_url)
     tags = [_safe_log_text(tag, 128) for tag in payload.outbound_tags if _safe_log_text(tag, 128)]
     settings = _settings()
     if len(tags) > settings.probe_max_outbounds:

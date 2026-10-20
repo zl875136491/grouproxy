@@ -100,12 +100,14 @@ class ServiceQualityDefinitionOut(BaseModel):
 class SystemSettingsOut(BaseModel):
     settings_id: str
     service_quality: ServiceQualityDefinitionOut
+    default_probe_url: str
     updated_at: datetime
     updated_by: str
 
 
 class SystemSettingsUpdate(BaseModel):
     service_quality: ServiceQualityDefinitionOut
+    default_probe_url: str | None = Field(default=None, min_length=1, max_length=2048)
 
 
 class RoleUpdate(BaseModel):
@@ -885,7 +887,7 @@ class AlertOut(BaseModel):
 
 
 class ProbeTaskRequest(BaseModel):
-    target_url: str = Field(default="https://example.com/", min_length=1, max_length=2048)
+    target_url: str | None = Field(default=None, min_length=1, max_length=2048)
     outbound_tags: list[str] = Field(default_factory=list, max_length=100)
 
 

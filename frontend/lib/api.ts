@@ -151,6 +151,7 @@ export type ServiceQualityDefinition = {
 export type SystemSettings = {
   settings_id: string;
   service_quality: ServiceQualityDefinition;
+  default_probe_url: string;
   updated_at: string;
   updated_by: string;
 };
@@ -908,7 +909,7 @@ export function getSystemSettings() {
   return request<SystemSettings>("/api/v1/system-settings");
 }
 
-export function updateSystemSettings(value: { service_quality: ServiceQualityDefinition }) {
+export function updateSystemSettings(value: { service_quality: ServiceQualityDefinition; default_probe_url: string }) {
   return request<SystemSettings>("/api/v1/system-settings", jsonRequest("PATCH", value));
 }
 

@@ -59,6 +59,7 @@ class SystemSettings(Document):
 
     settings_id: Indexed(str, unique=True) = "global"
     service_quality: ServiceQualityDefinition = Field(default_factory=ServiceQualityDefinition)
+    default_probe_url: str = "https://example.com/"
     updated_at: datetime = Field(default_factory=utcnow)
     updated_by: str = "system"
 

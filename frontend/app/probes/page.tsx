@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleCheck, CircleX, Gauge, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { createNodeProbe, getNodeProbes, getNodes, getTask, type Node, type ProbeOverview, type Task } from "../../lib/api";
+import { createNodeProbe, getNodeProbes, getNodes, getSystemSettings, getTask, type Node, type ProbeOverview, type Task } from "../../lib/api";
 import { usePreferences } from "../../lib/preferences";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { PageHeader } from "../../components/page-header";
@@ -20,11 +20,15 @@ export default function ProbesPage() {
   const session = useManagementSession();
   const queryClient = useQueryClient();
   const nodes = useQuery({ queryKey: ["nodes"], queryFn: getNodes, enabled: session === true, refetchInterval: 10_000 });
+  const settings = useQuery({ queryKey: ["system-settings"], queryFn: getSystemSettings, enabled: session === true });
   const [selectedNodeId, setSelectedNodeId] = useState("");
-  const [targetURL, setTargetURL] = useState("https://example.com/");
+  const [targetURL, setTargetURL] = useState("");
   const [probeTaskId, setProbeTaskId] = useState<string | null>(null);
   const completedTaskRef = useRef<string | null>(null);
   const probeStartLock = useRef(false);
+  useEffect(() => {
+    if (settings.data?.default_probe_url) setTargetURL((current) => current || settings.data!.default_probe_url);
+  }, [settings.data?.default_probe_url]);
   useEffect(() => {
     if (!selectedNodeId && nodes.data?.[0]) setSelectedNodeId(nodes.data[0].id);
   }, [nodes.data, selectedNodeId]);

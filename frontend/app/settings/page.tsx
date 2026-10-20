@@ -14,6 +14,7 @@ import { notifyToast, toastErrorMessage } from "../../components/toast";
 const DEFAULT_GREEN_MAX_MS = 100;
 const DEFAULT_YELLOW_MAX_MS = 200;
 const MAX_LATENCY_BOUNDARY_MS = 300_000;
+const DEFAULT_PROBE_URL = "https://example.com/";
 
 function parseBoundary(value: string): number | null {
   if (!/^\d+$/.test(value.trim())) return null;
@@ -28,6 +29,7 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [greenMax, setGreenMax] = useState(String(DEFAULT_GREEN_MAX_MS));
   const [yellowMax, setYellowMax] = useState(String(DEFAULT_YELLOW_MAX_MS));
+  const [defaultProbeURL, setDefaultProbeURL] = useState(DEFAULT_PROBE_URL);
   const [formError, setFormError] = useState("");
   const settings = useQuery({
     queryKey: ["system-settings"],
@@ -40,10 +42,12 @@ export default function SettingsPage() {
         green_max_ms: parseBoundary(greenMax) as number,
         yellow_max_ms: parseBoundary(yellowMax) as number,
       },
+      default_probe_url: defaultProbeURL.trim(),
     }),
     onSuccess: async (next) => {
       setGreenMax(String(next.service_quality.green_max_ms));
       setYellowMax(String(next.service_quality.yellow_max_ms));
+      setDefaultProbeURL(next.default_probe_url);
       setFormError("");
       await queryClient.invalidateQueries({ queryKey: ["system-settings"] });
       notifyToast({ title: t("System settings saved."), variant: "success" });
@@ -59,6 +63,10 @@ export default function SettingsPage() {
     setGreenMax(String(definition.green_max_ms));
     setYellowMax(String(definition.yellow_max_ms));
   }, [settings.data?.service_quality.green_max_ms, settings.data?.service_quality.yellow_max_ms]);
+
+  useEffect(() => {
+    if (settings.data?.default_probe_url) setDefaultProbeURL(settings.data.default_probe_url);
+  }, [settings.data?.default_probe_url]);
 
   if (authenticated === null || management === null) return <LoadingState rows={7} />;
   if (!authenticated) return <SessionGate />;
@@ -78,6 +86,13 @@ export default function SettingsPage() {
     }
     if (yellow <= green) {
       setFormError("The yellow boundary must be greater than the green boundary.");
+      return;
+    }
+    try {
+      const parsed = new URL(defaultProbeURL.trim());
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
+    } catch {
+      setFormError("Enter a valid HTTP or HTTPS probe URL.");
       return;
     }
     setFormError("");
@@ -116,6 +131,11 @@ export default function SettingsPage() {
               <small>{t("Values above green and at or below this boundary are yellow.")}</small>
             </label>
           </div>
+          <label className="settings-url-field">
+            <span>{t("Default probe URL")}</span>
+            <input type="url" value={defaultProbeURL} onChange={(event) => { setDefaultProbeURL(event.target.value); setFormError(""); }} required />
+            <small>{t("Prefilled on the outbound probes page; you can change it for each probe.")}</small>
+          </label>
           <div className="settings-quality-preview" aria-live="polite">
             <span className="settings-quality-preview-title">{t("Current classification")}</span>
             <div className="settings-quality-preview-row">

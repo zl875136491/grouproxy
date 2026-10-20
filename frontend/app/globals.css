@@ -500,6 +500,9 @@ code, pre, .mono { font-family: "Source Code Pro", "SFMono-Regular", Consolas, m
 .settings-input-grid label { display: grid; min-width: 0; gap: 6px; }
 .settings-input-grid label > span { color: var(--gp-steel); font-size: 12px; font-weight: 650; }
 .settings-input-grid small { color: var(--gp-muted); font-size: 11px; }
+.settings-url-field { display: grid; min-width: 0; gap: 6px; }
+.settings-url-field > span { color: var(--gp-steel); font-size: 12px; font-weight: 650; }
+.settings-url-field small { color: var(--gp-muted); font-size: 11px; }
 .settings-number-input { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .settings-number-input input { width: 100%; }
 .settings-number-input > span { color: var(--gp-steel); font-size: 12px; }
