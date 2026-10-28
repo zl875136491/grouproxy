@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	monitorVersion                = "0.7.0"
+	monitorVersion                = "0.8.0"
 	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
@@ -1447,6 +1447,9 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 	if err := bundle.ValidateMinimumMonitorVersion(bundle.Bundle(value), monitorVersion); err != nil {
 		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
 	}
+	if _, err := parseDestinationPolicy(value); err != nil {
+		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
+	}
 	listen, ok := value["listen"].(map[string]any)
 	if !ok {
 		return a.ackFailure(value, "invalid_listen", "listen object is missing", false, false, false, false)
@@ -1467,6 +1470,9 @@ func (a *agent) applyBundle(ctx context.Context, value map[string]any) error {
 		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
 	}
 	if err := validateProxySelection(value, subscriptionOutboundTags(subscriptionOutbounds)); err != nil {
+		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
+	}
+	if err := validateDestinationOutbounds(value, subscriptionOutbounds); err != nil {
 		return a.ackFailure(value, errorCode(err), err.Error(), false, false, false, false)
 	}
 	if err := routingdata.Ensure(a.cfg.StateDir); err != nil {
@@ -1789,6 +1795,9 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 			ensureRoutingRules(configValue, a.cfg.StateDir)
 			ensureSourceBlacklistRules(configValue, sourceRules)
 			applySingboxIngress(configValue, port, boolValue(lastGood["shutdown"]), a.cfg.ListenAddressOverride)
+			if err := applyDestinationPolicy(configValue, lastGood, sourceRules); err != nil {
+				return "", err
+			}
 			if err := bundle.WriteJSON(path, configValue); err != nil {
 				return "", err
 			}
@@ -2718,7 +2727,7 @@ func renderSingbox(
 			finalOutbound = "subscription"
 		}
 	}
-	return map[string]any{
+	result := map[string]any{
 		"log":       map[string]any{"level": "info", "output": filepath.Join(stateDir, "sing-box.log")},
 		"inbounds":  []any{inbound},
 		"outbounds": outbounds,
@@ -2733,6 +2742,8 @@ func renderSingbox(
 			},
 		},
 	}
+	_ = applyDestinationPolicy(result, value, sourceRules)
+	return result
 }
 
 func subscriptionAutoTag(tags []string) string {

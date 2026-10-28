@@ -127,6 +127,8 @@ class Site(Document):
     dns_note: str = ""
     shutdown: bool = False
     config_revision: int = 0
+    routing_policy: dict[str, Any] | None = None
+    routing_revision: int = 0
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -369,6 +371,7 @@ class ConfigRelease(Document):
     site_id: str
     node_ids: list[str] = Field(default_factory=list)
     desired_release_id: str
+    change_categories: list[str] = Field(default_factory=list)
     previous_release_id: str | None = None
     task_id: str | None = None
     status: str = "queued"

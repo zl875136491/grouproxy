@@ -1,0 +1,226 @@
+.panel {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  min-width: 0;
+}
+
+.panel h2,
+.panel p {
+  margin: 0;
+}
+
+.editorHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.heading {
+  display: grid;
+  gap: 6px;
+}
+
+.revision {
+  color: var(--gp-steel);
+  font-size: 12px;
+}
+
+.headerActions,
+.routeControls,
+.radioControl,
+.radioGroup,
+.checkOption {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.headerActions {
+  margin-left: auto;
+}
+
+.routeControls {
+  gap: 16px 24px;
+}
+
+.checkOption {
+  gap: 6px;
+}
+
+.radioGroup {
+  gap: 8px;
+}
+
+.radioOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--gp-line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--gp-ink);
+  background: var(--gp-surface);
+  cursor: pointer;
+}
+
+.radioOption:has(input:checked) {
+  border-color: var(--gp-green);
+  background: var(--gp-surface-strong);
+}
+
+.radioOption:focus-within {
+  outline: 2px solid var(--gp-green);
+  outline-offset: 2px;
+}
+
+.radioOption input,
+.checkOption input {
+  accent-color: var(--gp-green);
+  margin: 0;
+}
+
+.fields {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.actions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.importer,
+.importContent,
+.importPreview {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.importer {
+  border: 1px solid var(--gp-line);
+  border-radius: var(--gp-radius);
+  padding: 16px;
+}
+
+.importer h3 {
+  margin: 0;
+}
+
+.importToolbar,
+.importControls,
+.fileControl {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.importControls {
+  flex: 1 1 0;
+  gap: 16px 24px;
+}
+
+.filePicker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 4px 10px 4px 4px;
+  border: 1px solid var(--gp-line-strong);
+  border-radius: 6px;
+  background: var(--gp-canvas);
+}
+
+.filePicker button {
+  flex-shrink: 0;
+}
+
+.fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.fileName {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--gp-steel);
+  font-size: 12px;
+}
+
+.templateDownload {
+  flex-shrink: 0;
+  margin-left: auto;
+  text-decoration: none;
+}
+
+.importContent textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: monospace;
+  border: 1px solid var(--gp-line-strong);
+  border-radius: 6px;
+  padding: 12px;
+  color: var(--gp-ink);
+  background: var(--gp-canvas);
+}
+
+.importContent textarea:focus-visible {
+  outline: 2px solid var(--gp-green);
+  outline-offset: 2px;
+}
+
+.importPreview pre {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.currentRules pre {
+  max-height: 320px;
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .panel {
+    padding: 16px;
+  }
+
+  .headerActions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .importControls,
+  .fileControl {
+    width: 100%;
+  }
+}

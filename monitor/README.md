@@ -1,5 +1,29 @@
 # Grouproxy Monitor
 
+## Destination routing (0.8.0)
+
+The generated Clash API mode is `rule`, including restored last-good state.
+The Dashboard's **Routing rules** page fetches and edits a separate policy per
+site. Upgrade every target monitor to 0.8.0 before publishing routing policies.
+Saving creates a revisioned draft only; publishing sends its immutable snapshot
+through the signed Desired Bundle, precheck, health-check, ACK and rollback path.
+Other configuration releases inherit the last published policy, not unsent edits.
+
+Rules match in this order: existing access-control denials, custom rules in table
+order, optional private-address direct routing, optional China-domain/IP direct
+routing, then the configured fallback. Custom rules support exact domains, domain
+suffixes and IP CIDRs, with direct, proxy or reject actions (maximum 200 rules).
+The proxy action uses the subscription selector, including automatic URL-test
+selection; it does not turn direct routes into proxied traffic. Proxy actions
+require an available subscription. Defaults enable private and China direct
+routing and use the proxy as fallback. Legacy bundles use those same defaults.
+
+Management-authenticated endpoints are `GET/PUT /api/v1/sites/{site_id}/routing`
+and `POST /api/v1/sites/{site_id}/routing/publish`. PUT accepts
+`{expected_revision, policy}`; publish accepts `{expected_revision}`. Stale saves
+or publishes fail with 409. Use the normal release history to inspect ACKs and
+roll back. Apply and publish a policy for each site to cover the whole network.
+
 ## Automatic outbound selection (0.7.0)
 
 The generated `subscription` selector now offers an `auto` URL-test group plus
@@ -53,8 +77,8 @@ node bind `0.0.0.0:18081` without changing deployed-node behavior. Source
 blacklist policy is enforced by the rendered route rules and the monitor-owned
 nftables policy. Clash Trojan sources are converted to sing-box TLS objects, including
 SNI, certificate-validation mode, ALPN, and client fingerprint values. The
-control plane owns subscriptions and selector preferences; no destination
-access policy is rendered by the monitor.
+control plane owns subscriptions, selector preferences and destination routing
+policies; the monitor renders only validated signed policies.
 
 The monitor also samples its loopback Clash `/proxies` endpoint and posts a
 bounded proxy-group snapshot to `/agent/v1/proxy-config`. It actively measures

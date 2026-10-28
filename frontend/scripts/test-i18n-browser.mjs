@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const frontendURL = process.env.GROUPROXY_BROWSER_FRONTEND_URL || "http://127.0.0.1:3000";
 const backendURL = process.env.GROUPROXY_BROWSER_BACKEND_URL || "http://127.0.0.1:8000";
@@ -213,9 +214,11 @@ try {
 
   client = new CdpClient(page.webSocketDebuggerUrl);
   const apiRequests = [];
+  const routingWrites = [];
   const browserErrors = [];
   client.on("Network.requestWillBeSent", ({ request }) => {
     if (request.url.includes("/api/")) apiRequests.push(request.url);
+    if (request.method !== "GET" && /\/api\/v1\/sites\/[^/]+\/routing(?:\/publish)?(?:\?|$)/.test(request.url)) routingWrites.push(request.url);
   });
   client.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
     browserErrors.push(exceptionDetails.exception?.description || exceptionDetails.text || "Runtime exception");
@@ -275,6 +278,131 @@ try {
     assert.ok(visualState.stylesheets > 0, "The page did not load a stylesheet");
     assert.notEqual(visualState.targetDisplay, "none", "The ready element is not visible");
     assert.match(visualState.bodyFont, /Euclid|Inter|Segoe UI/, "The application font stack is missing");
+    if (browserPath.startsWith("/releases")) {
+      await waitFor(() => evaluate("document.querySelectorAll('.release-history-card .release-change-category').length > 0"), "release history change categories");
+      const categories = await evaluate("[...document.querySelectorAll('.release-history-card .release-change-category')].map((element) => element.innerText)");
+      assert.ok(categories.every((label) => ["访问规则", "路由规则", "出口服务", "订阅", "其他变更"].includes(label)), "Unexpected release category labels");
+      if (requestedTheme === "dark") {
+        const colors = await evaluate("[...document.querySelectorAll('.release-change-category')].map((element) => getComputedStyle(element).color)");
+        assert.ok(colors.length > 0 && colors.every((color) => color === "rgb(255, 255, 255)"), "Release category text must be white in dark mode");
+      }
+      assert.deepEqual(browserErrors, [], `Release page threw browser errors: ${browserErrors.join(" | ")}`);
+      console.log(`Release history shows change categories: ${[...new Set(categories)].join(", ")}`);
+    }
+    if (browserPath === "/routing") {
+      assert.equal(await evaluate("document.querySelectorAll('table').length"), 0, "Node and manual rule tables must be removed");
+      assert.equal(await evaluate("document.querySelectorAll('input[name=\"routing-final\"]').length"), 2, "Fallback must use two radio buttons");
+      assert.equal(await evaluate("document.querySelectorAll('fieldset input[type=checkbox]').length"), 2, "Private and China options must remain checkboxes");
+      assert.equal(await evaluate("document.querySelectorAll('input[name=\"routing-import-mode\"]').length"), 2, "Import behavior must use two radio buttons");
+      assert.equal(await evaluate("document.querySelectorAll('select').length"), 1, "Routing controls must not use dropdowns; only the shared locale selector remains");
+      const importLayout = await evaluate(`(() => {
+        const file = document.querySelector('[role="group"][aria-labelledby="routing-file-label"]');
+        const button = file.querySelector('button').getBoundingClientRect();
+        const field = file.getBoundingClientRect();
+        const download = document.querySelector('a[download]').getBoundingClientRect();
+        const mode = document.querySelector('[aria-labelledby="routing-import-mode-label"]').getBoundingClientRect();
+        return {
+          centerDifference: Math.abs(button.top + button.height / 2 - field.top - field.height / 2),
+          downloadButton: document.querySelector('a[download]').classList.contains('button'),
+          downloadRight: download.right > mode.right,
+        };
+      })()`);
+      assert.ok(importLayout.centerDifference <= 1, "File selection button must be vertically centered");
+      assert.equal(importLayout.downloadButton, true, "Template download must be a standalone button");
+      if (viewportWidth >= 800) assert.equal(importLayout.downloadRight, true, "Template download must be on the far right");
+      const originalSite = await evaluate("document.querySelector('input[name=\"routing-site\"]:checked').value");
+      const alternateSite = await evaluate("[...document.querySelectorAll('input[name=\"routing-site\"]')].find((element) => !element.checked)?.value");
+      if (alternateSite) {
+        await evaluate(`document.querySelector('input[name="routing-site"][value="${alternateSite}"]').click()`);
+        await waitFor(() => evaluate(`document.querySelector('fieldset[data-routing-site="${alternateSite}"]') !== null`), "site radio selection");
+        await evaluate(`document.querySelector('input[name="routing-site"][value="${originalSite}"]').click()`);
+        await waitFor(() => evaluate(`document.querySelector('fieldset[data-routing-site="${originalSite}"]') !== null`), "original site restored");
+      }
+      const initialRules = await evaluate("JSON.parse(document.querySelector('[data-routing-current-rules]')?.textContent || '[]')");
+      const initialRows = initialRules.length;
+      const originalFallback = await evaluate("document.querySelector('input[name=\"routing-final\"]:checked').value");
+      const initialPrivate = await evaluate("document.querySelector('fieldset input[type=checkbox]').checked");
+      assert.equal(await evaluate("document.querySelector('[data-routing-action=save]').textContent"), "保存路由规则");
+      assert.equal(await evaluate("document.querySelector('[data-routing-action=publish]').textContent"), "发布路由规则");
+      const placement = await evaluate(`(() => {
+        const header = document.querySelector('[data-routing-action=save]').closest('header');
+        const save = document.querySelector('[data-routing-action=save]').getBoundingClientRect();
+        const heading = header.querySelector('h2').getBoundingClientRect();
+        const options = document.querySelector('input[name="routing-final"]').getBoundingClientRect();
+        const importer = document.querySelector('textarea').getBoundingClientRect();
+        return { right: save.left > heading.right, above: save.top < importer.top && options.top < importer.top };
+      })()`);
+      if (viewportWidth >= 800) assert.equal(placement.right, true, "Save/publish must be at the upper right");
+      assert.equal(placement.above, true, "Actions and routing options must precede import");
+      await evaluate("document.querySelector('input[name=\"routing-final\"]:not(:checked)').click()");
+      await waitFor(() => evaluate("!document.querySelector('[data-routing-action=save]').disabled && document.querySelector('[data-routing-action=publish]').disabled"), "fallback edit save/publish guard");
+      await evaluate(`document.querySelector('input[name="routing-final"][value="${originalFallback}"]').click()`);
+      await evaluate(`(() => {
+        const textarea = document.querySelector('textarea');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, '[{"rule_set":["cn"],"outbound":"direct"}]');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      const clickPreview = async () => {
+        await waitFor(() => evaluate(`(() => {
+          const button = [...document.querySelectorAll('button')].find((element) => /^(校验并预览导入|Validate and preview import)$/.test(element.innerText));
+          return button && !button.disabled;
+        })()`), "import preview button");
+        await evaluate(`(() => {
+          [...document.querySelectorAll('button')].find((element) => /^(校验并预览导入|Validate and preview import)$/.test(element.innerText)).click();
+        })()`);
+      };
+      await clickPreview();
+      await waitFor(() => evaluate(`document.querySelector('[role="alert"]')?.innerText.includes('rule_set')`), "unsupported import error");
+      assert.deepEqual(await evaluate("JSON.parse(document.querySelector('[data-routing-current-rules]')?.textContent || '[]')"), initialRules, "Invalid imports must not change the editor");
+      const documentNode = await client.send("DOM.getDocument");
+      const fileInput = await client.send("DOM.querySelector", { nodeId: documentNode.root.nodeId, selector: 'input[type="file"]' });
+      await client.send("DOM.setFileInputFiles", {
+        nodeId: fileInput.nodeId,
+        files: [fileURLToPath(new URL("../public/templates/sing-box-routing.json", import.meta.url))],
+      });
+      await waitFor(() => evaluate(`document.querySelector('textarea').value.includes('blocked.example')`), "routing file read");
+      await clickPreview();
+      await waitFor(() => evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText));
+        return button && !button.disabled;
+      })()`), "validated import preview");
+      await evaluate("document.querySelector('input[name=\"routing-import-mode\"][value=replace]').click()");
+      await waitFor(() => evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText));
+        return button?.disabled;
+      })()`), "import-mode preview invalidation");
+      await evaluate("document.querySelector('input[name=\"routing-import-mode\"][value=append]').click()");
+      await clickPreview();
+      await waitFor(() => evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText));
+        return button && !button.disabled;
+      })()`), "append preview restored");
+      assert.deepEqual(await evaluate("JSON.parse(document.querySelector('[data-routing-current-rules]')?.textContent || '[]')"), initialRules, "Preview must not apply imported rules");
+      await evaluate("document.querySelector('fieldset input[type=checkbox]').click()");
+      await waitFor(() => evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText));
+        return button?.disabled;
+      })()`), "stale preview invalidation");
+      await evaluate("document.querySelector('fieldset input[type=checkbox]').click()");
+      await waitFor(() => evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText));
+        return button && !button.disabled;
+      })()`), "restored preview base");
+      await evaluate(`(() => {
+        [...document.querySelectorAll('button')].find((element) => /^(应用到编辑器（未保存）|Apply import to editor)$/.test(element.innerText)).click();
+      })()`);
+      await waitFor(() => evaluate(`JSON.parse(document.querySelector('[data-routing-current-rules]')?.textContent || '[]').length === ${initialRows + 6}`), "six expanded imported rules");
+      assert.equal(await evaluate("document.querySelector('[data-routing-action=publish]').disabled"), true, "Unsaved imported rules must not be published");
+      await client.send("Page.navigate", { url: `${frontendURL}${browserPath}` });
+      await waitFor(() => evaluate(`document.querySelector('fieldset[data-routing-site="${originalSite}"]') !== null`), "unsaved imports discarded by reload");
+      assert.deepEqual(await evaluate("JSON.parse(document.querySelector('[data-routing-current-rules]')?.textContent || '[]')"), initialRules, "Browser verification must not save imported rules");
+      assert.equal(await evaluate("document.querySelector('input[name=\"routing-final\"]:checked').value"), originalFallback);
+      assert.equal(await evaluate("document.querySelector('fieldset input[type=checkbox]').checked"), initialPrivate);
+      assert.deepEqual(routingWrites, [], "Layout and import tests must not save or publish site policies");
+      assert.deepEqual(browserErrors, [], `Routing page threw browser errors: ${browserErrors.join(" | ")}`);
+      console.log("Routing page uses site/fallback radio groups, top-right rule actions and no removed tables.");
+      console.log("Sing-box file import validates, previews, invalidates stale previews and expands six entries without saving or publishing.");
+    }
     if (requestedTheme === "dark") {
       const unreadableIcons = await assertDarkThemeIconContrast(evaluate);
       assert.deepEqual(unreadableIcons, [], `Dark theme has low-contrast icons: ${JSON.stringify(unreadableIcons)}`);

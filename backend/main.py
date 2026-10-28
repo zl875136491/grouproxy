@@ -152,6 +152,9 @@ from app.schemas import (
     VerificationCodeRequest,
     VerificationCodeResponse,
 )
+from app.routing import RoutingPolicy, RoutingPolicyOut, RoutingPublish, RoutingUpdate
+from app.routing_import import RoutingImport, RoutingImportOut, import_singbox_routing
+from app.services.release_categories import legacy_release_categories, release_change_categories
 from app.services.access import access_profile, load_linux_setup_script, load_windows_setup_script
 from app.services.alerts import refresh_deny_spike_alerts, refresh_liveness, sync_node_alerts
 from app.services.audit import append_audit, redact, verify_audit_chain
@@ -595,6 +598,7 @@ def _release_out(
     *,
     subscription_name: str = "",
     subscription_source_id: str = "",
+    change_categories: list[str] | None = None,
 ) -> ReleaseOut:
     return ReleaseOut(
         release_id=release.release_id,
@@ -613,16 +617,40 @@ def _release_out(
         created_at=release.created_at,
         subscription_name=subscription_name,
         subscription_source_id=subscription_source_id,
+        change_categories=(
+            change_categories if change_categories is not None
+            else getattr(release, "change_categories", [])
+        ),
     )
+
+
+async def _release_categories_for_history(releases: list[ConfigRelease]) -> dict[str, list[str]]:
+    categories = {
+        item.release_id: list(getattr(item, "change_categories", [])) for item in releases
+    }
+    task_ids = [item.task_id for item in releases if not categories[item.release_id] and item.task_id]
+    if not task_ids:
+        return categories
+    try:
+        tasks = await Task.find({"task_id": {"$in": list(set(task_ids))}}).to_list()
+    except CollectionWasNotInitialized:
+        return categories
+    by_task = {task.task_id: legacy_release_categories(task.idempotency_key) for task in tasks}
+    for item in releases:
+        if not categories[item.release_id]:
+            categories[item.release_id] = by_task.get(item.task_id, [])
+    return categories
 
 
 async def _release_outs(releases: list[ConfigRelease]) -> list[ReleaseOut]:
     labels = await _subscription_labels_for_releases(releases)
+    categories = await _release_categories_for_history(releases)
     return [
         _release_out(
             item,
             subscription_name=labels.get(item.release_id, ("", ""))[0],
             subscription_source_id=labels.get(item.release_id, ("", ""))[1],
+            change_categories=categories[item.release_id],
         )
         for item in releases
     ]
@@ -3194,6 +3222,96 @@ async def create_draft(payload: DraftCreate, _: str = Depends(require_management
     return _draft_out(draft)
 
 
+@app.post("/api/v1/routing/import", response_model=RoutingImportOut)
+async def preview_routing_import(
+    payload: RoutingImport, _: str = Depends(require_management)
+) -> RoutingImportOut:
+    try:
+        return import_singbox_routing(payload)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.get("/api/v1/sites/{site_id}/routing", response_model=RoutingPolicyOut)
+async def get_site_routing(
+    site_id: str, _: str = Depends(require_management)
+) -> RoutingPolicyOut:
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    return RoutingPolicyOut(
+        site_id=site_id, revision=site.routing_revision,
+        policy=RoutingPolicy.model_validate(site.routing_policy or {}),
+    )
+
+
+@app.put("/api/v1/sites/{site_id}/routing", response_model=RoutingPolicyOut)
+async def update_site_routing(
+    site_id: str, payload: RoutingUpdate, _: str = Depends(require_management)
+) -> RoutingPolicyOut:
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    revision_match = (
+        {"$or": [{"routing_revision": 0}, {"routing_revision": {"$exists": False}}]}
+        if payload.expected_revision == 0 else {"routing_revision": payload.expected_revision}
+    )
+    result = await Site.get_motor_collection().update_one(
+        {"_id": site.id, **revision_match},
+        {"$set": {"routing_policy": payload.policy.model_dump()},
+         "$inc": {"routing_revision": 1}},
+    )
+    if result.matched_count != 1:
+        raise HTTPException(409, "routing_revision_conflict")
+    await append_audit(
+        action="routing.update", target_type="site", target_id=site_id,
+        actor=_actor(), before={"routing_policy": site.routing_policy},
+        after={"routing_policy": payload.policy.model_dump()},
+    )
+    return RoutingPolicyOut(
+        site_id=site_id, revision=payload.expected_revision + 1, policy=payload.policy,
+    )
+
+
+@app.post("/api/v1/sites/{site_id}/routing/publish", response_model=ReleaseOut, status_code=202)
+async def publish_site_routing(
+    site_id: str, payload: RoutingPublish, request: Request,
+    _: str = Depends(require_management),
+) -> ReleaseOut:
+    site = await Site.get(site_id)
+    if site is None:
+        raise HTTPException(404, "site_not_found")
+    if site.routing_policy is None or site.routing_revision != payload.expected_revision:
+        raise HTTPException(409, "routing_revision_conflict")
+    nodes = await Node.find(Node.site_id == site_id).to_list()
+    if not nodes:
+        raise HTTPException(409, "invalid_release_nodes")
+    for node in nodes:
+        try:
+            version = tuple(int(part) for part in node.monitor_version.split("."))
+        except ValueError:
+            version = ()
+        if len(version) != 3 or version < (0, 8, 0):
+            raise HTTPException(409, "routing_monitor_upgrade_required")
+    if await _active_config_release_for_nodes(nodes):
+        raise HTTPException(409, "release_in_progress")
+    draft = ConfigDraft(
+        site_id=site_id, node_ids=[_model_id(node) for node in nodes],
+        source_revision=site.config_revision,
+        diff={"routing_policy": site.routing_policy, "routing_revision": site.routing_revision},
+        validation={"valid": True, "errors": []}, risk_level="medium",
+        created_by=_actor(), expires_at=utcnow() + timedelta(hours=24),
+    )
+    await draft.insert()
+    release, _ = await _create_release_from_draft(
+        draft=draft, site=site, requested_node_ids=draft.node_ids,
+        expected_current_version=None,
+        idempotency_key=f"routing:{site_id}:{site.routing_revision}:{secrets.token_hex(8)}",
+        request_id=_request_id(request), actor=_actor(),
+    )
+    return await _release_out_enriched(release)
+
+
 @app.get("/api/v1/config/drafts", response_model=list[DraftOut])
 async def list_drafts(_: str = Depends(require_management)) -> list[DraftOut]:
     return [
@@ -3275,6 +3393,9 @@ async def _create_release_from_draft(
             proxy_selection=(
                 draft.diff.get("proxy_selection") if isinstance(draft.diff, dict) else None
             ),
+            routing_policy=(
+                draft.diff.get("routing_policy") if isinstance(draft.diff, dict) else None
+            ),
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -3293,6 +3414,7 @@ async def _create_release_from_draft(
         site_id=draft.site_id,
         node_ids=selected_ids,
         desired_release_id=_model_id(desired_first),
+        change_categories=release_change_categories(draft.diff),
         previous_release_id=desired_first.previous_release_id,
         task_id=task.task_id,
         status="applying",

@@ -448,6 +448,7 @@ class ReleaseOut(BaseModel):
     created_at: datetime
     subscription_name: str = ""
     subscription_source_id: str = ""
+    change_categories: list[str] = Field(default_factory=list)
 
 
 class TaskOut(BaseModel):

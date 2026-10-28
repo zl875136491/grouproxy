@@ -43,6 +43,22 @@ export type VerificationChallenge = {
   resend_available_at: string;
 };
 
+export type RoutingRule = {
+  kind: "domain" | "domain_suffix" | "ip_cidr";
+  pattern: string;
+  action: "direct" | "proxy" | "reject";
+};
+
+export type RoutingPolicy = {
+  mode: "rule";
+  private_direct: boolean;
+  cn_direct: boolean;
+  final: "proxy" | "direct";
+  rules: RoutingRule[];
+};
+
+export type RoutingPolicyResponse = { site_id: string; revision: number; policy: RoutingPolicy };
+
 export type Site = {
   id: string;
   slug: string;
@@ -336,6 +352,7 @@ export type Release = {
   created_at: string;
   subscription_name: string;
   subscription_source_id: string;
+  change_categories?: string[];
 };
 
 export type Task = {
@@ -854,6 +871,24 @@ export function getOverview() {
 
 export function getSites() {
   return request<Site[]>("/api/v1/sites");
+}
+
+export function getRoutingPolicy(siteId: string) {
+  return request<RoutingPolicyResponse>(`/api/v1/sites/${encodeURIComponent(siteId)}/routing`);
+}
+
+export function previewRoutingImport(content: string, mode: "append" | "replace", policy: RoutingPolicy) {
+  return request<{ policy: RoutingPolicy; source_rules: number; imported_rules: number }>(
+    "/api/v1/routing/import", jsonRequest("POST", { content, mode, policy }),
+  );
+}
+
+export function saveRoutingPolicy(siteId: string, expectedRevision: number, policy: RoutingPolicy) {
+  return request<RoutingPolicyResponse>(`/api/v1/sites/${encodeURIComponent(siteId)}/routing`, jsonRequest("PUT", { expected_revision: expectedRevision, policy }));
+}
+
+export function publishRoutingPolicy(siteId: string, expectedRevision: number) {
+  return request<Release>(`/api/v1/sites/${encodeURIComponent(siteId)}/routing/publish`, jsonRequest("POST", { expected_revision: expectedRevision }));
 }
 
 export function updateSiteName(siteId: string, name: string) {

@@ -58,6 +58,7 @@ const navigation: Array<{ label: string; items: NavigationItem[] }> = [
     items: [
       { href: "/access-control/groups", label: "Access groups", icon: Layers, matches: ["/access-control/groups", "/blacklist"] },
       { href: "/access-control/rules", label: "Access rules", icon: Ban },
+      { href: "/routing", label: "Routing rules", icon: Waypoints },
     ],
   },
   {

@@ -20,6 +20,7 @@ import { writeClipboard } from "../../lib/clipboard";
 import { usePreferences } from "../../lib/preferences";
 import { formatReleaseEventMessage, formatReleaseEventSource } from "../../lib/release-events";
 import { shortHash } from "../../lib/utils";
+import { releaseCategoryLabels } from "../../lib/release-categories";
 import { EmptyState, ErrorState, LoadingState } from "../../components/data-state";
 import { FilterSelect } from "../../components/list-filters";
 import { PageHeader } from "../../components/page-header";
@@ -31,6 +32,13 @@ const releaseStages = ["draft", "validated", "queued", "applying", "health_check
 type ReleaseFilter = "" | "applying" | "succeeded" | "failed";
 type RangeFilter = "24h" | "7d" | "30d" | "all";
 type ReleaseListView = "drafts" | "history";
+
+function ReleaseCategories({ release }: { release: Release }) {
+  const { t } = usePreferences();
+  return <span className="release-change-categories" aria-label={t("Change category")}>
+    {releaseCategoryLabels(release.change_categories).map((label) => <span className="release-change-category" key={label}>{t(label)}</span>)}
+  </span>;
+}
 
 function stagePosition(stage: string) {
   const index = releaseStages.indexOf(stage);
@@ -179,7 +187,7 @@ function ReleasesWorkspace() {
             {listView === "drafts" ? (
               openDrafts.length ? <div className="release-list release-scroll-list">{openDrafts.map((draft) => <div className={cnReleaseRow(selectedDraft?.id === draft.id)} key={draft.id}><button type="button" onClick={() => router.replace(`/releases?draft=${draft.id}`)}><span><strong>{t(siteNames.get(draft.site_id) || draft.site_id)}</strong><small>{t("Revision v{revision} · {date}", { revision: formatNumber(draft.source_revision), date: formatDate(draft.created_at) })}</small></span><StatusBadge status={draft.risk_level} /></button><Button size="sm" variant="primary" onClick={() => setPublishTarget(draft)}><Play size={14} />{t("Publish")}</Button></div>)}</div> : <EmptyState title="No publishable drafts" detail="Create a configuration draft from a site workspace." />
             ) : (
-              releaseItems.length ? <div className="release-list release-scroll-list">{releaseItems.map((release) => <button type="button" className={`release-history-row release-history-card ${selectedRelease?.release_id === release.release_id ? "release-row-selected" : ""}`} onClick={() => router.replace(`/releases?release=${release.release_id}`)} key={release.release_id}><span className="release-history-icon"><FileCheck2 size={17} /></span><span><strong>{releasePathLabel(release, nodeLabels, t)}</strong><small>{t(siteNames.get(release.site_id) || release.site_id)} · {formatDate(release.created_at)}</small></span><StatusBadge status={release.status} /></button>)}</div> : <EmptyState title="No releases recorded" />
+              releaseItems.length ? <div className="release-list release-scroll-list">{releaseItems.map((release) => <button type="button" className={`release-history-row release-history-card ${selectedRelease?.release_id === release.release_id ? "release-row-selected" : ""}`} onClick={() => router.replace(`/releases?release=${release.release_id}`)} key={release.release_id}><span className="release-history-icon"><FileCheck2 size={17} /></span><span><strong>{releasePathLabel(release, nodeLabels, t)}</strong><ReleaseCategories release={release} /><small>{t(siteNames.get(release.site_id) || release.site_id)} · {formatDate(release.created_at)}</small></span><StatusBadge status={release.status} /></button>)}</div> : <EmptyState title="No releases recorded" />
             )}
           </Panel>
         </div>
@@ -240,6 +248,7 @@ function ReleaseDetail({ release, detail, siteName, nodeLabels, loading, error }
         <div>
           <span className="panel-kicker">{t("RELEASE")}</span>
           <div className="release-title-line"><h2>{releasePathLabel(release, nodeLabels, t)}</h2><StatusBadge status={release.status === "succeeded" ? "published" : release.status} /></div>
+          <ReleaseCategories release={release} />
           <p>
             <span>{siteName}</span>
             <span>{t("Version flow")}: <strong>v{formatNumber(Math.max(0, (desiredVersion || 0) - 1))} → v{formatNumber(desiredVersion || 0)}</strong></span>

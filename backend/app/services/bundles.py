@@ -10,6 +10,7 @@ from ..models import (
     SiteSubscription,
     SubscriptionVersion,
 )
+from ..routing import RoutingPolicy
 from .cidr import effective_access_control, effective_blacklist
 from .crypto import sign_bundle
 from .subscriptions import subscription_outbound_tags
@@ -195,6 +196,7 @@ async def build_signed_bundle(
     release_id: str,
     settings: Settings,
     proxy_selection: dict[str, str] | None = None,
+    routing_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blacklist = await effective_blacklist(node.agent_id)
     access_control = await effective_access_control(node.agent_id)
@@ -233,6 +235,15 @@ async def build_signed_bundle(
             bundle["proxy_selection"] = {"group": group, "outbound": outbound}
             if group == "subscription" and outbound not in outbound_tags:
                 bundle["min_monitor_version"] = "0.7.0"
+    policy = routing_policy
+    if policy is not None:
+        validated = RoutingPolicy.model_validate(policy)
+        if subscription is None and (
+            validated.final == "proxy" or any(rule.action == "proxy" for rule in validated.rules)
+        ):
+            raise ValueError("routing_proxy_unavailable")
+        bundle["routing_policy"] = validated.model_dump()
+        bundle["min_monitor_version"] = "0.8.0"
     return sign_bundle(bundle, settings.bundle_hmac_secret)
 
 
@@ -244,20 +255,30 @@ async def create_desired_release(
     created_by: str,
     previous_release_id: str | None = None,
     proxy_selection: dict[str, str] | None = None,
+    routing_policy: dict[str, Any] | None = None,
 ) -> tuple[str, list[DesiredRelease]]:
     release_id = str(uuid4())
     previous = await latest_release(str(site.id))
     desired_version = max(site.config_revision, previous.desired_version if previous else 0) + 1
     site.config_revision = desired_version
-    await site.save()
+    await site.set({"config_revision": desired_version})
     releases: list[DesiredRelease] = []
     for node in nodes:
+        node_previous = await latest_release(str(site.id), node.agent_id)
+        inherited_policy = node_previous or previous
         bundle = await build_signed_bundle(
             site=site,
             node=node,
             desired_version=desired_version,
             release_id=release_id,
             settings=settings,
+            routing_policy=(
+                routing_policy
+                if routing_policy is not None
+                else inherited_policy.bundle.get("routing_policy")
+                if inherited_policy
+                else None
+            ),
             proxy_selection=(
                 proxy_selection
                 if proxy_selection and proxy_selection.get("node_id") in {None, node.agent_id}
