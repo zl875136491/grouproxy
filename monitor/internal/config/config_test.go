@@ -43,11 +43,17 @@ func TestLoadRestrictsIngressOverridesToExplicitTestModes(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("invalid ingress address was accepted")
 	}
-	if err := os.WriteFile(path, []byte(base+"listen_port: 18080\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(base+"listen_port: 1080\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
-		t.Fatal("non-standard production listener accepted")
+		t.Fatal("retired production listener accepted")
+	}
+	if err := os.WriteFile(path, []byte(base+"listen_port: 3128\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("new production listener rejected: %v", err)
 	}
 	if err := os.WriteFile(path, []byte(base+"listen_address_override: 127.0.0.1\nlisten_port_override: 18080\nfirewall_port_override: 18080\n"), 0o600); err != nil {
 		t.Fatal(err)

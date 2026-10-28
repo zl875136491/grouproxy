@@ -16,7 +16,7 @@ func testBundle() Bundle {
 		"min_monitor_version": "0.1.0",
 		"site_id":             "site-1",
 		"node_id":             "node-1",
-		"listen":              map[string]any{"http_port": 1080},
+		"listen":              map[string]any{"http_port": 3128},
 		"blacklist":           []any{},
 		"shutdown":            false,
 		"issued_at":           time.Now().UTC().Format(time.RFC3339),

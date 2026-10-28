@@ -295,13 +295,13 @@ func TestSelectedSubscriptionOutboundUsesControlPlaneChoice(t *testing.T) {
 	if got := selectedSubscriptionOutbound(value, []string{"edge-a", "edge-b"}); got != "edge-b" {
 		t.Fatalf("selected outbound = %q, want edge-b", got)
 	}
-	if got := selectedSubscriptionOutbound(map[string]any{}, []string{"edge-a", "edge-b"}); got != "edge-a" {
-		t.Fatalf("fallback outbound = %q, want edge-a", got)
+	if got := selectedSubscriptionOutbound(map[string]any{}, []string{"edge-a", "edge-b"}); got != "auto" {
+		t.Fatalf("fallback outbound = %q, want auto", got)
 	}
 	if got := selectedSubscriptionOutbound(map[string]any{
 		"proxy_selection": map[string]any{"group": "subscription", "outbound": "retired"},
-	}, []string{"edge-a", "edge-b"}); got != "edge-a" {
-		t.Fatalf("stale selection fallback = %q, want edge-a", got)
+	}, []string{"edge-a", "edge-b"}); got != "auto" {
+		t.Fatalf("stale selection fallback = %q, want auto", got)
 	}
 }
 

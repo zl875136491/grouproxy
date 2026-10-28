@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const ProxyListenPort = 1080
+const ProxyListenPort = 3128
 
 type Config struct {
 	BackendURL                 string `yaml:"backend_url"`
@@ -126,7 +126,7 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("firewall_mode must be dry-run or apply")
 	}
 	if cfg.ListenPort != ProxyListenPort {
-		return Config{}, errors.New("listen_port must be 1080")
+		return Config{}, errors.New("listen_port must be 3128")
 	}
 	if cfg.ListenAddressOverride != "" {
 		address := net.ParseIP(cfg.ListenAddressOverride)
@@ -148,7 +148,7 @@ func Load(path string) (Config, error) {
 			}
 		case "0.0.0.0":
 			// The sole public alternate listener is for the same-host test
-			// harness. A deployed node remains pinned to its normal :1080 ingress.
+			// harness. A deployed node remains pinned to its normal :3128 ingress.
 			if !cfg.permitsPublicTestIngress() {
 				return Config{}, errors.New("public ingress override requires explicit loopback test mode")
 			}

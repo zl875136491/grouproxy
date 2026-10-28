@@ -1,11 +1,11 @@
 # Grouproxy 五地部署（北京控制面）
 
-面向正式环境：在 **北京、天津、昆山、深圳、杭州** 各放一台节点，**只把 dashboard 和控制面放在北京**。员工流量只走本节点 `:1080` 的 HTTP CONNECT，不经过控制面。当前不启用 HTTPS。
+面向正式环境：在 **北京、天津、昆山、深圳、杭州** 各放一台节点，**只把 dashboard 和控制面放在北京**。节点 HTTP CONNECT 端口计划调整为 `3128`；本次变更先在测试环境验证，生产节点仍保持当前配置，待单独发布。
 
 | 地点 | 跑什么 | 对外端口 |
 |---|---|---|
-| 北京 | MongoDB + 控制面 backend `:8000` + dashboard `:80` + monitor + sing-box | `:80` 控制台，`:1080` 代理，`:8000` 给各地 monitor（不要对公网开放） |
-| 天津 / 昆山 / 深圳 / 杭州 | 只跑 monitor + 其拉起的 sing-box | `:1080` 代理 |
+| 北京 | MongoDB + 控制面 backend `:8000` + dashboard `:80` + monitor + sing-box | `:80` 控制台，`:3128` 代理，`:8000` 给各地 monitor（不要对公网开放） |
+| 天津 / 昆山 / 深圳 / 杭州 | 只跑 monitor + 其拉起的 sing-box | `:3128` 代理 |
 
 不要在北京以外的机器上安装 dashboard，也不要启用仓库里的 `deploy/sing-box.service`。monitor 自己拉起 `/opt/grouproxy/bin/sing-box`。如果那台机器上已经有别的产品的 `sing-box.service`（例如 QQ 音乐），**禁止覆盖** `/etc/systemd/system/sing-box.service`。
 
@@ -13,14 +13,14 @@
 
 ## 网络与 DNS
 
-员工脚本连的是 `http://proxy.1oa.com.cn:1080`。DNS 不区分端口，所以要拆开：
+员工脚本连的是 `http://proxy.1oa.com.cn:3128`。DNS 不区分端口，所以要拆开：
 
-1. **各地办公网 DNS**（或 hosts）：把 `proxy.1oa.com.cn` 解析到 **本节点 IP**，员工代理走本地 `:1080`。
+1. **各地办公网 DNS**（或 hosts）：把 `proxy.1oa.com.cn` 解析到 **本节点 IP**，员工代理走本地 `:3128`。
 2. **控制台**：浏览器打开 `http://proxy.1oa.com.cn/`（`:80`）必须打到 **北京**。北京以外节点不要在 `:80` 上跑 Grouproxy dashboard。外地管理员打开控制台时，使用指向北京的解析，或直接用北京 IP。
 3. **各地 monitor → 北京 `:8000`**：四地到北京 TCP `8000` 必须通；MongoDB `:27017` 只绑北京本机。
 4. Clash API 只能绑 loopback（默认 `127.0.0.1:9090`）。本机已被占用时改成 `127.0.0.1:19091` 这类空闲端口，不要监听到 `0.0.0.0`。
 
-空黑名单必须 fail-open（nft 对 `:1080` 放行）。唯一策略是按节点下发的黑名单：IP / CIDR / 域名，来源或目标。
+空黑名单必须 fail-open（nft 对 `:3128` 放行）。唯一策略是按节点下发的黑名单：IP / CIDR / 域名，来源或目标。
 
 根管理员固定为 **zhangle**。其他人可在「角色」里设为管理员，权限与根管理员相同。不能再产生第二个 root，也不能停用或降级 zhangle。
 
@@ -208,7 +208,7 @@ sudo systemctl enable --now grouproxy-monitor.service
 ```bash
 curl -fsS http://127.0.0.1/healthz
 curl -fsS http://127.0.0.1:8000/readyz
-ss -ltnp | grep -E ':80 |:8000 |:1080 '
+ss -ltnp | grep -E ':80 |:8000 |:3128 '
 ```
 
 各地：
@@ -217,8 +217,8 @@ ss -ltnp | grep -E ':80 |:8000 |:1080 '
 systemctl is-active grouproxy-monitor.service
 # 必须 inactive 或不存在：
 systemctl is-active grouproxy-dashboard.service || true
-ss -ltnp | grep 1080
-curl -sS --max-time 8 -x http://127.0.0.1:1080 -o /dev/null -w '%{http_code}\n' http://example.com/
+ss -ltnp | grep 3128
+curl -sS --max-time 8 -x http://127.0.0.1:3128 -o /dev/null -w '%{http_code}\n' http://example.com/
 sudo nft list table inet grouproxy
 ```
 
@@ -245,7 +245,7 @@ sudo systemctl restart grouproxy-monitor.service
 
 生产环境资产由控制面按 `GROUPROXY_ENVIRONMENT=production` 选择：
 
-- Linux：`GET /api/v1/access/linux-setup.sh`（无参数开关，目标 `proxy.1oa.com.cn:1080`）
+- Linux：`GET /api/v1/access/linux-setup.sh`（无参数开关，目标 `proxy.1oa.com.cn:3128`）
 - Windows：`GET /api/v1/access/windows-setup.ps1`
 - macOS：接入页上的 Shortcut
 
@@ -258,4 +258,4 @@ GROUPROXY_TEST_MONGODB_URL='mongodb://<user>:<password>@127.0.0.1:27017/?authSou
   GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 ```
 
-`testenv/` 被 Git 忽略。同源双进程仿真里第二节点会用 `:18081`；真实第二台机器仍用 `:1080`。当前测试机约定是 111 跑 dashboard、110 只跑 monitor。
+`testenv/` 被 Git 忽略。同源双进程仿真里第二节点会用 `:18081`；真实第二台机器仍用 `:3128`。当前测试机约定是 111 跑 dashboard、110 只跑 monitor。

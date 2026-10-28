@@ -7,7 +7,7 @@ token_file: "/opt/grouproxy/etc/node.token"
 state_dir: "/opt/grouproxy/var"
 singbox_bin: "/opt/grouproxy/bin/sing-box"
 singbox_config: "/opt/grouproxy/var/sing-box.json"
-listen_port: 1080
+listen_port: 3128
 firewall_mode: apply
 poll_interval_seconds: 15
 heartbeat_interval_seconds: 15

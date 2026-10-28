@@ -20,9 +20,9 @@ TEST_CSRF_ORIGIN="${GROUPROXY_TEST_CSRF_ORIGIN:-http://${GROUPROXY_PROXY_ACCESS_
 curl() { command curl -H "Origin: ${TEST_CSRF_ORIGIN}" "$@"; }
 
 # The data plane is network-ACL-only. Its connection contract is fixed at
-# port 1080 and has no HTTP Basic credential endpoint to exercise.
+# port 3128 and has no HTTP Basic credential endpoint to exercise.
 access_config="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/config")"
-jq -e '.protocol == "http-connect" and (.port == 1080)' <<<"$access_config" >/dev/null
+jq -e '.protocol == "http-connect" and (.port == 3128)' <<<"$access_config" >/dev/null
 
 backup_response="$(curl -fsS -X POST "$BACKEND_URL/api/v1/backups" \
   -H "$AUTH_HEADER" -H 'Content-Type: application/json' \

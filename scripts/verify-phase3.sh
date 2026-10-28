@@ -72,7 +72,7 @@ curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/audit/export?export_format=ndjs
 access_config="$(curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/config")"
 jq -e '(.environment == "test" or .environment == "production") and
   (.macos_shortcut_url | startswith("/shortcuts/grouproxy-macos-")) and
-  .protocol == "http-connect" and (.port == 1080)' \
+  .protocol == "http-connect" and (.port == 3128)' \
   <<<"$access_config" >/dev/null
 curl -fsS -H "$AUTH_HEADER" "$BACKEND_URL/api/v1/access/proxy.pac" \
   | grep -q 'return "PROXY '

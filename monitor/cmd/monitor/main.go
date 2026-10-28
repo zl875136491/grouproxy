@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	monitorVersion                = "0.6.0"
+	monitorVersion                = "0.7.0"
 	proxyDelayTargetURL           = "https://www.gstatic.com/generate_204"
 	proxyDelayTimeoutMilliseconds = 5_000
 	proxyDelayConcurrency         = 6
@@ -1785,6 +1785,7 @@ func (a *agent) ensureLastGoodConfig(lastGood map[string]any, port int) (string,
 	if data, err := os.ReadFile(path); err == nil {
 		var configValue map[string]any
 		if json.Unmarshal(data, &configValue) == nil {
+			ensureSubscriptionAutoGroup(configValue, lastGood)
 			ensureRoutingRules(configValue, a.cfg.StateDir)
 			ensureSourceBlacklistRules(configValue, sourceRules)
 			applySingboxIngress(configValue, port, boolValue(lastGood["shutdown"]), a.cfg.ListenAddressOverride)
@@ -2707,10 +2708,11 @@ func renderSingbox(
 			outbounds = append(outbounds, entry)
 		}
 		if len(tags) > 0 {
-			outbounds = append(outbounds, map[string]any{
+			autoTag := subscriptionAutoTag(tags)
+			outbounds = append(outbounds, subscriptionAutoGroup(autoTag, tags), map[string]any{
 				"type":      "selector",
 				"tag":       "subscription",
-				"outbounds": tags,
+				"outbounds": append([]string{autoTag}, tags...),
 				"default":   selectedSubscriptionOutbound(value, tags),
 			})
 			finalOutbound = "subscription"
@@ -2731,6 +2733,66 @@ func renderSingbox(
 			},
 		},
 	}
+}
+
+func subscriptionAutoTag(tags []string) string {
+	used := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		used[tag] = true
+	}
+	tag := "auto"
+	for suffix := 1; used[tag]; suffix++ {
+		tag = fmt.Sprintf("auto-%d", suffix)
+	}
+	return tag
+}
+
+func subscriptionAutoGroup(tag string, tags []string) map[string]any {
+	return map[string]any{
+		"type": "urltest", "tag": tag, "outbounds": tags,
+		"url": "https://www.gstatic.com/generate_204", "interval": "1m",
+		"tolerance": 50, "idle_timeout": "30m", "interrupt_exist_connections": false,
+	}
+}
+
+func ensureSubscriptionAutoGroup(configValue, value map[string]any) {
+	outbounds, _ := configValue["outbounds"].([]any)
+	var selector map[string]any
+	byTag := make(map[string]map[string]any)
+	for _, raw := range outbounds {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		byTag[stringValue(entry["tag"])] = entry
+		if entry["tag"] == "subscription" && entry["type"] == "selector" {
+			selector = entry
+		}
+	}
+	if selector == nil {
+		return
+	}
+	tags := make([]string, 0)
+	for _, tag := range stringSlice(selector["outbounds"]) {
+		entry := byTag[tag]
+		if entry != nil && isDelayProbeable(entry) {
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) == 0 {
+		return
+	}
+	autoTag := subscriptionAutoTag(tags)
+	group := subscriptionAutoGroup(autoTag, tags)
+	if existing := byTag[autoTag]; existing != nil && existing["type"] == "urltest" {
+		for key, field := range group {
+			existing[key] = field
+		}
+	} else {
+		configValue["outbounds"] = append(outbounds, group)
+	}
+	selector["outbounds"] = append([]string{autoTag}, tags...)
+	selector["default"] = selectedSubscriptionOutbound(value, tags)
 }
 
 func subscriptionOutboundTags(outbounds []any) []string {
@@ -2767,7 +2829,7 @@ func validateProxySelection(value map[string]any, tags []string) error {
 		return errors.New("proxy_group_not_selectable")
 	}
 	wanted := strings.TrimSpace(stringValue(selection["outbound"]))
-	if wanted == "" {
+	if wanted == "" || (len(tags) > 0 && wanted == subscriptionAutoTag(tags)) {
 		return nil
 	}
 	for _, tag := range tags {
@@ -2778,7 +2840,7 @@ func validateProxySelection(value map[string]any, tags []string) error {
 	// A selection is a preference for the subscription version that was
 	// current when the draft was created.  Replacing that version can remove
 	// the selected tag, so an old preference must not reject an otherwise valid
-	// bundle.  selectedSubscriptionOutbound will choose the first current tag
+	// bundle.  selectedSubscriptionOutbound will choose the automatic group
 	// in this case.
 	return nil
 }
@@ -2792,18 +2854,21 @@ func selectedSubscriptionOutbound(value map[string]any, tags []string) string {
 	}
 	raw, ok := value["proxy_selection"].(map[string]any)
 	if !ok {
-		return tags[0]
+		return subscriptionAutoTag(tags)
 	}
 	if strings.TrimSpace(stringValue(raw["group"])) != "subscription" {
-		return tags[0]
+		return subscriptionAutoTag(tags)
 	}
 	wanted := strings.TrimSpace(stringValue(raw["outbound"]))
+	if wanted == subscriptionAutoTag(tags) {
+		return wanted
+	}
 	for _, tag := range tags {
 		if tag == wanted {
 			return tag
 		}
 	}
-	return tags[0]
+	return subscriptionAutoTag(tags)
 }
 
 func singboxVersion(binary string) string {

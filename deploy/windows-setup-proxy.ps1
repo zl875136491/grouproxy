@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 # Run this file without parameters to toggle the current user's system proxy.
 $ProxyHost = "proxy.1oa.com.cn"
-$ProxyPort = 1080
+$ProxyPort = 3128
 $RegistryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
 New-Item -Path $RegistryPath -Force | Out-Null

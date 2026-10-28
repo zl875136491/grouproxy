@@ -1,5 +1,27 @@
 # Grouproxy Monitor
 
+## Automatic outbound selection (0.7.0)
+
+The generated `subscription` selector now offers an `auto` URL-test group plus
+every individual subscription outbound. New bundles without a manual preference
+and stale preferences default to `auto`; valid explicit manual choices remain
+unchanged. The automatic tag becomes `auto-1`, `auto-2`, etc. when subscription
+outbound names collide. Empty subscriptions still use the direct outbound.
+
+The group probes `https://www.gstatic.com/generate_204` every minute while
+active, uses a 50 ms tolerance and a 30 minute idle timeout, and does not interrupt
+existing connections when switching. It selects by probe latency, not round-robin,
+and a successful probe does not guarantee that every destination will work.
+
+Cached last-good configurations are upgraded locally on restart without fetching
+the subscription again. Deploy monitor 0.7.0 before enabling automatic selections
+in the backend; explicit automatic-selection bundles require monitor 0.7.0.
+Rebuild the monitor binary and `dist/SHA256SUMS` with `make dist`. The bundled
+sing-box binary does not need to change. The console's existing subscription
+cards show the new `auto` / URL-test option alongside manual endpoints.
+
+## Runtime
+
 `grouproxy-monitor` is the only component allowed to change node-local
 sing-box and proxy-port firewall state. It pulls a Desired Bundle, verifies
 version, expiry, hash, HMAC, and minimum monitor version, then runs sing-box
@@ -23,7 +45,7 @@ DNS-independent rollback. Retired allowlist, destination-block, and source
 alias fields are rejected for new bundles and removed from historical local
 state before recovery.
 
-Deployed public HTTP inbounds are fixed to port `1080` and have no application
+Deployed public HTTP inbounds are fixed to port `3128` and have no application
 credential list. The same-host test harness may use one explicit alternate
 public listener only when `test_ingress_override: true`, the control-plane URL
 is loopback HTTP, and firewall mode is `dry-run`; this lets its simulated nuc

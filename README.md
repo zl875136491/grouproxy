@@ -16,13 +16,13 @@ Grouproxy 是一个面向多地域节点的代理运维控制平面。控制面�
 | Backend | FastAPI / Python 3.12 | 控制平面 API、MongoDB 文档、签名 Bundle、后台任务和认证 | `:8000` |
 | MongoDB | MongoDB | 持久化站点、节点、版本、发布、任务、遥测、审计和备份记录 | 通常 `:27017` |
 | Monitor | Go | 拉取并验证 Bundle，驱动 sing-box，应用 nftables，发送心跳和遥测 | 无独立公网 API |
-| sing-box | 固定 Linux amd64 二进制 | 承载每个地点的 HTTP CONNECT 代理数据面 | `:1080` |
+| sing-box | 固定 Linux amd64 二进制 | 承载每个地点的 HTTP CONNECT 代理数据面 | `:3128` |
 
 生产部署是“五地五节点、北京控制面”：
 
 ```text
 员工电脑
-   │ 直接连接本地地点的 proxy.1oa.com.cn:1080
+   │ 直接连接本地地点的 proxy.1oa.com.cn:3128
    ▼
 本地节点 monitor ── 管理 sing-box + nftables ──► 上游代理节点
    │
@@ -36,7 +36,7 @@ MongoDB
 
 ### 当前网络契约
 
-- 对外代理协议是 HTTP CONNECT，固定端口 `1080`。
+- 对外代理协议是 HTTP CONNECT，固定端口 `3128`。
 - 代理没有 HTTP Basic 认证，也不安装代理凭据或 CA；访问控制默认是放行，明确配置的黑名单才会拒绝请求。
 - 黑名单按节点保存，可按来源或目标匹配 `IP`、`CIDR`、域名。创建、删除规则会为受影响节点自动生成发布。
 - Dashboard 由 Next.js 直接监听 `80`。Next.js 将 `/api/*`、`/healthz` 和 `/readyz` 重写到 Backend，因此生产环境可让 Backend 只服务于内网或本机。
@@ -96,19 +96,19 @@ GROUPROXY_TESTENV_RESET=1 ./scripts/testenv-up.sh
 | --- | --- | --- |
 | Backend | `127.0.0.1:8000` | 测试脚本使用；后端自身不暴露到公网 |
 | Dashboard | `0.0.0.0:3000` | 同机测试控制台 |
-| `codedev` 节点 | `0.0.0.0:1080` | 与生产节点相同的公开代理端口 |
-| `nuc` 节点 | `0.0.0.0:18081` | 同机第二节点的唯一测试端口 |
+| `codedev` 节点 | `0.0.0.0:3128` | 测试主代理入口 |
+| `nuc` 节点 | `0.0.0.0:18081` | 同机第二节点的模拟端口；实际部署节点使用 `3128` |
 | Clash API | `127.0.0.1:19090/19091` | 仅供对应 monitor 使用 |
 
 可访问：
 
 ```text
 控制台：http://test-proxy.1oa.com.cn:3000/
-codedev 代理：http://test-proxy.1oa.com.cn:1080
+codedev 代理：http://test-proxy.1oa.com.cn:3128
 nuc 代理：http://test-proxy.1oa.com.cn:18081
 ```
 
-测试机需要将 `test-proxy.1oa.com.cn` 临时解析到测试机 IP，或者直接使用 `127.0.0.1:3000` 打开控制台。第二节点的 `:18081` 仅为同机模拟；真实的第二台服务器仍使用自己的 `:1080`。
+测试机需要将 `test-proxy.1oa.com.cn` 临时解析到测试机 IP，或者直接使用 `127.0.0.1:3000` 打开控制台。测试主代理入口是 `:3128`；第二节点的 `:18081` 仅为同机模拟。所有实际部署节点使用 `:3128`。
 
 ### 使用隔离的验证码 stub
 
@@ -240,7 +240,7 @@ Monitor 心跳/轮询 desired
 
 ### Desired Bundle 的内容原则
 
-- 固定 `listen.http_port: 1080`，生产节点不接受任意端口。
+- 固定 `listen.http_port: 3128`，生产节点不接受任意端口。
 - 只携带当前节点适用的 `blacklist` 条目，不携带其他节点规则。
 - 选中订阅较小时可内嵌内容；超过 `GROUPROXY_SUBSCRIPTION_INLINE_MAX_BYTES` 时只携带 hash 和受保护的 Blob 引用。
 - 订阅 Blob 只有在当前节点的 Bundle 明确引用对应 hash 时才能读取，节点 token 不能用来遍历整个订阅库。
@@ -286,11 +286,11 @@ Monitor 周期性发送：
 
 | 地点 | 运行组件 | 对外或跨机端口 |
 | --- | --- | --- |
-| 北京 | MongoDB、Backend、Dashboard、monitor、sing-box | `80` 控制台，`1080` 代理，`8000` 仅给节点 monitor |
-| 天津 | monitor、sing-box | `1080` 代理 |
-| 昆山 | monitor、sing-box | `1080` 代理 |
-| 深圳 | monitor、sing-box | `1080` 代理 |
-| 杭州 | monitor、sing-box | `1080` 代理 |
+| 北京 | MongoDB、Backend、Dashboard、monitor、sing-box | `80` 控制台，`3128` 代理，`8000` 仅给节点 monitor |
+| 天津 | monitor、sing-box | `3128` 代理 |
+| 昆山 | monitor、sing-box | `3128` 代理 |
+| 深圳 | monitor、sing-box | `3128` 代理 |
+| 杭州 | monitor、sing-box | `3128` 代理 |
 
 北京以外不要安装 Dashboard。MongoDB `27017` 只绑定北京本机；Backend `8000` 仅允许五个节点 IP 访问。每台机器的 Clash API 必须是 loopback，例如 `127.0.0.1:9090`，端口冲突时使用其他 loopback 端口，绝不能监听 `0.0.0.0`。
 
@@ -299,7 +299,7 @@ Monitor 周期性发送：
 代理域名是 `proxy.1oa.com.cn`，员工脚本使用：
 
 ```text
-http://proxy.1oa.com.cn:1080
+http://proxy.1oa.com.cn:3128
 ```
 
 DNS 不按端口区分，因此需要拆分解析策略：
@@ -307,7 +307,7 @@ DNS 不按端口区分，因此需要拆分解析策略：
 1. 各地办公网将 `proxy.1oa.com.cn` 解析到本地节点 IP，使员工流量留在本地。
 2. 管理员访问控制台时，`proxy.1oa.com.cn` 的 `:80` 必须指向北京；也可以使用北京 IP 或单独的管理解析名。
 3. 天津、昆山、深圳、杭州到北京的 TCP `8000` 必须互通，且只允许这些节点来源。
-4. `:1080` 应由节点防火墙控制来源；无黑名单时必须 fail-open，不能因为空策略而意外封死代理。
+4. `:3128` 应由节点防火墙控制来源；无黑名单时必须 fail-open，不能因为空策略而意外封死代理。
 
 ### 1. 准备北京主机和目录
 
@@ -488,7 +488,7 @@ token_file: "/opt/grouproxy/etc/node.token"
 state_dir: "/opt/grouproxy/var"
 singbox_bin: "/opt/grouproxy/bin/sing-box"
 singbox_config: "/opt/grouproxy/var/sing-box.json"
-listen_port: 1080
+listen_port: 3128
 firewall_mode: apply
 run_singbox: true
 hmac_secret: "<与 Backend 完全相同的值>"
@@ -533,7 +533,7 @@ token_file: "/opt/grouproxy/etc/node.token"
 state_dir: "/opt/grouproxy/var"
 singbox_bin: "/opt/grouproxy/bin/sing-box"
 singbox_config: "/opt/grouproxy/var/sing-box.json"
-listen_port: 1080
+listen_port: 3128
 firewall_mode: apply
 run_singbox: true
 hmac_secret: "<与北京 Backend 相同的值>"
@@ -556,15 +556,15 @@ sudo systemctl enable --now grouproxy-monitor.service
 ```bash
 curl -fsS http://127.0.0.1/healthz
 curl -fsS http://127.0.0.1:8000/readyz
-ss -ltnp | grep -E ':80 |:8000 |:1080 '
+ss -ltnp | grep -E ':80 |:8000 |:3128 '
 ```
 
 每个节点：
 
 ```bash
 systemctl is-active grouproxy-monitor.service
-ss -ltnp | grep ':1080 '
-curl -sS --max-time 8 -x http://127.0.0.1:1080 \
+ss -ltnp | grep ':3128 '
+curl -sS --max-time 8 -x http://127.0.0.1:3128 \
   -o /dev/null -w '%{http_code}\n' http://example.com/
 sudo nft list table inet grouproxy
 ```
@@ -610,7 +610,7 @@ sudo nft list table inet grouproxy
 | Linux | `/api/v1/access/linux-setup.sh` | 当前用户开关，支持 GNOME/KDE 和 shell/environment 文件 |
 | Windows | `/api/v1/access/windows-setup.ps1` | 当前用户 Windows 代理开关 |
 | macOS | 接入页中的 `.shortcut` | 下载环境对应的 macOS Shortcut |
-| 通用 PAC | `/api/v1/access/proxy.pac` | 返回 HTTP CONNECT `:1080` 的 PAC |
+| 通用 PAC | `/api/v1/access/proxy.pac` | 返回 HTTP CONNECT `:3128` 的 PAC |
 | 配置摘要 | `/api/v1/access/config` | 返回环境、域名、协议和端口，不返回凭据 |
 
 Linux 和 Windows 脚本都是无参数 toggle：运行一次开启，再运行一次关闭。不要把它们当成可任意传参的安装器，也不要修改仓库脚本来注入账号、密码或证书。Backend 必须和 `deploy/` 保持兄弟目录关系，才能正确读取这些资产。
@@ -678,7 +678,7 @@ Compose 不包含 monitor 和 sing-box。节点仍应使用 systemd 和 `deploy/
 | `token_file` | 节点 token 文件，建议权限 `0600` |
 | `state_dir` | last-good、运行配置、日志、版本和遥测 spool |
 | `singbox_bin` / `singbox_config` | sing-box 二进制和实际配置路径 |
-| `listen_port` | 必须为 `1080`；备用端口仅允许显式同机测试覆盖 |
+| `listen_port` | 必须为 `3128`；备用端口仅允许显式同机测试覆盖 |
 | `firewall_mode` | 生产用 `apply`，开发可用 `dry-run` |
 | `hmac_secret` | 必须与 Backend 的 Bundle HMAC secret 相同 |
 | `run_singbox` | 正式应为 `true`，由 monitor 管理子进程 |
@@ -699,7 +699,7 @@ Compose 不包含 monitor 和 sing-box。节点仍应使用 systemd 和 `deploy/
 
 ### 节点 `in_sync` 但代理不可用
 
-检查 `sing-box` 进程、`1080` 监听、loopback Clash API、nftables 表和 `last-good`。空黑名单应允许流量；如果策略为空仍被拒绝，优先检查是否残留旧 nftables 表或错误启用了其他产品的 `sing-box.service`。
+检查 `sing-box` 进程、`3128` 监听、loopback Clash API、nftables 表和 `last-good`。空黑名单应允许流量；如果策略为空仍被拒绝，优先检查是否残留旧 nftables 表或错误启用了其他产品的 `sing-box.service`。
 
 ### 发布失败或自动回滚
 
@@ -709,7 +709,7 @@ Compose 不包含 monitor 和 sing-box。节点仍应使用 systemd 和 `deploy/
 
 - `80`：只在北京运行 Dashboard。
 - `8000`：Backend 使用，限制为节点可达。
-- `1080`：所有真实节点的公开代理端口，不能随意改动。
+- `3128`：所有真实节点的公开代理端口，不能随意改动。
 - Clash API：只能改成其他 loopback 端口，不能改为公网监听。
 - `18081`：只属于同机测试 harness，不可作为正式第二节点协议。
 

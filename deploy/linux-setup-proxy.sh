@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Run this file without arguments to toggle the current user's proxy state.
 PROXY_HOST="${GROUPROXY_PROXY_HOST:-proxy.1oa.com.cn}"
-PROXY_PORT="${GROUPROXY_PROXY_PORT:-1080}"
+PROXY_PORT="${GROUPROXY_PROXY_PORT:-3128}"
 NO_PROXY_VALUE="${GROUPROXY_NO_PROXY:-localhost,127.0.0.1,::1,.corp.internal,${PROXY_HOST},10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
 
 if (( $# != 0 )); then

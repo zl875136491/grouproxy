@@ -10,8 +10,7 @@ from ..models import (
     SiteSubscription,
     SubscriptionVersion,
 )
-from .cidr import effective_blacklist
-from .cidr import effective_access_control
+from .cidr import effective_access_control, effective_blacklist
 from .crypto import sign_bundle
 from .subscriptions import subscription_outbound_tags
 
@@ -131,6 +130,17 @@ async def _bundle_subscription_tags(bundle: dict[str, Any]) -> set[str]:
     return subscription_outbound_tags(raw, str(subscription.get("format", "")))
 
 
+def subscription_selection_tags(tags: set[str]) -> set[str]:
+    if not tags:
+        return set()
+    auto_tag = "auto"
+    suffix = 1
+    while auto_tag in tags:
+        auto_tag = f"auto-{suffix}"
+        suffix += 1
+    return tags | {auto_tag}
+
+
 async def repair_stale_proxy_selection(
     desired: DesiredRelease,
     settings: Settings,
@@ -139,7 +149,7 @@ async def repair_stale_proxy_selection(
 
     A subscription publication can replace dozens of old outbounds while a
     queued release still carries a selection from the previous version.  The
-    monitor must be able to apply that release using its normal first-outbound
+    monitor must be able to apply that release using its automatic-outbound
     fallback, including when the bundle was created by an older backend.
     """
 
@@ -156,8 +166,12 @@ async def repair_stale_proxy_selection(
         return True
     group = str(selection.get("group", "")).strip()
     outbound = str(selection.get("outbound", "")).strip()
-    tags = await _bundle_subscription_tags(repaired)
+    outbound_tags = await _bundle_subscription_tags(repaired)
+    tags = subscription_selection_tags(outbound_tags)
     if group == "subscription" and outbound and outbound in tags:
+        if outbound not in outbound_tags and repaired.get("min_monitor_version") == "0.6.0":
+            repaired["min_monitor_version"] = "0.7.0"
+            changed = True
         if not changed:
             return False
     else:
@@ -186,9 +200,10 @@ async def build_signed_bundle(
     access_control = await effective_access_control(node.agent_id)
     now = datetime.now(timezone.utc)
     subscription = await selected_subscription_bundle(site_id=str(site.id), settings=settings)
-    selected_tags = (
+    outbound_tags = (
         await _selected_subscription_tags(str(site.id)) if subscription is not None else set()
     )
+    selected_tags = subscription_selection_tags(outbound_tags)
     bundle: dict[str, Any] = {
         "schema_version": 1,
         "release_id": release_id,
@@ -216,6 +231,8 @@ async def build_signed_bundle(
         # pre-0.4 monitors use their normal first-outbound fallback.
         if group != "subscription" or outbound in selected_tags:
             bundle["proxy_selection"] = {"group": group, "outbound": outbound}
+            if group == "subscription" and outbound not in outbound_tags:
+                bundle["min_monitor_version"] = "0.7.0"
     return sign_bundle(bundle, settings.bundle_hmac_secret)
 
 

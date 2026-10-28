@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROXY_LISTEN_PORT = 1080
+PROXY_LISTEN_PORT = 3128
 ROOT_ITCODE = "zhangle"
 MANAGEMENT_ROLES = frozenset({"root", "admin"})
 DEFAULT_CONNECTION_HISTORY_RETENTION_DAYS = 90

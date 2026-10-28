@@ -48,7 +48,7 @@ if [[ "${GROUPROXY_TESTENV_RESET:-0}" == "1" ]]; then
   if [[ -x "$ROOT_DIR/scripts/testenv-down.sh" && -d "$TESTENV_DIR" ]]; then
     GROUPROXY_TESTENV_DIR="$TESTENV_DIR" "$ROOT_DIR/scripts/testenv-down.sh" >/dev/null 2>&1 || true
   fi
-  for port in "$BACKEND_PORT" "$FRONTEND_PORT" 1080 18081 19090 19091; do
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT" 3128 18081 19090 19091; do
     if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
       printf 'Test port %s is still in use after cleanup; choose another port or stop its owner.\n' "$port" >&2
       exit 1
@@ -224,7 +224,7 @@ bootstrap_node() {
   local listen_address="${7:-}" ingress_overrides=""
   local sites site_id nodes node_id response draft draft_id release
 
-  if [[ "$port" != "1080" ]]; then
+  if [[ "$port" != "3128" ]]; then
     [[ "$listen_address" == "127.0.0.1" || "$listen_address" == "0.0.0.0" ]] || {
       printf 'Alternate test listeners must bind either 127.0.0.1 or 0.0.0.0.\n' >&2
       exit 2
@@ -233,11 +233,11 @@ bootstrap_node() {
     if [[ "$listen_address" == "0.0.0.0" ]]; then
       ingress_overrides+=$'\ntest_ingress_override: true'
     fi
-  elif [[ "$firewall_port" != "1080" ]]; then
-    printf 'The public test proxy must use TCP 1080 for both listener and firewall.\n' >&2
+  elif [[ "$firewall_port" != "3128" ]]; then
+    printf 'The public test proxy must use TCP 3128 for both listener and firewall.\n' >&2
     exit 2
   elif [[ -n "$listen_address" ]]; then
-    printf 'The primary test proxy uses its default 0.0.0.0:1080 listener.\n' >&2
+    printf 'The primary test proxy uses its default 0.0.0.0:3128 listener.\n' >&2
     exit 2
   fi
   sites="$(curl -fsS -H "Authorization: Bearer ${GROUPROXY_MANAGEMENT_TOKEN}" "$BACKEND_URL/api/v1/sites")"
@@ -276,7 +276,7 @@ token_file: "$TESTENV_DIR/${name}.token"
 state_dir: "$state_dir/state"
 singbox_bin: "$ROOT_DIR/singbox/sing-box"
 singbox_config: "$state_dir/state/sing-box.json"
-listen_port: 1080
+listen_port: 3128
 $ingress_overrides
 firewall_mode: $firewall_mode
 poll_interval_seconds: 2
@@ -303,11 +303,11 @@ if [[ ! -x "$ROOT_DIR/monitor/dist/grouproxy-monitor-linux-amd64" ]] || \
   (cd "$ROOT_DIR/monitor" && make dist)
 fi
 
-# The primary node matches the deployed :1080 listener. The same-host nuc
+# The primary node matches the deployed :3128 listener. The same-host nuc
 # simulation uses a distinct, network-visible test port. Both use the signed
 # allow-all/source-blacklist policy in sing-box; nftables stays dry-run so this
 # harness never rewrites the developer host firewall.
-bootstrap_node north codedev 1080 19090 1080 dry-run ""
+bootstrap_node north codedev 3128 19090 3128 dry-run ""
 bootstrap_node east nuc 18081 19091 18081 dry-run 0.0.0.0
 
 if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]] && ! nc -z 127.0.0.1 "$FRONTEND_PORT" >/dev/null 2>&1; then
@@ -329,6 +329,6 @@ if [[ "${GROUPROXY_START_FRONTEND:-1}" == "1" ]]; then
 fi
 
 printf 'Test environment is starting. Backend: %s  Dashboard: http://%s:%s/\n' "$BACKEND_URL" "$PROXY_ACCESS_FQDN" "$FRONTEND_PORT"
-printf 'Proxy listeners: codedev 0.0.0.0:1080 (%s:1080), nuc 0.0.0.0:18081 (%s:18081)\n' "$PROXY_ACCESS_FQDN" "$PROXY_ACCESS_FQDN"
+printf 'Proxy listeners: codedev 0.0.0.0:3128 (%s:3128), nuc 0.0.0.0:18081 (%s:18081)\n' "$PROXY_ACCESS_FQDN" "$PROXY_ACCESS_FQDN"
 printf 'Shared MongoDB database: %s\n' "$GROUPROXY_MONGODB_DATABASE"
 printf 'Run scripts/verify-phase1.sh after monitor ACKs arrive.\n'

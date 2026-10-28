@@ -20,6 +20,68 @@ def _request() -> Request:
     return Request({"type": "http", "method": "PATCH", "path": "/api/v1/nodes/a", "headers": []})
 
 
+@pytest.mark.parametrize(
+    "tags, expected",
+    [
+        (set(), set()),
+        ({"edge-a"}, {"edge-a", "auto"}),
+        ({"auto", "auto-1"}, {"auto", "auto-1", "auto-2"}),
+    ],
+)
+def test_subscription_selection_tags_include_collision_safe_auto(
+    tags: set[str], expected: set[str]
+) -> None:
+    assert bundles.subscription_selection_tags(tags) == expected
+
+
+@pytest.mark.asyncio
+async def test_repair_preserves_automatic_selection() -> None:
+    async def unexpected_save() -> None:
+        pytest.fail("valid automatic selection was rewritten")
+
+    desired = SimpleNamespace(
+        bundle={
+            "subscription": {
+                "format": "sing-box",
+                "content": '{"outbounds":[{"type":"vmess","tag":"current"}]}',
+            },
+            "proxy_selection": {"group": "subscription", "outbound": "auto"},
+            "min_monitor_version": "0.7.0",
+        },
+        save=unexpected_save,
+    )
+    assert await bundles.repair_stale_proxy_selection(
+        desired, SimpleNamespace(bundle_hmac_secret="test-secret")
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_repair_automatic_selection_requires_new_monitor() -> None:
+    saved = False
+
+    async def save() -> None:
+        nonlocal saved
+        saved = True
+
+    desired = SimpleNamespace(
+        bundle={
+            "min_monitor_version": "0.6.0",
+            "subscription": {
+                "format": "sing-box",
+                "content": '{"outbounds":[{"type":"vmess","tag":"current"}]}',
+            },
+            "proxy_selection": {"group": "subscription", "outbound": "auto"},
+        },
+        save=save,
+    )
+    assert await bundles.repair_stale_proxy_selection(
+        desired, SimpleNamespace(bundle_hmac_secret="test-secret")
+    ) is True
+    assert saved is True
+    assert desired.bundle["min_monitor_version"] == "0.7.0"
+    assert desired.bundle["proxy_selection"]["outbound"] == "auto"
+
+
 def test_single_node_subscription_route_is_registered() -> None:
     routes = {
         (route.path, method)
@@ -51,6 +113,7 @@ async def test_single_node_handler_reports_validation_errors_after_route_match()
     [
         ("missing", None),
         ("current", {"group": "subscription", "outbound": "current"}),
+        ("auto", {"group": "subscription", "outbound": "auto"}),
     ],
 )
 async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
@@ -96,6 +159,9 @@ async def test_bundle_drops_proxy_selection_removed_by_subscription_refresh(
     )
 
     assert result.get("proxy_selection") == expected_selection
+    assert result["min_monitor_version"] == (
+        "0.7.0" if selected_outbound == "auto" else "0.6.0"
+    )
 
 
 @pytest.mark.asyncio

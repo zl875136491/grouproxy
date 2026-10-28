@@ -38,7 +38,7 @@ func TestRollbackUsesPortOverrideAndKeepsLastGoodConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	lastGood := map[string]any{
-		"listen":           map[string]any{"http_port": 1080},
+		"listen":           map[string]any{"http_port": 3128},
 		"blacklist": []any{},
 		"shutdown":         false,
 	}
@@ -208,13 +208,13 @@ func TestApplySingboxIngressRemovesRetiredProxyUsers(t *testing.T) {
 		},
 	}
 
-	applySingboxIngress(configValue, 1080, false, "")
+	applySingboxIngress(configValue, 3128, false, "")
 	inbound := configValue["inbounds"].([]any)[0].(map[string]any)
 	if _, exists := inbound["users"]; exists {
 		t.Fatalf("retired proxy users were retained: %#v", inbound["users"])
 	}
-	if inbound["listen_port"] != 1080 {
-		t.Fatalf("listen port = %v, want 1080", inbound["listen_port"])
+	if inbound["listen_port"] != 3128 {
+		t.Fatalf("listen port = %v, want 3128", inbound["listen_port"])
 	}
 }
 
@@ -230,29 +230,29 @@ func TestSanitizeLegacyBundleRemovesAuthAndPinsPort(t *testing.T) {
 	if _, exists := bundleValue["proxy_auth"]; exists {
 		t.Fatal("proxy_auth was retained")
 	}
-	if got := bundleValue["listen"].(map[string]any)["http_port"]; got != 1080 {
-		t.Fatalf("listen port = %v, want 1080", got)
+	if got := bundleValue["listen"].(map[string]any)["http_port"]; got != 3128 {
+		t.Fatalf("listen port = %v, want 3128", got)
 	}
 }
 
 func TestRestoreLastGoodFirewallUsesOverridePort(t *testing.T) {
 	agent := &agent{cfg: config.Config{StateDir: t.TempDir(), FirewallPortOverride: 18080, FirewallMode: "dry-run"}}
 	lastGood := map[string]any{
-		"listen":           map[string]any{"http_port": 1080},
+		"listen":           map[string]any{"http_port": 3128},
 		"blacklist": []any{},
 	}
 	if err := agent.restoreLastGoodFirewallForBundle(lastGood); err != nil {
 		t.Fatalf("render last-good firewall: %v", err)
 	}
-	script := firewall.RenderSourceRules(agent.firewallPort(1080), nil, false)
-	if !strings.Contains(script, "tcp dport 18080") || strings.Contains(script, "tcp dport 1080") {
+	script := firewall.RenderSourceRules(agent.firewallPort(3128), nil, false)
+	if !strings.Contains(script, "tcp dport 18080") || strings.Contains(script, "tcp dport 3128") {
 		t.Fatalf("firewall override was not selected:\n%s", script)
 	}
 }
 
 func TestAllowAllFirewallBaselineUsesOverridePort(t *testing.T) {
 	port, script := allowAllFirewallBaseline(config.Config{
-		ListenPort:           1080,
+		ListenPort:           3128,
 		FirewallPortOverride: 18080,
 	})
 	if port != 18080 {

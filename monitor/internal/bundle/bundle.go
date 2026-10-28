@@ -18,7 +18,7 @@ import (
 
 type Bundle map[string]any
 
-const proxyListenPort = 1080
+const proxyListenPort = 3128
 
 func canonical(value any) ([]byte, error) {
 	// Keep escaping aligned with Python's ensure_ascii=False. encoding/json

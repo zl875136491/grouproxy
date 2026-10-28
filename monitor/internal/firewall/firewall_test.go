@@ -6,7 +6,7 @@ import (
 )
 
 func TestRenderSourceRulesBlocksListedSourcesAndAllowsTheRest(t *testing.T) {
-	script := RenderSourceRules(1080, []SourceRule{
+	script := RenderSourceRules(3128, []SourceRule{
 		{Kind: "network", Pattern: "10.0.0.0/8"},
 		{Kind: "network", Pattern: "2001:db8::/32"},
 	}, false)
@@ -14,13 +14,20 @@ func TestRenderSourceRulesBlocksListedSourcesAndAllowsTheRest(t *testing.T) {
 		t.Fatal("RenderSourceRules must be checkable on a fresh host")
 	}
 	for _, expected := range []string{
-		"ip saddr 10.0.0.0/8 tcp dport 1080 drop",
-		"ip6 saddr 2001:db8::/32 tcp dport 1080 drop",
-		"tcp dport 1080 accept",
+		"ip saddr 10.0.0.0/8 tcp dport 3128 drop",
+		"ip6 saddr 2001:db8::/32 tcp dport 3128 drop",
+		"tcp dport 3128 accept",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("rendered firewall missing %q:\n%s", expected, script)
 		}
+	}
+}
+
+func TestRenderSourceRulesUsesNewProxyListener(t *testing.T) {
+	script := RenderSourceRules(3128, nil, false)
+	if !strings.Contains(script, "tcp dport 3128 accept") || strings.Contains(script, "tcp dport 1080") {
+		t.Fatalf("firewall does not exclusively allow the new proxy listener:\n%s", script)
 	}
 }
 
@@ -32,25 +39,25 @@ func TestRenderShutdownDropsWithoutAllowRules(t *testing.T) {
 }
 
 func TestRenderSourceRulesAllowsUnlistedSources(t *testing.T) {
-	script := RenderSourceRules(1080, nil, false)
+	script := RenderSourceRules(3128, nil, false)
 	if strings.Contains(script, "saddr") || strings.Contains(script, " drop") {
 		t.Fatalf("empty source blacklist unexpectedly blocks traffic:\n%s", script)
 	}
-	if !strings.Contains(script, "tcp dport 1080 accept") {
+	if !strings.Contains(script, "tcp dport 3128 accept") {
 		t.Fatalf("empty source blacklist is not allow-all:\n%s", script)
 	}
 }
 
 func TestRenderSourceRulesDropsOnlyIPNetworks(t *testing.T) {
-	script := RenderSourceRules(1080, []SourceRule{
+	script := RenderSourceRules(3128, []SourceRule{
 		{Kind: "ip", Pattern: "192.0.2.10"},
 		{Kind: "cidr", Pattern: "2001:db8::/32"},
 		{Kind: "domain", Pattern: "blocked.example"},
 	}, false)
 	for _, expected := range []string{
-		"ip saddr 192.0.2.10 tcp dport 1080 drop",
-		"ip6 saddr 2001:db8::/32 tcp dport 1080 drop",
-		"tcp dport 1080 accept",
+		"ip saddr 192.0.2.10 tcp dport 3128 drop",
+		"ip6 saddr 2001:db8::/32 tcp dport 3128 drop",
+		"tcp dport 3128 accept",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("rendered source blacklist missing %q:\n%s", expected, script)

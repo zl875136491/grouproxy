@@ -39,7 +39,7 @@ Grouproxy 是一个区域代理控制平面系统,采用四层架构:FastAPI 后
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │                      数据平面                             │ │
 │  │                                                           │ │
-│  │  客户端 :1080  ┌──────────┐   ┌──────────┐             │ │
+│  │  客户端 :3128  ┌──────────┐   ┌──────────┐             │ │
 │  │   工作站 ─────▶│ sing-box │◀──│  Monitor │◀── 控制平面 │ │
 │  │   (HTTP       │  (代理)   │   │   (Go)   │             │ │
 │  │   CONNECT)    └──────────┘   └──────────┘             │ │
@@ -678,7 +678,7 @@ except (Exception, asyncio.TimeoutError):
 | **控制平面计算签名 Bundle** | ✅ | `backend/app/services/bundles.py` - HMAC 签名 |
 | **Monitor 拥有本地 sing-box 进程** | ✅ | `monitor/internal/runtime/` |
 | **用户流量不经过控制平面** | ✅ | 架构设计 - 直接监听器 |
-| **代理域名 HTTP CONNECT on 1080** | ✅ | `PROXY_LISTEN_PORT = 1080` |
+| **代理域名 HTTP CONNECT on 3128** | ✅ | `PROXY_LISTEN_PORT = 3128` |
 | **仪表板 Next.js on 80** | ✅ | `deploy/grouproxy-dashboard.service` |
 | **HTTP Basic 代理认证有意缺失** | ✅ | 代码中无认证逻辑,仅 CIDR 策略 |
 | **公开下载 Linux/Windows 设置脚本** | ✅ | `deploy/linux-setup-proxy*.sh`, `windows-setup-proxy*.ps1` |

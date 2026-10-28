@@ -62,7 +62,7 @@ Publish and rollback derive stable per-site task keys from `Idempotency-Key`,
 so retries return the existing releases without overwriting rollback history.
 
 Proxy access is not an application credential flow. Desired Bundles always
-declare HTTP CONNECT port `1080`; source access is allow-all by default because
+declare HTTP CONNECT port `3128`; source access is allow-all by default because
 proxy domains resolve through local DNS. Explicit `SourceBlacklist` rules may
 deny a source IP, network, or domain globally or for one site. New bundles emit
 only applicable enabled entries in `source_blacklist`; retired allowlist,

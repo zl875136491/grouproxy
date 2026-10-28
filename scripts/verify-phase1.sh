@@ -223,7 +223,7 @@ jq -e '.http_only == true and .sites == 5 and .nodes >= 2' <<<"$overview" >/dev/
 
 for node in codedev nuc; do
   site_slug="north"
-  firewall_port=1080
+  firewall_port=3128
   if [[ "$node" == "nuc" ]]; then
     site_slug="east"
     firewall_port=18081
@@ -310,7 +310,7 @@ jq -e '.allowed == true and .reason == "allowed"' <<<"$node_elsewhere_preview" >
 
 for node in codedev nuc; do
   state_dir="$TESTENV_DIR/monitor-${node}/state"
-  firewall_port=1080
+  firewall_port=3128
   source_ips="$phase1_shared_ip"
   if [[ "$node" == "codedev" ]]; then
     source_ips="$phase1_node_ip $phase1_shared_ip"
@@ -362,7 +362,7 @@ for source_ip in $domain_materialized_ips; do
   ' "$domain_config" >/dev/null
   nft_family="ip"
   [[ "$source_ip" == *:* ]] && nft_family="ip6"
-  rg -qF "${nft_family} saddr ${source_ip} tcp dport 1080 drop" "$domain_nft"
+  rg -qF "${nft_family} saddr ${source_ip} tcp dport 3128 drop" "$domain_nft"
 done
 
 phase1_dest_domain="ads.example"
@@ -402,10 +402,10 @@ codedev_release="$(jq -r '.release_id' "$TESTENV_DIR/release-codedev.json")"
 cross_node_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BACKEND_URL/agent/v1/ack" -H "Authorization: Bearer $(<"$TESTENV_DIR/nuc.token")" -H 'Content-Type: application/json' -d "$(jq -nc --arg release "$codedev_release" '{node_id:"nuc",release_id:$release,desired_version:999,applied_version:0,bundle_hash:"forged",applied_hash:"",ok:false,sequence:999999}')")"
 [[ "$cross_node_status" == "409" ]]
 
-for port in 1080 18081 19090 19091; do
+for port in 3128 18081 19090 19091; do
   nc -z 127.0.0.1 "$port"
 done
-jq -e '.inbounds[0].listen == "0.0.0.0" and .inbounds[0].listen_port == 1080' \
+jq -e '.inbounds[0].listen == "0.0.0.0" and .inbounds[0].listen_port == 3128' \
   "$TESTENV_DIR/monitor-codedev/state/sing-box.json" >/dev/null
 jq -e '.inbounds[0].listen == "0.0.0.0" and .inbounds[0].listen_port == 18081' \
   "$TESTENV_DIR/monitor-nuc/state/sing-box.json" >/dev/null

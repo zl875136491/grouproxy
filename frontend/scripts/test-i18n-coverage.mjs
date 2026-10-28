@@ -29,7 +29,7 @@ const allowedRawJsxText = new Set([
   "HTTP",
   "HTTP / HTTPS",
   "HTTPS",
-  "HTTP :1080",
+  "HTTP :3128",
   "Set-ExecutionPolicy -Scope Process Bypass",
   "VLESS / VMess",
   "YAML / JSON",

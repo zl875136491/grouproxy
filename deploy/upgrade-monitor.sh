@@ -71,7 +71,7 @@ monitor_backend_url="$(yaml_value backend_url)"
   die "monitor backend_url must match the public Backend URL or local ${local_backend_url}"
 [[ "$(yaml_value hmac_secret)" == "$bundle_secret" ]] || \
   die "monitor hmac_secret does not match GROUPROXY_BUNDLE_HMAC_SECRET"
-[[ "$(yaml_value listen_port)" == "1080" ]] || die "monitor listen_port must be 1080"
+[[ "$(yaml_value listen_port)" == "3128" ]] || die "monitor listen_port must be 3128"
 
 verify_artifact() {
   (cd "$SOURCE_DIR/monitor" && sha256sum -c dist/SHA256SUMS)

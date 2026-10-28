@@ -174,8 +174,8 @@ export default function AccessPage() {
   const windowsScript = useQuery({ queryKey: ["windows-setup-script"], queryFn: getWindowsSetupScript, staleTime: 60_000 });
 
   const config = accessConfig.data;
-  const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:1080";
-  const linuxQuickCommand = config ? `export HTTP_PROXY=${shellQuote(endpoint)}\nexport HTTPS_PROXY="$HTTP_PROXY"\nexport NO_PROXY="localhost,127.0.0.1,::1"` : "";
+  const endpoint = config ? `http://${config.fqdn}:${config.port}` : "http://proxy.example.com:3128";
+  const linuxQuickCommand = config ? `export http_proxy=${shellQuote(endpoint)}\nexport https_proxy="$http_proxy"\nexport HTTP_PROXY="$http_proxy"\nexport HTTPS_PROXY="$https_proxy"\nexport no_proxy="localhost,127.0.0.1,::1"\nexport NO_PROXY="$no_proxy"` : "";
   const windowsQuickCommand = config ? `$settings = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"\nSet-ItemProperty -Path $settings -Name ProxyServer -Value "${config.fqdn}:${config.port}"\nSet-ItemProperty -Path $settings -Name ProxyEnable -Value 1` : "";
   const windowsValidationCommand = config ? `$ProxyUrl = \"${endpoint}\"\nTest-NetConnection -ComputerName \"${config.fqdn}\" -Port ${config.port}\nInvoke-RestMethod -Uri \"https://ipinfo.io/ip\" -Proxy $ProxyUrl` : "";
   const linuxValidationCommand = config ? `proxy=${shellQuote(endpoint)}\ncurl --connect-timeout 5 --fail --silent --show-error --proxy \"$proxy\" https://ipinfo.io/ip` : "";
